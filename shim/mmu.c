@@ -15,9 +15,9 @@
 #include "mmu.h"
 
 #define PG_SHIFT	14
-#define PG_SIZE		(1UL << PG_SHIFT)		/* 16K */
+#define PG_SIZE		(1ULL << PG_SHIFT)		/* 16K */
 #define BLK_SHIFT	25
-#define BLK_SIZE	(1UL << BLK_SHIFT)		/* 32MB level-2 block */
+#define BLK_SIZE	(1ULL << BLK_SHIFT)		/* 32MB level-2 block */
 #define NENT		2048
 
 #define ATTR_DEV	0	/* MAIR attr0 = 0x00 Device-nGnRnE */
@@ -72,7 +72,7 @@ static void zero_table(uint64_t *t)
 		t[i] = 0;
 }
 
-int mmu_enable(struct mmu_info *info)
+int mmu_enable(struct mmu_info *info, uint64_t fb_phys)
 {
 	uintptr_t img_lo = (uintptr_t)_head & ~(PG_SIZE - 1);
 	uintptr_t img_hi = ((uintptr_t)_end + PG_SIZE - 1) & ~(PG_SIZE - 1);
@@ -88,9 +88,9 @@ int mmu_enable(struct mmu_info *info)
 
 	/* L2: Device everywhere RAM or MMIO can be (first 8GB), rest unmapped */
 	zero_table(l2);
-	for (uint64_t i = 0; i < (8UL << 30) >> BLK_SHIFT; i++)
+	for (uint64_t i = 0; i < (8ULL << 30) >> BLK_SHIFT; i++)
 		l2[i] = (i << BLK_SHIFT) | DEV_FLAGS | D_BLOCK;
-	l2[FB_PHYS >> BLK_SHIFT] = (FB_PHYS & ~(BLK_SIZE - 1)) | NC_FLAGS | D_BLOCK;
+	l2[fb_phys >> BLK_SHIFT] = (fb_phys & ~(BLK_SIZE - 1)) | NC_FLAGS | D_BLOCK;
 
 	/* L3 for each block that holds part of the image */
 	for (uint64_t blk = img_lo >> BLK_SHIFT; blk <= (img_hi - 1) >> BLK_SHIFT; blk++) {

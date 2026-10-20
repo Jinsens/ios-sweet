@@ -1,6 +1,8 @@
 /*
- * sweet boot shim entry: arm64 Linux Image header so Qualcomm ABL treats
- * us like a kernel. ABL enters at EL1, MMU/D-cache off, x0 = DTB pointer.
+ * Boot shim entry: an arm64 Linux Image header so the bootloader treats us
+ * like a kernel. Qualcomm ABL enters at EL1, MediaTek LK at EL1 or EL2; both
+ * with the MMU and caches off and x0 = live device tree. EL2 is dropped to
+ * EL1 before any C code runs, so everything below assumes EL1.
  */
 	.section .text.head, "ax"
 	.globl _head
@@ -20,8 +22,64 @@ _head:
 	.globl _start
 _start:
 	msr	daifset, #0xf
-	mov	x19, x0			/* DTB pointer from ABL */
+	mov	x19, x0			/* DTB pointer from the bootloader */
+	mrs	x1, CurrentEL
+	and	x1, x1, #0xc
+	cmp	x1, #0x8
+	b.eq	el2_setup
+	b	el1_entry
+
+/*
+ * Entered at EL2 (MediaTek LK). Hand EL1 everything it needs and drop down:
+ * the physical counter and timer must not trap, HCR_EL2.RW selects AArch64
+ * at EL1, and stage-2 translation stays off so our physical accesses work.
+ */
+el2_setup:
+	adr	x1, vectors		/* own vectors: LK's EL2 table is gone */
+	msr	vbar_el2, x1
+	isb
+	mov	x1, #3			/* CNTHCTL_EL2: EL1PCTEN | EL1PCEN */
+	msr	cnthctl_el2, x1
+	msr	cntvoff_el2, xzr
+	mov	x1, #0x33ff		/* CPTR_EL2: no FP/SIMD trap */
+	msr	cptr_el2, x1
+	msr	mdcr_el2, xzr
+	mov	x1, #(1 << 31)		/* HCR_EL2.RW = 1, VM = 0 */
+	msr	hcr_el2, x1
+	isb
+	mrs	x1, sctlr_el2
+	bic	x1, x1, #1		/* SCTLR_EL2.M = 0 */
+	msr	sctlr_el2, x1
+	isb
+	adr	x1, el1_entry
+	msr	elr_el2, x1
+	mov	x1, #0x3c5		/* EL1h, DAIF masked */
+	msr	spsr_el2, x1
+	eret
+
+el1_entry:
 	msr	spsel, #1
+	/*
+	 * Some bootloaders jump with their own identity map still on. The shim
+	 * expects Device memory until it installs its tables, so turn the MMU
+	 * (and caches) off first.
+	 */
+	mrs	x1, sctlr_el1
+	tbz	x1, #0, 5f
+	dsb	sy
+	ic	iallu
+	tlbi	vmalle1
+	dsb	nsh
+	isb
+	bic	x1, x1, #1		/* M */
+	bic	x1, x1, #4		/* C */
+	bic	x1, x1, #(1 << 12)	/* I */
+	msr	sctlr_el1, x1
+	isb
+	ic	iallu
+	dsb	sy
+	isb
+5:
 	adr	x1, _stack_top
 	mov	sp, x1
 	adr	x1, vectors

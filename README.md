@@ -142,6 +142,24 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 
 `tools/qemu-sweet.py` boots the same kernel on QEMU `virt` with a test RAM-disk root. It is useful for kernel-only changes; see `NOTES.md`.
 
+## Second board: Redmi K50 Pro (matisse, MT6983)
+
+The shim is board-generic: `shim/board.c` reads the framebuffer, GIC, timer
+PPIs, UFS base, RAM and the bootloader's DRAM log buffers out of the **live
+device tree**, so the same source boots Qualcomm ABL (sweet) and MediaTek LK
+(matisse). `tools/mkbootimg.py` packs header v2 or v4 from a stock template,
+and `shim/build.sh` builds with clang + lld when no aarch64 cross toolchain is
+installed.
+
+On matisse the MediaTek bootloader has no `fastboot boot`, so every test is a
+flash of `boot_a` (recovery lives in `vendor_boot` and is unaffected). The
+shim runs — a stub kernel that only issues `PSCI_SYSTEM_RESET` reboots the
+phone instantly, which proves LK jumps to our code — but nothing is visible
+yet: the panel is command-mode DSI, LK stops pushing frames after its splash,
+and the MTK UFS host does not accept our transfer-list takeover. The current
+work is finding a log channel that survives a warm reset; `NOTES.md` has the
+measurements, the failed attempts and the next experiment.
+
 ## Repository layout
 
 | Path | What |
@@ -157,6 +175,9 @@ The log contains crash reports with backtraces (`CRASH name ...`), IOKit traces 
 | `tools/sweet-crash.py` | Symbolicate console crash reports |
 | `tools/xnu-cc.py` | Local single-file compile check from a CI log |
 | `tools/qemu-sweet.py` | QEMU test boots with framebuffer text decoding |
+| `tools/mkbootimg.py` | Boot image v2/v4 packer (from a stock template) |
+| `tools/avbtool.py` | AVB footer tool (LineageOS copy, Windows-safe) |
+| `tools/shimlog.py` | Read the shim's console log out of a partition |
 | `tools/adt.py`, `remotezip.py`, `unpack_bootv2.py`, `sparsediff.py` | Helpers |
 | `NOTES.md` | Detailed engineering log: every boot, crash and decision, plus hardware facts |
 

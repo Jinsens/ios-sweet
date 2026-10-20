@@ -1,0 +1,8 @@
+# Shell scripts and Python tools must keep LF: they run on Linux CI and on
+# the phone, where CRLF breaks the shebang and the heredocs.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+*.S    text eol=lf
+*.md   text eol=lf
