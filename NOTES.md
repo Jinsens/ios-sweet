@@ -17,7 +17,8 @@ GPT or calibration writes were performed. This is the preserved known-good
 
 **Completed implementation commits:** `3021f5a` (same-boot entry/FDT/MMU/timer
 probe + logging safety), `8a31ac8` (actual IRQ/EOI + guarded matisse
-ADT/payload), and `6cbbcbe` (XNU Boot_Video early framebuffer mapping).
+ADT/payload), `6cbbcbe` (XNU Boot_Video early framebuffer mapping), and
+`2cf0290` (read-only display snapshot probe, FDT parser fixes and build fix).
 
 **CURRENT MILESTONE 2026-10-21:** working branch
 `codex/matisse-xnu-screen-log`. Patch 0082 removes early Qualcomm framebuffer
