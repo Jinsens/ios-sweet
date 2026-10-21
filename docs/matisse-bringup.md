@@ -139,7 +139,8 @@ The live probe recorded DSI0 `CON_CTRL=0`, `MODE_CTRL=0`, `START=1`,
 `INTSTA=4`, `CMDQ_SIZE=0x8001`, `SIZE_CON=0x0c8001e0`, and OVL0_2L
 `L0_ADDR=0xfcb3f000`, `L0_PITCH=0x1680`, `EN=0x00e00001`. It reached its
 final stage without an exception, but the two mutex output fields were
-`ffffffff`, so mutex state remains unknown. The panel compatible is
+`ffffffff`. The v1 probe used that same bit pattern for FDT/range lookup
+failure, so the old fields are ambiguous and do not establish the mutex state. The panel compatible is
 `l11_38_0a_0a_dsc_cmd,lcm`; its vendor path includes a WQHD DSC command table,
 power rails/reset GPIO, DSI/PHY configuration and the display/GCE pipeline.
 None of that initialization is implemented in XNU yet. The framebuffer
@@ -187,9 +188,37 @@ This test is not a substitute for hardware MMU or screen validation.
   did not prove visible refresh, was stopped, and `boot_a` restored/read-back
   verified. Do not repeat the direct START/EN sequence.
 
-The added `display` entry-probe level is read-only: it resolves DSI/OVL
-register blocks through the live FDT and records register pairs in the stock
-Linux banner. It does not enable clocks, touch DSI/OVL/mutex/GCE registers, or
-prove that CPU framebuffer writes can reach the panel. The final probe image
-builds successfully, but has not been flashed; all seven probe levels now
-cross-compile, and the host suite has 21 passing tests.
+The `display` entry-probe level is read-only: it resolves MMIO windows
+through the live FDT and records register pairs in the stock Linux banner. It
+does not enable clocks or write DSI/OVL/mutex/GCE registers, and it does not
+prove that CPU framebuffer writes can reach the panel. Its v1 mutex fields
+were ambiguous because raw `0xffffffff` and lookup failure used the same
+encoding.
+
+### Read-only display preflight v2 (host-built; not device-tested)
+
+The revised snapshot adds a two-bit status per register pair (0 = compatible
+missing, 1 = reg/range invalid, 2 = both MMIO reads completed; thus a raw
+all-ones read is distinguishable from lookup failure). It captures both
+register windows described by `disp_mutex0` at `0x14001000` and `0x14401000`,
+and snapshots GCE display trigger-loop threads 3 and 5 at the live-FDT GCE
+base: each pair is `CURR_STATUS` and `WAIT_TOKEN`. These are **read-only**
+register reads; there is no trigger, doorbell, token write, DSI start, or clock
+write.
+
+Host decoding of the saved `research/matisse/20261021-live/live.dtb` resolves
+`/disp_mutex@14001000` with those two mutex register windows, and resolves the
+GCE node at `0x1e980000`. This proves the FDT parser can identify the nodes,
+not that either powered hardware block returns meaningful values. The rebuilt
+`shim/out/entryprobe-display-v2.img` is 20,832,256 bytes, SHA256
+`a0d33cfa174920eb8da48c78bb956dc40d6345689a24e38f8700addf2c2d2183`. All
+seven levels cross-compile and the host suite has 21 passing tests. It has not
+been transferred, booted or flashed; fastboot 37.0.0 saw zero visible devices
+in the 2026-10-21 host query, so there is no new hardware measurement.
+
+For source-driven porting, the ignored Xiaomi MT6983 source snapshot records
+a 1440x3200 WQHD panel DSC command table and VDDI/DVDD/VCI/reset sequencing.
+It also distinguishes GCE DSI0 TE hardware event 358 from software
+`STREAM_EOF` token 641. None of those power/PHY/DSC/refresh writes has been
+ported or hardware-validated in XNU. Do not repeat direct `DSI_START`/`DSI_EN`
+toggles; obtain explicit confirmation before any boot-partition write.

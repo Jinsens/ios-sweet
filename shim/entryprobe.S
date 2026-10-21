@@ -74,10 +74,12 @@ probe_start:
 	banner_field ENTRY_FREQ
 	adr	x9, probe_saved
 	ldr	x0, [x9]
+#if ENTRY_LEVEL != 6
 	banner_field ENTRY_DTB
 	adr	x9, probe_saved
 	ldr	x0, [x9, #56]
 	banner_field ENTRY_SCTLR
+#endif
 	mov	x0, #1
 	banner_field ENTRY_STAGE
 

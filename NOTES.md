@@ -5,8 +5,9 @@
 ### ACTIVE UPDATE 2026-10-21 - XNU built; frame-trigger still blocks visible logs
 
 **CURRENT DEVICE STATE:** the user most recently reported the handset is in
-fastboot; this has not been independently re-queried this session. The last
-verified state was OrangeFox recovery with `boot_a` fully restored from
+fastboot. A host query on 2026-10-21 using fastboot 37.0.0 saw zero visible
+devices, so the present USB/device state is not independently confirmed. The
+last verified state was OrangeFox recovery with `boot_a` fully restored from
 `backup/boot_a-stock-trim.img`. Entire 67,108,864-byte partition readback
 `backup/recovery-20261021/boot_a-final-after-all-probes.img` byte-matches
 `backup/boot_a-stock.img`, SHA256
@@ -45,23 +46,38 @@ mapping cases passed. Whole existing 81-patch series applied to Apple
 xnu-8796.141.3; new patch applies and CI built/linked it. These do not prove
 hardware MMU behavior or screen output.
 
-**LATEST HOST MILESTONE 2026-10-21:** fixed the `display` entry-probe build
-regression: IRQ vectors/handler are compiled only for level 5, and level 6's
-read-only display path no longer pulls in timer/IRQ stages. All seven probe
-levels build against the stock v4 template. All 21 Python tests pass;
-`git diff --check` is clean. Rebuilt `shim/out/shim-boot.img` from the CI XNU
-payload and stock template: v4, 17,883,136 bytes, SHA256
+**LATEST HOST MILESTONE 2026-10-21:** the read-only `display` probe now
+separates FDT/register-window lookup status from the raw register values. The
+old `ffffffffffffffff` mutex fields were ambiguous because the same value was
+also used as the lookup-failure sentinel. Host-decoding the saved live DTB
+resolves `/disp_mutex@14001000` with register windows `0x14001000` and
+`0x14401000`; this is a DTB parse result, not proof of live MMIO contents. The
+new snapshot records a two-bit status for each register pair, reads both
+mutex windows, and snapshots GCE display trigger-loop threads 3 and 5
+(CURR_STATUS/WAIT_TOKEN) using their live-FDT base. This remains read-only;
+no display/clock/PHY/GCE writes were added.
+
+All seven entry-probe levels cross-compile against the stock v4 template;
+all 21 Python tests pass and `git diff --check` is clean. The rebuilt v2
+read-only display probe is `shim/out/entryprobe-display-v2.img` (20,832,256 B,
+SHA256 `a0d33cfa174920eb8da48c78bb956dc40d6345689a24e38f8700addf2c2d2183`);
+it has **not** been transferred, booted or flashed. Fastboot reported zero
+visible devices, so no hardware probe result is available for this milestone. The
+append-only log-store host ASan/UBSan test previously passed. Rebuilt
+`shim/out/shim-boot.img` from the CI XNU payload and stock template: v4,
+17,883,136 bytes, SHA256
 `9300e166763b4ba69e85fa17867156f24cfa1d0ec9b1fa961e0515c1efe761cf`.
-The append-only log-store host ASan/UBSan test passes. None of these builds
-has been written to the phone.
+None of these images has been written to the phone.
 
 **DISPLAY BLOCKER, now measured:** read-only entry probe saw DSI0
 CON_CTRL=0 (DSI_EN clear), MODE_CTRL=0 (command mode), START=1,
 INTSTA=4, CMDQ_SIZE=0x8001, SIZE_CON=0x0c8001e0. OVL0_2L reports
 L0_ADDR=`0xfcb3f000`, L0_PITCH=`0x1680` (5760), EN=`0x00e00001`;
 the ordinary OVL0 L0 address was zero. The probe reached stage 15 without an
-exception, but the final mutex fields are `ffffffff` (unresolved), so no
-mutex state is claimed. DSI framebuffer stores alone are not a validated
+exception, but the final mutex fields were `ffffffff`; because the v1 probe
+used that same bit pattern for FDT/range lookup failure, those two fields do
+not establish the actual mutex register values. Do not claim mutex state from
+that snapshot. DSI framebuffer stores alone are not a validated
 panel refresh path.
 
 A one-shot DSI/mutex/start experiment was stopped. The subsequent recovery
@@ -72,8 +88,16 @@ The sequence and timeouts correlate, but causation is not isolated; it did not
 provide verified visible text. Do NOT repeat direct DSI_START/DSI_EN toggles.
 The panel compatible is `l11_38_0a_0a_dsc_cmd,lcm`; the vendor driver has a
 WQHD DSC command table plus rail/reset, DSI/PHY and display-pipeline setup.
-That initialization/refresh path is not ported to XNU. There is no validated
-screen-log path yet.
+That initialization/refresh path is not ported to XNU. The ignored local
+source snapshot `research/matisse/panel-l11-38-0a-0a-dsc-cmd.c` matches the
+live compatible and contains the WQHD 1440x3200 DSC PPS/DCS init table; its
+prepare path sequences VDDI (`vaud18`), DVDD GPIO 193, VCI (`vibr`), then
+reset GPIO 86. The init callback is separate from prepare. The corresponding
+DT/driver/GCE material is in ignored `research/matisse/mt6983.dts`,
+`research/matisse/mtk_dsi.c`, `research/matisse/mtk_drm_crtc.c`, and
+`research/matisse/mt6983-gce.h`; the GCE header distinguishes DSI0 TE event
+358 from software STREAM_EOF token 641. These are source observations, not a
+validated XNU port. There is no validated screen-log path yet.
 
 GitHub CLI is installed in ignored research/host-tools. Upstream is read-only;
 `Jinsens/ios-sweet` fork was created for CI. XNU branch commit has not been

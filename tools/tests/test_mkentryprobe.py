@@ -32,7 +32,25 @@ class ProbeLayoutTests(unittest.TestCase):
                          ('dsi0.CON_CTRL', 'dsi0.MODE_CTRL'))
         self.assertEqual(mkentryprobe.DISPLAY_FIELDS['far'],
                          ('ovl0.L0_ADDR', 'ovl0.L0_PITCH'))
+        self.assertIn('GCE thread 3 WAIT_TOKEN',
+                      mkentryprobe.DISPLAY_FIELDS['gce3'])
+        self.assertEqual(mkentryprobe.DISPLAY_STATUS_SLOTS[5],
+                         'GCE thread 5 CURR_STATUS/WAIT_TOKEN')
         self.assertIn('mutex0.MOD0', mkentryprobe.DISPLAY_FIELDS['fb'])
+        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['mutex1'],
+                         ('mutex0.reg1.EN', 'mutex0.reg1.SOF'))
+        self.assertEqual(len(mkentryprobe.DISPLAY_STATUS_SLOTS), 14)
+        display_record, display_offsets = mkentryprobe.banner_record('display')
+        self.assertLessEqual(len(display_record), 407)
+        self.assertIn('gce3', display_offsets)
+        self.assertNotIn('dtb', display_offsets)
+        self.assertEqual(mkentryprobe.DISPLAY_STATUS_SLOTS[12],
+                         'mutex0.reg1.EN/SOF')
+        packed = (2 << (2 * 10)) | (2 << (2 * 12))
+        decoded = mkentryprobe.decode_display_status(packed)
+        self.assertEqual(decoded[10], 2)
+        self.assertEqual(decoded[12], 2)
+        self.assertEqual(decoded[0], 0)
         self.assertNotIn('display-kick', mkentryprobe.LEVELS)
 
     def test_record_offsets(self):
