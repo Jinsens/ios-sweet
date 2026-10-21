@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SRCS="start.S shim.c console.c mmu.c fdt.c board.c loader.c ufs.c str.c logstore.c"
+SRCS="start.S shim.c console.c display.c mmu.c fdt.c board.c loader.c ufs.c str.c logstore.c"
 PAYLOAD=""
 TEMPLATE=""
 DTB=""

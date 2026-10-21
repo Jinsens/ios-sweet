@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "board.h"
 #include "console.h"
+#include "display.h"
 #include "fdt.h"
 #include "mmu.h"
 #include "loader.h"
@@ -173,6 +174,7 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	con_hex("X30", regs[29]);	/* stashed lr is just above the frame */
 	log_flush();
 	con_str("HALT", "power+vol-down for fastboot");
+	display_refresh();
 	for (;;)
 		__asm__ volatile("wfe");
 }
@@ -362,6 +364,7 @@ static void fb_paint_all(void)
 		con_redraw(RED);
 	}
 	con_target((volatile uint32_t *)brd.fb_base);
+	display_refresh();
 }
 
 /*
@@ -509,11 +512,17 @@ void shim_main(uint64_t dtb)
 	print_board(dtb);
 	con_skip();
 	log_flush();
+	/* LK leaves the command-mode panel initialized; push what we drew so
+	 * the next visible change is XNU's console rather than a dark screen. */
+	display_probe(dtb, brd.fb_base, brd.fb_stride);
+	display_refresh();
 	mark(1, "console");
 #ifdef SHIM_LOGSTORE_MARK
 	logstore_mark("console", brd.fb_base, brd.fb_size);
 	logstore_mark("loader", dtb, 0);
 #endif
+	con_str("XNU", display_active() ? "loading payload" : "panel unavailable");
+	display_refresh();
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
