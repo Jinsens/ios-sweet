@@ -14,6 +14,7 @@
 #include "mmu.h"
 #include "loader.h"
 #include "ufs.h"
+#include "logstore.h"
 
 #define GICR_TYPER		0x08
 #define GICR_WAKER		0x14
@@ -50,39 +51,21 @@ extern char secondary_entry[];
 
 static void log_flush(void);
 
-/*
- * Copy the console text into the bootloader's DRAM log buffers. These are
- * the only channels that survive a warm reset without a working UFS or
- * panel: `fastboot oem lpmsg` dumps ram_console, `oem lkmsg` dumps
- * log_store. Both are written as plain text behind a short marker.
- */
+/* Append only new console text. /chosen/log_store is a structured header,
+ * NOT a text buffer; ram_console has another format that we do not write. */
 static void dram_log(void)
 {
+#ifdef SHIM_LOGSTORE_MARK
+	/* Experimental: matisse entry+FDT probe boots, but adding direct
+	 * PL/LK access prevents recovery from starting. Never enable by default. */
+	static uint32_t copied;
 	uint32_t len;
 	const char *txt = con_text(&len);
-	uint32_t n = len < 16000 ? len : 16000;
-
-	if (brd.log_store && brd.log_store_size > n + 64) {
-		volatile uint8_t *d = (volatile uint8_t *)brd.log_store;
-		static const char tag[] = "SWEET-SHIM-LOG\n";
-		uint32_t i = 0;
-		for (; tag[i]; i++)
-			d[16 + i] = (uint8_t)tag[i];
-		for (i = 0; i < n; i++)
-			d[16 + 32 + i] = (uint8_t)txt[i];
-		d[16 + 32 + n] = 0;
-	}
-	if (brd.ram_console && brd.ram_console_size > n + 64) {
-		volatile uint8_t *d = (volatile uint8_t *)brd.ram_console;
-		static const char tag[] = "SWEET-SHIM-LOG\n";
-		uint32_t i = 0;
-		for (; tag[i]; i++)
-			d[16 + i] = (uint8_t)tag[i];
-		for (i = 0; i < n; i++)
-			d[16 + 32 + i] = (uint8_t)txt[i];
-		d[16 + 32 + n] = 0;
-	}
-	__asm__ volatile("dsb sy" ::: "memory");
+	if (len < copied)
+		copied = 0;
+	if (len > copied && logstore_write(txt + copied, len - copied))
+		copied = len;
+#endif
 }
 
 /* One-block progress marker in the log partition: block index = stage. */
@@ -351,7 +334,7 @@ static void test_gic(void)
 /*
  * Persist the console text so far. Called after every stage and from the
  * panic handler: the panel is often dark on MediaTek (LK turns the DSI link
- * off before jumping), so the partition write is the only channel.
+ * off before jumping). All persistent/experimental log channels are opt-in.
  */
 static void log_flush(void)
 {
@@ -388,6 +371,9 @@ static void fb_paint_all(void)
  */
 static int boot_recovery(void)
 {
+#ifndef SHIM_STORAGE_LOG
+	return -1; /* misc is persistent state; no implicit writes during bring-up */
+#else
 	static uint8_t bcb[4096] __attribute__((aligned(4096)));
 	int rc = ufs_part_read("misc", 0, bcb, 1);
 
@@ -403,6 +389,7 @@ static int boot_recovery(void)
 	for (int i = 0; cmd[i]; i++)
 		bcb[i] = (uint8_t)cmd[i];
 	return ufs_part_write("misc", 0, bcb, 1);
+#endif
 }
 
 /* Board facts, printed on every boot. */
@@ -429,6 +416,9 @@ void shim_main(uint64_t dtb)
 	struct mmu_info mi;
 
 #ifdef BRINGUP_MARK
+#ifndef SHIM_STORAGE_LOG
+#error "BRINGUP_MARK writes partitions; explicitly enable SHIM_STORAGE_LOG"
+#endif
 	/* Bisection build: no FDT, no console, no MMU - just prove the UFS
 	 * path works by writing one marker block, then reset. */
 	brd.name = "matisse";
@@ -451,6 +441,9 @@ void shim_main(uint64_t dtb)
 		__asm__ volatile("wfe");
 #endif
 
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("entry", dtb, rsr("cntfrq_el0"));
+#endif
 	stage = "board";
 	if (!board_probe(dtb)) {
 		/* No usable tree: fall back to the compile-time defaults. */
@@ -473,9 +466,12 @@ void shim_main(uint64_t dtb)
 	}
 	/* First act after reading the tree: leave evidence that we ran at all.
 	 * The panel is command-mode DSI, so framebuffer writes are invisible
-	 * until something pushes a frame; the partition always works. */
+	 * until something pushes a frame. Partition logging is opt-in only. */
 	mark(0, "entry");
 	dram_log();
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("board", brd.log_store, brd.fb_base);
+#endif
 
 	con_fb = brd.fb_base ? (volatile uint32_t *)brd.fb_base : 0;
 	con_w = brd.fb_w;
@@ -483,6 +479,9 @@ void shim_main(uint64_t dtb)
 	con_stride = brd.fb_stride;
 	con_bgr = brd.fb_bgr;
 	con_text_reset();
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("con-init", (uint64_t)(uintptr_t)con_fb, brd.fb_stride);
+#endif
 
 	stage = "loader";
 #ifdef MINIMAL_PROBE
@@ -511,15 +510,28 @@ void shim_main(uint64_t dtb)
 	con_skip();
 	log_flush();
 	mark(1, "console");
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("console", brd.fb_base, brd.fb_size);
+	logstore_mark("loader", dtb, 0);
+#endif
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("nopayload", (uint64_t)(uintptr_t)why, 0);
+#endif
 
 	/* No payload: probe the hardware and leave a log behind. */
 	stage = "mmu enable";
 	log_flush();
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("mmu-pre", (uint64_t)(uintptr_t)shim_main, brd.fb_base);
+#endif
 	int rc = mmu_enable(&mi, brd.fb_base);
 	mark(2, "mmu");
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("mmu", (uint32_t)rc, mi.n_l3);
+#endif
 	con_hex2("MMU", "rc=", rc, "l3=", mi.n_l3);
 	con_hex("TTBR0", mi.ttbr);
 	con_hex("SCTLR0", mi.sctlr_before);
@@ -531,23 +543,41 @@ void shim_main(uint64_t dtb)
 
 	stage = "psci";
 	log_flush();
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("psci-pre", 0, 0);
+#endif
 	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
 	con_hex2("PSCI", "cpu_on=", smc(PSCI_FEATURES, PSCI_CPU_ON, 0, 0),
 		 "reset=", smc(PSCI_FEATURES, PSCI_SYSTEM_RESET, 0, 0));
 	con_skip();
 	mark(3, "psci");
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("psci", 0, 0);
+#endif
 
 	log_flush();
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("gic-pre", brd.gicd, brd.gicr);
+#endif
 	test_gic();
 	con_skip();
 	mark(4, "gic");
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("gic", irq_count, irq_other);
+#endif
 	log_flush();
 
 	stage = "ufs";
 	log_flush();
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("ufs-pre", brd.ufs_base, 0);
+#endif
 	test_ufs();
 	con_skip();
 	mark(5, "ufs");
+#ifdef SHIM_LOGSTORE_MARK
+	logstore_mark("ufs", 0, 0);
+#endif
 
 	/* Persist the console text so a dark panel is still diagnosable. */
 	stage = "log";

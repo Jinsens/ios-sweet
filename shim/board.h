@@ -29,9 +29,9 @@ struct board {
 	/* Where the payload goes (kernel-managed RAM handed to XNU) */
 	uint64_t kernel_base, kernel_size;
 
-	/* DRAM log channels the bootloader leaves in /chosen. LK dumps them
-	 * with `fastboot oem lpmsg` (ram_console) and `oem lkmsg` (log_store),
-	 * so a boot that never reaches the panel is still readable. */
+	/* Structured DRAM log headers from /chosen, not raw text buffers.
+	 * log_store is read via /proc/pl_lk in the same Linux boot;
+	 * matisse oem lkmsg reads a different kernel/UART log. */
 	uint64_t ram_console, ram_console_size;
 	uint64_t log_store, log_store_size;
 

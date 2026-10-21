@@ -2,6 +2,137 @@
 
 ## >>> MATISSE PORT (Redmi K50 Pro, MT6983) - handoff 2026-10-21 <<<
 
+### ACTIVE UPDATE 2026-10-21 - same-boot entry probe works on hardware
+
+This section supersedes the conflicting device-state snapshots below.
+
+- User explicitly requested direct porting and authorized restoring boot_a
+  and entering recovery. Restored `backup/boot_a-stock-trim.img` via
+  `tools/fbraw.py`; download/flash/reboot-recovery each returned OKAY.
+  Product matisse, active slot a, unlocked yes. OrangeFox ADB is root.
+- Full 64 MiB boot_a readback **byte-matched** `backup/boot_a-stock.img`,
+  SHA256 `7a6a462d5e8858c6f7ecd77655363dd84964d44ea6e7c239e961632996a96e94`.
+  The 20,873,216-byte trimmed backup is an exact prefix (SHA256
+  `fe6e8fbf321ea542eb060efcda27b70ae96065e82cc871d4c71082b7268c220d`).
+  This is the user's preserved boot backup, previously noted as Magisk-patched,
+  not a newly authenticated pristine vendor image.
+- Fresh local-only artifacts: `research/matisse/20261021-live/` has live.dtb
+  (410,235 bytes), dmesg-stock.txt, pl_lk-stock.bin, storage-iomem.txt.
+  `backup/recovery-20261021/manifest.json` records full read-only backups
+  of boot_a, vendor_boot_a, dtbo_a, lk_a/b, vbmeta_a/b, misc, persist,
+  nvcfg/nvdata/nvram, protect1/2, seccfg. No calibration/bootloader changes.
+- **Hardware PASS:** new `tools/mkentryprobe.py` + `shim/entryprobe.S`
+  execute a position-independent prefix, patch the bundled Linux kernel's
+  banner with the actual entry registers, then branch to that original
+  kernel within the SAME boot. No reset-persistence assumption and no
+  display/UFS driver is needed. Entry-only image SHA256
+  `e74ab1cc98e53483dade608eeca4fa261d52a11228aeb59db2251d0e3658196b`,
+  20,828,160 bytes, full flashed prefix readback MATCH, OrangeFox boots.
+  dmesg contains SWEET-ENTRY: EL1, MIDR 0x410fd462, MPIDR 0x81000000,
+  CNTFRQ 0xc65d40 (13 MHz), x0/DTB 0x47c80000,
+  SCTLR_EL1 0x30d00980 (M=0, C=0), stage=1, fault=0.
+  Exact log: entryprobe-entry-dmesg.txt in the live artifact directory.
+- Host FDT parser passed on this freshly dumped tree: fb 0xfcb3f000,
+  1440x3200/stride5760; GICD 0xc400000/GICR 0xc440000;
+  virtual timer INTID27; UFS 0x112b0000; DRAM 0x40000000+8GiB.
+- **Code defect found (inspection, not yet blamed as the hardware hang):**
+  old dram_log() copied text INTO the 256-byte log_store header, including
+  its packed pointer and signature. Replaced with bounded append-only
+  logstore_write(); never write ram_console without its format. Removed
+  guessed physical-address fallback. Partition logging defaults off;
+  SHIM_STORAGE_LOG is required for destructive UFS log experiments.
+  Host ASan+UBSan append/bounds/overflow/long-tag checks PASS.
+- Second probe result: **FAIL to return to recovery**, user confirmed. The
+  logstore-level image (SHA256 e832e53a..., full prefix readback matched)
+  combines board_probe + logstore_write, so neither individual stage is
+  hardware-proven and the failure is NOT yet attributed to either one.
+  User entered fastboot; restored the preserved boot_a backup again and
+  reboot-recovery returned OKAY. OrangeFox is back. Full 64 MiB readback
+  (`boot_a-restored-final.img`) again exactly matches the backup SHA256
+  7a6a462d... . **Current phone state is restored stock-backup boot_a,
+  in recovery.** No userdata/vendor_boot/LK/PMIC/calibration writes.
+- Local Unicorn ARM64 execution of both packed probes, with the fresh real
+  DTB and synthetic valid log_store, reaches bundled Linux successfully.
+  logstore-level runs 2,227,015 instructions with stage=3, valid discovered
+  GICD/INTID27/fb, and correct appended text. This DOES NOT emulate MMU-off
+  Device-memory alignment, SoC access controls or watchdog timing.
+  Next separate board-only from logstore access; do not assume the generic
+  simulation proves real hardware. Preserve the recovery fallback.
+- **Hardware PASS, board-only isolation:** entryprobe-board.img SHA256
+  e31c96df3fd09d82f0f692b52f6bbd365325bd9f5217c2bab742d28a1e4cb0c1,
+  20,832,256 bytes, full prefix readback MATCH, OrangeFox returns. dmesg
+  stage=2/fault=0, GICD=0xc400000, vtimer=27, fb=0xfcb3f000.
+  Evidence: entryprobe-board-dmesg.txt. The added logstore-access path is
+  now the isolated failing delta, NOT a general failure of board_probe.
+  Root cause within that path is still unknown (do not claim MMIO lock as
+  established). Normal shim dram_log is now compiled out unless explicitly
+  enabled with SHIM_LOGSTORE_MARK, and no storage logging defaults on.
+  Current phone temporarily runs the board-only probe in boot_a/recovery.
+- **Hardware PASS, 16 KiB MMU:** entryprobe-mmu.img SHA256
+  cabdfa644bfaa3b0514fad5e2fae44469e8e2e56c9a38e21c8808c2f7d14bbb2,
+  stage=5/fault=0, mmu_enable rc=0; successful AT S1E1R result
+  PAR_EL1=0xff00000040001b80, enabled SCTLR_EL1=0x30d01985.
+  The wrapper cleans its cache lines, restores MMU-off state and returns
+  to the original Linux/recovery. This exercises the actual shim/mmu.c.
+- **Hardware PASS, virtual timer -> PPI27 pending:** entryprobe-timer.img
+  SHA256 c8d5c402126d9a699cca197b00cb5559d0cae0563b7d466c62f949db834d5a2b,
+  stage=7/fault=0; GICD_CTLR=0x12, boot-core redistributor=0xc440000;
+  flags=0x5180b: counter elapsed 0x518=1304 ticks (~100us at 13MHz),
+  timer ISTATUS asserted, PPI27 pending changed 0->1. DAIF stayed masked;
+  **IRQ vector delivery/EOI is not tested by this stage.** No GIC config
+  changed; timer control/compare restored, recovery returned normally.
+  Evidence: entryprobe-mmu-dmesg.txt and entryprobe-timer-dmesg.txt.
+  Current device temporarily has the timer probe in boot_a, in recovery.
+- Local checks: 7 mkentryprobe layout/validation tests PASS; host FDT reader
+  on live DTB PASS under ASan/UBSan; logstore append/invalid/full/overflow/
+  long-tag tests PASS under ASan/UBSan; complete shim cross-build PASS
+  (one pre-existing unused reset() warning); no C ABS64 relocations.
+  No XNU patch changed and no CI kernel build was started this milestone.
+- Local build toolchain found in installed Android NDK:
+  `/Users/xiaohuasheng/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin`.
+  ADB/fastboot need unsandboxed USB access. Plain `adb wait-for-device`
+  can remain waiting despite recovery enumerating: use `adb devices -l`
+  then direct `adb exec-out` once recovery appears.
+
+
+### UPDATE 2026-10-21 late - log channel found, phone needs stock boot restored
+
+**Device state right now:** `boot_a` contains the instrumented shim
+(`shim/out/shim-boot.img`, log_store marker build, `EXTRA_CFLAGS=-DSHIM_LOGSTORE_MARK`).
+The phone bootloops on it and does not enter recovery from the `misc`
+`boot-recovery` BCB; it is currently not enumerating on USB. Restore with
+`fastboot flash boot_a backup/boot_a-stock-trim.img` after Power+VolDown.
+The stock image is intact; nothing else was written.
+
+**Why the marker test is still unproven:** the shim writes a valid append into
+the **pl_lk log_store buffer** (`dram_buf_header.buf_addr` = 0x7ffbf000 from
+the 256-byte header at `/chosen/log_store` = 0x00df1100). `fastboot oem lkmsg`
+dumps a **different** 256 KiB buffer (the kernel/UART `klog`, all Android
+`dmesg` text), so absence of `SWEET-SHIM` there proves nothing. `/proc/pl_lk`
+in recovery is the right reader.
+
+**Verified log_store layout** (recovery `/proc/pl_lk`, live header):
+- sram header sig 0xabcd1234 at 0x00df1100; packed DRAM buffer address at +0x14,
+  size at +0x1c; `pl_lk_log` at +0x40: sig 0xcdab3412, buff_size 0x40000,
+  off_pl **0x400**, sz_pl, off_lk = 0x400 + sz_pl, sz_lk.
+- The PL/LK text is clean. `oem lpmsg` returns 0x10000 bytes; `oem lkmsg`
+  returns 0x40000 bytes of the kernel log, not the PL/LK sections.
+- `shim/logstore.c` appends `SWEET-SHIM <tag> a=... b=...\n` at
+  `buf + off_lk + sz_lk` and bumps sz_lk, guarded by the sig and bounds.
+
+**Fastboot on macOS:** platform-tools 34.0.5 and 37.0.0 both fail with
+`could not clear input pipe ... usb_read failed e00002e8` after sending a
+command to this LK, even for `reboot`; `fastboot devices` still works.
+`tools/fbraw.py` (pyusb + libusb) speaks the protocol directly and **works**:
+`oem lkmsg` returned exactly 0x40000 bytes and `reboot-recovery` returned
+OKAY. Use it for all local fastboot operations.
+
+**BCB caveat:** writing `boot-recovery` into misc block 0 from recovery did
+not make LK boot recovery after the shim reset; the phone kept booting
+`boot_a`. Do not rely on that loop for log retrieval until the MTK boot-mode
+selection is understood.
+
+
 **Goal:** run the same iOS bring-up on the user's Redmi K50 Pro (`matisse`,
 MT6983 / Dimensity 9000, 8 GB, 1440x3200, UFS 3.1). Everything below was
 measured on the device or read out of its own firmware, not from datasheets.

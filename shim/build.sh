@@ -9,10 +9,11 @@
 # --v2 / --v4    force the header version (default: the template's, else v4)
 #
 # Works with an aarch64-linux-gnu cross toolchain or with clang + lld.
-set -euo pipefail
+set -eu
+set -o pipefail
 cd "$(dirname "$0")"
 
-SRCS="start.S shim.c console.c mmu.c fdt.c board.c loader.c ufs.c str.c"
+SRCS="start.S shim.c console.c mmu.c fdt.c board.c loader.c ufs.c str.c logstore.c"
 PAYLOAD=""
 TEMPLATE=""
 DTB=""
@@ -62,7 +63,9 @@ $CC $CFLAGS -static -T shim.ld $LDFLAGS $OBJS -o out/shim.elf
 $OBJCOPY -O binary out/shim.elf out/Image
 # The bootloader copies the file; pad to image_size so .bss/stacks exist as
 # zeroed bytes.
-size=$($NM out/shim.elf | awk '$3=="_end"{print strtonum("0x"$1)}')
+end=$($NM out/shim.elf | awk '$3=="_end"{print $1}')
+[ -n "$end" ] || { echo "error: _end not found" >&2; exit 1; }
+size=$((0x$end))
 truncate -s "$size" out/Image
 
 # Ramdisk: an xnu payload if given, else a tiny newc cpio (some bootloaders

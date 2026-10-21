@@ -105,9 +105,12 @@ static void matisse_defaults(void)
 	/* Above every MediaTek carve-out, below the 0x22e000000 block */
 	brd.kernel_base = 0x100000000ULL;
 	brd.kernel_size = 0x12e000000ULL;
-	/* MTK keeps kernel oops dumps in "oops" (16 MiB); nothing reads it at
-	 * boot, and it survives a boot_a reflash, so it is the log channel. */
+	/* Raw partition logging is destructive and requires explicit opt-in. */
+#ifdef SHIM_STORAGE_LOG
 	brd.log_part = "oops";
+#else
+	brd.log_part = 0;
+#endif
 	brd.log_off_blocks = 0;
 	brd.log_blocks = 8;
 }
