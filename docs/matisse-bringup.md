@@ -107,7 +107,7 @@ clang -O1 -g -fsanitize=address,undefined -DLOGSTORE_HOST_TEST -Ishim \
 shim/out/host_logstore
 ```
 
-## XNU payload profile (not yet boot-tested)
+## XNU payload profile (CI-built; not yet hardware-booted)
 
 `tools/mkadt.py OUT --board matisse` now supplies the measured single-core
 A510 / 13 MHz / INTID27 profile, correct GIC region sizes, framebuffer
@@ -122,12 +122,17 @@ Conflicting arguments or truncation are rejected; sweet/QEMU behavior is
 unchanged. These flags are a guard, **not** proof that the existing XNU is
 safe to boot on MediaTek.
 
-**Next kernel blocker:** XNU patches 0010/0012 still directly write/map
-0x9c000000 and assume 1080x2400 before normal ADT framebuffer discovery.
-Those must be replaced with boot_args Video-derived mappings/geometry or
-an explicitly headless path **before** flashing an XNU payload. Actual
-command-mode DSI refresh remains unimplemented. No XNU build/boot or iOS
-launch is claimed by the successful shim probes.
+Patch 0082 now replaces that early path with validated boot_args.Video
+geometry and a final-TTBR1 mapping. CI run 39595694178 built the DEVELOPMENT
+SWEET Mach-O as plain arm64. A `matisse-xnu.payload` and v4 shim boot image
+were packaged locally, but neither has been booted on the phone.
+
+**Remaining blocker: actual MT6983 command-mode DSC refresh.** The LK-entry
+read-only probe found DSI0 command mode but DSI_EN clear; OVL has the real
+scanout address. A one-shot direct DSI/mutex trigger was unsafe: recovery
+later logged repeated GCE event-641 timeouts. Do not use direct DSI_START/
+DSI_EN toggles. Port the proper MT6983 GCE/TE/DSI trigger and test it behind
+an explicitly confirmed temporary boot_a write before claiming visible logs.
 
 ### XNU Boot_Video console (patch 0082, 2026-10-21)
 
@@ -149,3 +154,31 @@ python3 tools/check-xnu-video.py --tree BUILDTREE --log CI.log \
 ```
 
 This test is not a substitute for hardware MMU or screen validation.
+
+### 2026-10-21 CI and LK display snapshot
+
+- GitHub Actions run `39595694178` succeeded for head
+  `bfd7eb60fe0602f85bfc81bc33a18b4f23c03505`.
+- `kernel.development.sweet`: 17,206,200 B, SHA256
+  `911db7b3c3616face11ccc730869e12ccf0c72ba5efaee8f3eedd01af7cfc367`,
+  Mach-O `arm64` (not arm64e).
+- `matisse-xnu.payload`: 16,605,200 B; v4 shim test image:
+  `shim/out/shim-boot.img`, 17,883,136 B. The payload has the one-core and
+  all MediaTek-incompatible-driver-disable boot args. Neither image has been
+  flashed or booted.
+- LK-entry snapshot: DSI0 CON_CTRL `0`, MODE_CTRL `0`, START `1`, INTSTA
+  `4`, CMDQ_SIZE `0x8001`, SIZE_CON `0x0c8001e0`; OVL layer address
+  `0xfcb3f000`, pitch `5760`. The panel is command-mode and the DSI enable
+  bit is clear at this entry point.
+- An experimental one-shot direct DSI/mutex trigger was followed by 129 GCE
+  event-641 timeout reports in recovery dmesg (the saved stock baseline had
+  none). The test did not prove a visible refresh; causation is not isolated.
+  It was stopped and `boot_a` restored/read-back verified. Do not repeat the
+  direct START/EN sequence. Implement proper GCE/TE sequencing first.
+
+The added `display` entry-probe level is read-only: it resolves DSI/OVL
+register blocks through the live FDT and records register pairs in the stock
+Linux banner. It does not enable clocks, touch DSI/OVL/mutex/GCE registers, or
+prove that CPU framebuffer writes can reach the panel. The final probe image
+builds successfully, but has not been flashed; all seven probe levels now
+cross-compile, and the host suite has 21 passing tests.

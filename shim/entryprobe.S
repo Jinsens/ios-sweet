@@ -205,7 +205,7 @@ probe_hex:
 	b.ge	10b
 	ret
 
-#if ENTRY_LEVEL >= 5
+#if ENTRY_LEVEL == 5
 probe_irq:
 	stp	x0, x1, [sp, #-48]!
 	stp	x2, x3, [sp, #16]
@@ -238,14 +238,14 @@ irq_return:
 
 .macro probe_vector slot
 	.balign 128
-#if ENTRY_LEVEL >= 5
+#if ENTRY_LEVEL == 5
 	.if \slot == 5
 	b	probe_irq
 	.else
 #endif
 	mov	x13, #\slot
 	b	probe_exception
-#if ENTRY_LEVEL >= 5
+#if ENTRY_LEVEL == 5
 	.endif
 #endif
 .endm

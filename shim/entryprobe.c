@@ -12,6 +12,8 @@ static void field(char *banner, unsigned offset, uint64_t value)
 		banner[offset + i] = hex[(value >> (60 - i * 4)) & 15];
 }
 
+void entryprobe_display(uint64_t dtb, char *banner);
+
 void entryprobe_timer(uint64_t *dctlr, uint64_t *redist, uint64_t *flags);
 void entryprobe_irq(uint64_t redist, uint64_t *count, uint64_t *last, uint64_t *rc);
 
@@ -25,6 +27,11 @@ void entryprobe_board(uint64_t dtb, char *banner)
 	field(banner, ENTRY_VTIMER, brd.vtimer_intid);
 	field(banner, ENTRY_FB, brd.fb_base);
 	field(banner, ENTRY_STAGE, 2);
+#if ENTRY_LEVEL == 6
+	entryprobe_display(dtb, banner);
+	/* The display snapshot is intentionally read-only and does not progress
+	 * into the MMU/timer/IRQ stages used by the other probe levels. */
+#else
 #if ENTRY_LEVEL == 2
 	/* Unlike reboot-based experiments, /proc/pl_lk is read by Linux in
 	 * THIS boot, before another preloader/LK run can replace its buffer. */
@@ -66,6 +73,7 @@ void entryprobe_board(uint64_t dtb, char *banner)
 	field(banner, ENTRY_FAR, irq_count);
 	field(banner, ENTRY_PC, irq_last);
 	field(banner, ENTRY_STAGE, 9);
+#endif
 #endif
 #endif
 #endif

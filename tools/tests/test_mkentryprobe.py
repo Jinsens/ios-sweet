@@ -26,6 +26,15 @@ def template(image=None, ramdisk=b'recovery-ramdisk'):
 
 
 class ProbeLayoutTests(unittest.TestCase):
+    def test_display_probe_is_read_only_and_uses_live_fdt_registers(self):
+        self.assertEqual(mkentryprobe.LEVELS['display'], 6)
+        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['el'],
+                         ('dsi0.CON_CTRL', 'dsi0.MODE_CTRL'))
+        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['far'],
+                         ('ovl0.L0_ADDR', 'ovl0.L0_PITCH'))
+        self.assertIn('mutex0.MOD0', mkentryprobe.DISPLAY_FIELDS['fb'])
+        self.assertNotIn('display-kick', mkentryprobe.LEVELS)
+
     def test_record_offsets(self):
         record, offsets = mkentryprobe.banner_record()
         self.assertLessEqual(len(record), 407)  # measured test kernel capacity

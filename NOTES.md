@@ -2,10 +2,12 @@
 
 ## >>> MATISSE PORT (Redmi K50 Pro, MT6983) - handoff 2026-10-21 <<<
 
-### ACTIVE UPDATE 2026-10-21 - hardware entry/MMU/IRQ proven; phone restored
+### ACTIVE UPDATE 2026-10-21 - XNU built; frame-trigger still blocks visible logs
 
-**CURRENT DEVICE STATE (latest):** OrangeFox recovery, boot_a fully restored
-from `backup/boot_a-stock-trim.img`. Entire 67,108,864-byte partition readback
+**CURRENT DEVICE STATE:** the user most recently reported the handset is in
+fastboot; this has not been independently re-queried this session. The last
+verified state was OrangeFox recovery with `boot_a` fully restored from
+`backup/boot_a-stock-trim.img`. Entire 67,108,864-byte partition readback
 `backup/recovery-20261021/boot_a-final-after-all-probes.img` byte-matches
 `backup/boot_a-stock.img`, SHA256
 `7a6a462d5e8858c6f7ecd77655363dd84964d44ea6e7c239e961632996a96e94`.
@@ -13,30 +15,62 @@ No test image remains installed. No userdata, vendor_boot, LK/preloader,
 GPT or calibration writes were performed. This is the preserved known-good
 (possibly Magisk-patched) backup, not a newly verified pristine vendor image.
 
-**Completed implementation commits:** `8a31ac8` (actual IRQ/EOI + guarded matisse ADT/payload), `3021f5a` (same-boot entry/FDT/MMU/timer
-probe + logging safety). Further completed work below adds actual IRQ/EOI
-and matisse ADT/payload guards; see newest git log for its commit.
+**Completed implementation commits:** `3021f5a` (same-boot entry/FDT/MMU/timer
+probe + logging safety), `8a31ac8` (actual IRQ/EOI + guarded matisse
+ADT/payload), and `6cbbcbe` (XNU Boot_Video early framebuffer mapping).
 
-**IN PROGRESS 2026-10-21: XNU screen-log request.** Working branch
-`codex/matisse-xnu-screen-log`. New patch 0082 removes hard-coded sweet
-physical framebuffer writes/maps, derives geometry from boot_args Video,
-reuses the real bootstrap L2 for high RAM, supports two adjacent 32MiB
-blocks and preserves offset in the final alias. Malformed/unmapped surfaces
-stay headless. Normal fbcon geometry validation hardened.
+**CURRENT MILESTONE 2026-10-21:** working branch
+`codex/matisse-xnu-screen-log`. Patch 0082 removes early Qualcomm framebuffer
+physical-address/geometry assumptions and derives the surface from
+`boot_args.Video`; the final TTBR1 alias walks the new XNU root, maps visible
+pixels only, handles up to two 32MiB blocks and refuses a bad/colliding
+surface. Normal fbcon validates the surface dimensions.
 
-Local check against successful upstream run **39158169212** build tree:
-all five modified compile units emitted real objects (including start.s).
-11 instruction-level bootstrap mapping cases PASS via
-`tools/check-xnu-video.py`; this is NOT hardware display validation.
-Entire original 81-patch sequence applied strictly to Apple tag
-xnu-8796.141.3; patch0082 also applies to the uploaded CI build tree.
+GitHub Actions run **39595694178** (head `bfd7eb60fe0602f85bfc81bc33a18b4f23c03505`)
+completed **success** on 2026-10-21. Kernel artifact:
+`xnu/out/ci-39595694178/kernel.development.sweet`, Mach-O plain `arm64`
+(not arm64e), 17,206,200 bytes, SHA256
+`911db7b3c3616face11ccc730869e12ccf0c72ba5efaee8f3eedd01af7cfc367`.
+Payload built with measured matisse ADT and safe one-core/no-device-driver
+boot args: `xnu/out/ci-39595694178/matisse-xnu.payload` (16,605,200 B).
+Boot-v4 test image also built:
+`shim/out/shim-boot.img` (17,883,136 B, original recovery ramdisk plus payload).
+It has **not been flashed**; XNU has not yet been booted on hardware.
+`/product` is missing from the local Apple D22AP ADT, generator warns/omits it.
 
-GitHub CLI installed under ignored research/host-tools, authenticated as
-Jinsens. Upstream permission READ. User approved creating public build fork
-`Jinsens/ios-sweet`; not yet pushed or dispatched at this point.
-Next: run CI for patch0082 and read-only same-boot display-state probe.
-No XNU/iOS boot claimed. Panel command trigger remains unimplemented;
-writing pixels alone has not made logs visible on hardware.
+Validation: all five early-console Mach-O units syntax/object compiled against
+successful run 39158169212's build tree; 11 instruction-level actual-assembly
+mapping cases passed. Whole existing 81-patch series applied to Apple
+xnu-8796.141.3; new patch applies and CI built/linked it. These do not prove
+hardware MMU behavior or screen output.
+
+**LATEST HOST MILESTONE 2026-10-21:** fixed the `display` entry-probe build
+regression: IRQ vectors/handler are compiled only for level 5, and level 6's
+read-only display path no longer pulls in timer/IRQ stages. All seven probe
+levels build against the stock v4 template. All 21 Python tests pass;
+`git diff --check` is clean. Rebuilt `shim/out/shim-boot.img` from the CI XNU
+payload and stock template: v4, 17,883,136 bytes, SHA256
+`9300e166763b4ba69e85fa17867156f24cfa1d0ec9b1fa961e0515c1efe761cf`.
+The append-only log-store host ASan/UBSan test passes. None of these builds
+has been written to the phone.
+
+**DISPLAY BLOCKER, now measured:** read-only entry probe saw DSI0
+CON_CTRL=0 (DSI_EN clear), MODE_CTRL=0 (command mode), START=1,
+INTSTA=4, CMDQ_SIZE=0x8001, SIZE_CON=0x0c8001e0. OVL layers retain scanout
+address `0xfcb3f000` with 5760-byte pitch. Thus framebuffer text writes alone
+cannot refresh the panel's GRAM. A one-shot DSI/mutex/start experiment was
+stopped: after it, recovery dmesg had 129 CMDQ timeout reports waiting on
+GCE event 641 (the stock baseline capture had 0). Causation is strongly
+suspected but not isolated. It did not provide verified visible text. Do NOT
+repeat direct DSI_START/DSI_EN toggles. Need implement the MT6983 GCE/DSI
+command-mode trigger/TE sequence using Xiaomi source, or first boot XNU
+headless and collect another channel. There is no validated screen-log path.
+
+GitHub CLI is installed in ignored research/host-tools. Upstream is read-only;
+`Jinsens/ios-sweet` fork was created for CI. XNU branch commit has not been
+merged upstream. Before any further temporary `boot_a` write, obtain explicit
+user confirmation per device procedure. No userdata, GPT, vendor_boot, LK,
+preloader or calibration partitions were written.
 
 **Additional completed host work:** `mkadt.py --board matisse`: one A510
 (affinity=0), 13MHz, PPI27, GICD 0xc400000/size0x40000, GICR
@@ -57,6 +91,7 @@ Apple /product ADT is missing locally; generator warns and omits that node.
 | mmu | 5 / 0 | Actual shim/mmu.c enables 16KiB granule, rc0, AT succeeds; SCTLR0x30d01985 |
 | timer | 7 / 0 | Redist0xc440000, GICD_CTLR0x12; ISTATUS and PPI27 pending asserted after ~100us |
 | irq | 9 / 0 | **Actual IRQ entry/EOI PASS**: rc0, count1, last INTID27; returns to recovery |
+| display | level 15 / no fault | Read-only DSI0 snapshot: CON_CTRL=0, MODE_CTRL=0, START=1, INTSTA=4; OVL L0_ADDR=0xfcb3f000, pitch=5760. Mutex fields unresolved in this probe; no writes attempted. |
 | logstore | no Linux result | FAIL to return; isolated extra direct PL/LK memory-access path, root cause unknown |
 
 Every successful probe handed back to the preserved original Linux kernel

@@ -142,7 +142,7 @@ static int fdt_walk(uintptr_t fdt, const char *path, prop_cb cb, void *arg)
 			if (depth > MAX_DEPTH)
 				return 0;
 			w.mstack[depth] = depth == 0 ? 1 :
-				(w.mstack[depth - 1] &&
+				(depth <= w.ncomp && w.mstack[depth - 1] &&
 				 name_is(name, w.comp[depth - 1],
 					 comp_len(w.comp[depth - 1])));
 			w.in_target = w.mstack[depth] && depth == w.ncomp;
@@ -306,6 +306,9 @@ static int node_has_compatible(uintptr_t p, uintptr_t strings, const char *want)
 	for (;;) {
 		uint32_t tok = fdt_be32(p);
 
+		p += 4; /* consume token before reading len/nameoff */
+		if (tok == FDT_NOP)
+			continue;
 		if (tok != FDT_PROP)
 			return 0;
 		uint32_t len = fdt_be32(p), nameoff = fdt_be32(p + 4);
@@ -313,9 +316,14 @@ static int node_has_compatible(uintptr_t p, uintptr_t strings, const char *want)
 		if (streq((const char *)(strings + nameoff), "compatible")) {
 			uintptr_t q = val, end = val + len;
 			while (q < end) {
+				uintptr_t stop = q;
+				while (stop < end && *(volatile char *)stop)
+					stop++;
+				if (stop == end)
+					return 0; /* malformed unterminated string list */
 				if (streq((const char *)q, want))
 					return 1;
-				q = skip_str(q);
+				q = stop + 1;
 			}
 			return 0;
 		}
@@ -329,7 +337,7 @@ int fdt_find_compatible(uintptr_t fdt, const char *want, char *path, int pathlen
 	char cur[192];
 	int len = 0, depth = 0;
 
-	if (!fdt || fdt_be32(fdt) != FDT_MAGIC)
+	if (!fdt || !path || pathlen <= 0 || fdt_be32(fdt) != FDT_MAGIC)
 		return 0;
 	p = fdt + fdt_be32(fdt + 8);
 	strings = fdt + fdt_be32(fdt + 12);
@@ -345,7 +353,9 @@ int fdt_find_compatible(uintptr_t fdt, const char *want, char *path, int pathlen
 
 			while (name[n])
 				n++;
-			if (depth > 0 && len + n + 2 < (int)sizeof(cur)) {
+			if (depth > 0 && len + n + 2 >= (int)sizeof(cur))
+				return 0; /* no silently truncated path */
+			if (depth > 0) {
 				cur[len++] = '/';
 				for (int i = 0; i < n; i++)
 					cur[len++] = name[i];
@@ -354,8 +364,10 @@ int fdt_find_compatible(uintptr_t fdt, const char *want, char *path, int pathlen
 			depth++;
 			uintptr_t props = align4(p + n + 1);
 			if (depth > 1 && node_has_compatible(props, strings, want)) {
+				if (len >= pathlen)
+					return 0;
 				int i = 0;
-				for (; i < len && i < pathlen - 1; i++)
+				for (; i < len; i++)
 					path[i] = cur[i];
 				path[i] = 0;
 				return 1;

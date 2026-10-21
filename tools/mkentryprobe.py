@@ -22,7 +22,25 @@ import mkbootimg
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
           'fault', 'esr', 'far', 'pc', 'gicd', 'vtimer', 'fb')
-LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5}
+LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5, 'display': 6}
+
+# For display, the same banner fields hold (first u32 << 32 | second u32).
+# All bases are live-FDT lookups. No physical-memory access beyond these
+# register pairs, and no writes or mode changes at all.
+DISPLAY_FIELDS = {
+    'el': ('dsi0.CON_CTRL', 'dsi0.MODE_CTRL'),
+    'midr': ('dsi0.START', 'dsi0.INTSTA'),
+    'mpidr': ('dsi0.TXRX_CTRL', 'dsi0.PSCTRL'),
+    'freq': ('dsi0.CMDQ_SIZE', 'dsi0.SIZE_CON'),
+    'dtb': ('dsi1.CON_CTRL', 'dsi1.MODE_CTRL'),
+    'sctlr': ('dsi1.START', 'dsi1.INTSTA'),
+    'esr': ('ovl0.EN', 'ovl0.SRC_CON'),
+    'far': ('ovl0.L0_ADDR', 'ovl0.L0_PITCH'),
+    'pc': ('ovl0_2l.EN', 'ovl0_2l.SRC_CON'),
+    'gicd': ('ovl0_2l.L0_ADDR', 'ovl0_2l.L0_PITCH'),
+    'vtimer': ('mutex0.EN', 'mutex0.SOF'),
+    'fb': ('mutex0.MOD0', 'mutex0.MOD1'),
+}
 
 
 def banner_record():
@@ -111,10 +129,12 @@ SECTIONS {
         sources = ['entryprobe.S']
         if LEVELS[level]:
             sources += ['entryprobe.c', 'board.c', 'fdt.c', 'str.c', 'logstore.c']
-        if LEVELS[level] >= 3:
+        if 3 <= LEVELS[level] < 6:
             sources += ['mmu.c']
-        if LEVELS[level] >= 4:
+        if 4 <= LEVELS[level] < 6:
             sources += ['entryprobe_timer.c']
+        if level == 'display':
+            sources += ['entryprobe_display.c']
         objects = []
         flags = ['--target=aarch64-none-elf', '-O2', '-ffreestanding', '-nostdlib',
                  '-fno-pic', '-mgeneral-regs-only', '-mstrict-align',
@@ -144,6 +164,7 @@ SECTIONS {
         'boot_sha256': hashlib.sha256(out_path.read_bytes()).hexdigest(),
         'boot_bytes': out_path.stat().st_size, 'image_size': image_size,
         'stock_entry_offset': PREFIX_SIZE, 'banner_offset_in_stock_image': banner_at,
+        'display_fields': DISPLAY_FIELDS if level == 'display' else None,
         'banner_fields': offsets, 'original_banner': old_banner.rstrip(b'\0').decode(),
     }
     out_path.with_suffix('.json').write_text(json.dumps(manifest, indent=2) + '\n')
