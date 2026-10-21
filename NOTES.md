@@ -57,15 +57,23 @@ has been written to the phone.
 
 **DISPLAY BLOCKER, now measured:** read-only entry probe saw DSI0
 CON_CTRL=0 (DSI_EN clear), MODE_CTRL=0 (command mode), START=1,
-INTSTA=4, CMDQ_SIZE=0x8001, SIZE_CON=0x0c8001e0. OVL layers retain scanout
-address `0xfcb3f000` with 5760-byte pitch. Thus framebuffer text writes alone
-cannot refresh the panel's GRAM. A one-shot DSI/mutex/start experiment was
-stopped: after it, recovery dmesg had 129 CMDQ timeout reports waiting on
-GCE event 641 (the stock baseline capture had 0). Causation is strongly
-suspected but not isolated. It did not provide verified visible text. Do NOT
-repeat direct DSI_START/DSI_EN toggles. Need implement the MT6983 GCE/DSI
-command-mode trigger/TE sequence using Xiaomi source, or first boot XNU
-headless and collect another channel. There is no validated screen-log path.
+INTSTA=4, CMDQ_SIZE=0x8001, SIZE_CON=0x0c8001e0. OVL0_2L reports
+L0_ADDR=`0xfcb3f000`, L0_PITCH=`0x1680` (5760), EN=`0x00e00001`;
+the ordinary OVL0 L0 address was zero. The probe reached stage 15 without an
+exception, but the final mutex fields are `ffffffff` (unresolved), so no
+mutex state is claimed. DSI framebuffer stores alone are not a validated
+panel refresh path.
+
+A one-shot DSI/mutex/start experiment was stopped. The subsequent recovery
+dmesg contains 129 CMDQ “SW timeout Pre-dump” records and repeated waits on
+token 641; the stock baseline has none. The Xiaomi MT6983 GCE header names
+641 `CMDQ_SYNC_TOKEN_STREAM_EOF` (a software sync token, not a DSI-TE event).
+The sequence and timeouts correlate, but causation is not isolated; it did not
+provide verified visible text. Do NOT repeat direct DSI_START/DSI_EN toggles.
+The panel compatible is `l11_38_0a_0a_dsc_cmd,lcm`; the vendor driver has a
+WQHD DSC command table plus rail/reset, DSI/PHY and display-pipeline setup.
+That initialization/refresh path is not ported to XNU. There is no validated
+screen-log path yet.
 
 GitHub CLI is installed in ignored research/host-tools. Upstream is read-only;
 `Jinsens/ios-sweet` fork was created for CI. XNU branch commit has not been

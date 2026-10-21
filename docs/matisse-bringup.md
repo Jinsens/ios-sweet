@@ -130,9 +130,20 @@ were packaged locally, but neither has been booted on the phone.
 **Remaining blocker: actual MT6983 command-mode DSC refresh.** The LK-entry
 read-only probe found DSI0 command mode but DSI_EN clear; OVL has the real
 scanout address. A one-shot direct DSI/mutex trigger was unsafe: recovery
-later logged repeated GCE event-641 timeouts. Do not use direct DSI_START/
-DSI_EN toggles. Port the proper MT6983 GCE/TE/DSI trigger and test it behind
-an explicitly confirmed temporary boot_a write before claiming visible logs.
+later logged 129 CMDQ software-timeout pre-dump records. The waits name token
+641, which Xiaomi's MT6983 header identifies as `CMDQ_SYNC_TOKEN_STREAM_EOF`,
+not the DSI TE hardware event. The stock baseline had none; causation is not
+isolated. Do not use direct DSI_START/DSI_EN toggles.
+
+The live probe recorded DSI0 `CON_CTRL=0`, `MODE_CTRL=0`, `START=1`,
+`INTSTA=4`, `CMDQ_SIZE=0x8001`, `SIZE_CON=0x0c8001e0`, and OVL0_2L
+`L0_ADDR=0xfcb3f000`, `L0_PITCH=0x1680`, `EN=0x00e00001`. It reached its
+final stage without an exception, but the two mutex output fields were
+`ffffffff`, so mutex state remains unknown. The panel compatible is
+`l11_38_0a_0a_dsc_cmd,lcm`; its vendor path includes a WQHD DSC command table,
+power rails/reset GPIO, DSI/PHY configuration and the display/GCE pipeline.
+None of that initialization is implemented in XNU yet. The framebuffer
+console patch alone therefore does not establish visible screen logs.
 
 ### XNU Boot_Video console (patch 0082, 2026-10-21)
 
@@ -167,14 +178,14 @@ This test is not a substitute for hardware MMU or screen validation.
   all MediaTek-incompatible-driver-disable boot args. Neither image has been
   flashed or booted.
 - LK-entry snapshot: DSI0 CON_CTRL `0`, MODE_CTRL `0`, START `1`, INTSTA
-  `4`, CMDQ_SIZE `0x8001`, SIZE_CON `0x0c8001e0`; OVL layer address
-  `0xfcb3f000`, pitch `5760`. The panel is command-mode and the DSI enable
-  bit is clear at this entry point.
-- An experimental one-shot direct DSI/mutex trigger was followed by 129 GCE
-  event-641 timeout reports in recovery dmesg (the saved stock baseline had
-  none). The test did not prove a visible refresh; causation is not isolated.
-  It was stopped and `boot_a` restored/read-back verified. Do not repeat the
-  direct START/EN sequence. Implement proper GCE/TE sequencing first.
+  `4`, CMDQ_SIZE `0x8001`, SIZE_CON `0x0c8001e0`; OVL0_2L L0 address
+  `0xfcb3f000`, pitch `5760`, EN `0x00e00001`. Mutex fields were unresolved.
+- An experimental one-shot direct DSI/mutex trigger was followed by 129 CMDQ
+  software-timeout pre-dump records. Token 641 is
+  `CMDQ_SYNC_TOKEN_STREAM_EOF`, not the DSI TE event; the saved stock baseline
+  had no CMDQ software-timeout pre-dumps. Causation is not isolated. The test
+  did not prove visible refresh, was stopped, and `boot_a` restored/read-back
+  verified. Do not repeat the direct START/EN sequence.
 
 The added `display` entry-probe level is read-only: it resolves DSI/OVL
 register blocks through the live FDT and records register pairs in the stock
