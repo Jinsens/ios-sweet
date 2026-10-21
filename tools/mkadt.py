@@ -265,8 +265,8 @@ if __name__ == '__main__':
     except ValueError as e:
         ap.error(str(e))
     if a.board == 'matisse':
-        print('warning: XNU still needs its hard-coded early framebuffer path ported; '
-              'this ADT alone does not make the sweet kernel safe on MT6983', file=sys.stderr)
+        print('warning: MT6983 requires XNU patch 0082 or newer; '
+              'the ADT does not initialize the command-mode DSI display', file=sys.stderr)
     blob = adt.serialize(root)
     open(a.out, 'wb').write(blob)
     if a.dump:

@@ -13,20 +13,30 @@ No test image remains installed. No userdata, vendor_boot, LK/preloader,
 GPT or calibration writes were performed. This is the preserved known-good
 (possibly Magisk-patched) backup, not a newly verified pristine vendor image.
 
-**Completed implementation commit:** `3021f5a` (same-boot entry/FDT/MMU/timer
+**Completed implementation commits:** `8a31ac8` (actual IRQ/EOI + guarded matisse ADT/payload), `3021f5a` (same-boot entry/FDT/MMU/timer
 probe + logging safety). Further completed work below adds actual IRQ/EOI
 and matisse ADT/payload guards; see newest git log for its commit.
 
-**NEXT CONCRETE KERNEL ACTION:** do NOT boot the old sweet XNU yet.
-`xnu/patches/0010-sweet-early-framebuffer-debug.patch` and
-`0012-sweet-keep-debug-console-after-ttbr0.patch` write/map **0x9c000000**
-with 1080x2400 geometry before normal ADT discovery. Port that assembly/C
-path to boot_args Video or an explicit headless mode, then validate patch
-order, compile and use `gh` for a kernel CI build. No XNU patch was changed,
-no XNU CI run started, and no XNU/iOS boot is claimed this session.
-The Apple upstream start.s for the correct xnu-8796.141.3 was downloaded to
-`research/matisse/start-upstream.s` for this work; local full XNU sources and
-GitHub CLI are not currently installed here.
+**IN PROGRESS 2026-10-21: XNU screen-log request.** Working branch
+`codex/matisse-xnu-screen-log`. New patch 0082 removes hard-coded sweet
+physical framebuffer writes/maps, derives geometry from boot_args Video,
+reuses the real bootstrap L2 for high RAM, supports two adjacent 32MiB
+blocks and preserves offset in the final alias. Malformed/unmapped surfaces
+stay headless. Normal fbcon geometry validation hardened.
+
+Local check against successful upstream run **39158169212** build tree:
+all five modified compile units emitted real objects (including start.s).
+11 instruction-level bootstrap mapping cases PASS via
+`tools/check-xnu-video.py`; this is NOT hardware display validation.
+Entire original 81-patch sequence applied strictly to Apple tag
+xnu-8796.141.3; patch0082 also applies to the uploaded CI build tree.
+
+GitHub CLI installed under ignored research/host-tools, authenticated as
+Jinsens. Upstream permission READ. User approved creating public build fork
+`Jinsens/ios-sweet`; not yet pushed or dispatched at this point.
+Next: run CI for patch0082 and read-only same-boot display-state probe.
+No XNU/iOS boot claimed. Panel command trigger remains unimplemented;
+writing pixels alone has not made logs visible on hardware.
 
 **Additional completed host work:** `mkadt.py --board matisse`: one A510
 (affinity=0), 13MHz, PPI27, GICD 0xc400000/size0x40000, GICR

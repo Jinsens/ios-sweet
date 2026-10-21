@@ -128,3 +128,24 @@ Those must be replaced with boot_args Video-derived mappings/geometry or
 an explicitly headless path **before** flashing an XNU payload. Actual
 command-mode DSI refresh remains unimplemented. No XNU build/boot or iOS
 launch is claimed by the successful shim probes.
+
+### XNU Boot_Video console (patch 0082, 2026-10-21)
+
+The early XNU console now gets PA/width/height/stride/depth from `boot_args`
+Video, not Qualcomm constants. Assembly uses generated Video offsets and
+walks the actual bootstrap root to preserve high-bank RAM mappings. It maps
+only visible pixels (not the entire triple-buffer reservation), handles two
+L2 blocks, and preserves the physical block offset across TTBR1 relocation.
+Malformed surfaces or translation failures stay headless. This **does not
+initialize/trigger the MT6983 command-mode DSC display**.
+
+Compile-checked as real arm64 Mach-O objects against run 39158169212's build
+tree: `start.s`, `sweet_early.c`, `arm_init.c`, `arm_vm_init.c`, `pe_serial.c`.
+For descriptor-level regression checks using the *actual preprocessed assembly*:
+
+```
+python3 tools/check-xnu-video.py --tree BUILDTREE --log CI.log \
+  --llvm NDK_LLVM_BIN --python-deps UNICORN_DIR
+```
+
+This test is not a substitute for hardware MMU or screen validation.

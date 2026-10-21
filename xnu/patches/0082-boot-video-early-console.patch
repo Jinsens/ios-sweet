@@ -1,0 +1,410 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -347,6 +347,10 @@
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++#if defined(SWEET)
++	sweet_early_init(args->Video.v_baseAddr, args->Video.v_width,
++	    args->Video.v_height, args->Video.v_rowBytes, args->Video.v_depth);
++#endif
+ 	sweet_early_mark(1, "arm_init entered (MMU on)");
+ 
+ 	arm_setup_pre_sign();
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -85,6 +85,9 @@
+  * the bootstrap page tables.
+  */
+ SECURITY_READ_ONLY_LATE(uint8_t) bootstrap_pagetables[BOOTSTRAP_TABLE_SIZE] __attribute__((aligned(ARM_PGBYTES)));
++#if defined(SWEET)
++uint8_t sweet_boot_fb_l2[ARM_PGBYTES] __attribute__((aligned(ARM_PGBYTES)));
++#endif
+ 
+ /*
+  * Denotes the end of xnu.
+@@ -1826,28 +1829,48 @@
+ #endif
+ 
+ #if defined(SWEET)
+-/*
+- * The reserved low-globals/kernel region is excluded from VM allocation.
+- * Use the otherwise empty 32MB block above low globals and below gVirtBase
+- * for a Normal-NC framebuffer alias that survives bootstrap TTBR0 teardown.
+- */
++/* Two 32MB slots below gVirtBase; retain the physical block offset. */
+ #define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)
+ 
+-static void
++static uint64_t
+ sweet_early_map_final(void)
+ {
++	uint64_t pa, size;
++	if (!sweet_early_surface(&pa, &size)) {
++		return 0;
++	}
++	const uint64_t offset = pa & ARM_TT_L2_OFFMASK;
++	const uint64_t length = (offset + size + ARM_TT_L2_OFFMASK) & ~ARM_TT_L2_OFFMASK;
+ 	const vm_map_address_t va = SWEET_EARLY_FB_VA;
+-	assert(va + ARM_TT_L2_SIZE <= gVirtBase);
+-	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
+-	assert((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) == (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE));
+-	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
+-	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
+-	assert(*slot == ARM_TTE_EMPTY);
+-	*slot = 0x9c000000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
+-	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+-	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+-	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
++	if (length > 2 * ARM_TT_L2_SIZE || va + length > gVirtBase) {
++		sweet_early_disable();
++		return 0;
++	}
++	pa &= ~ARM_TT_L2_OFFMASK;
++	/* Check all slots first, leaving an unavailable alias headless. */
++	for (uint64_t i = 0; i < length; i += ARM_TT_L2_SIZE) {
++		tt_entry_t l1 = cpu_tte[((va + i) & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
++		if ((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) != (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE)) {
++			sweet_early_disable();
++			return 0;
++		}
++		tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
++		if (l2[((va + i) & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT] != ARM_TTE_EMPTY) {
++			sweet_early_disable();
++			return 0;
++		}
++	}
++	for (uint64_t i = 0; i < length; i += ARM_TT_L2_SIZE) {
++		tt_entry_t l1 = cpu_tte[((va + i) & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
++		tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
++		l2[((va + i) & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT] =
++		    (pa + i) | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++		    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
++		    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
++		    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
++	}
+ 	__asm__ volatile("dsb ishst" ::: "memory");
++	return va + offset;
+ }
+ #endif
+ 
+@@ -2181,7 +2204,7 @@
+ 
+ #if defined(SWEET)
+ 	/* phystokv() must still refer to the bootstrap aperture here. */
+-	sweet_early_map_final();
++	uint64_t sweet_fb_va = sweet_early_map_final();
+ #endif
+ 	arm_vm_physmap_init(args);
+ 	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
+@@ -2190,7 +2213,7 @@
+ 
+ #if defined(SWEET)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+-	sweet_early_relocate(SWEET_EARLY_FB_VA);
++	sweet_early_relocate(sweet_fb_va);
+ #endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+ 
+diff --git a/osfmk/arm64/genassym.c b/osfmk/arm64/genassym.c
+--- a/osfmk/arm64/genassym.c
++++ b/osfmk/arm64/genassym.c
+@@ -299,6 +299,11 @@
+ 	DECLARE("BA_MEM_SIZE", offsetof(struct boot_args, memSize));
+ 	DECLARE("BA_TOP_OF_KERNEL_DATA", offsetof(struct boot_args, topOfKernelData));
+ 	DECLARE("BA_BOOT_FLAGS", offsetof(struct boot_args, bootFlags));
++	DECLARE("BA_VIDEO_BASE", offsetof(struct boot_args, Video.v_baseAddr));
++	DECLARE("BA_VIDEO_ROWBYTES", offsetof(struct boot_args, Video.v_rowBytes));
++	DECLARE("BA_VIDEO_WIDTH", offsetof(struct boot_args, Video.v_width));
++	DECLARE("BA_VIDEO_HEIGHT", offsetof(struct boot_args, Video.v_height));
++	DECLARE("BA_VIDEO_DEPTH", offsetof(struct boot_args, Video.v_depth));
+ 
+ 	DECLARE("SR_RESTORE_TCR_EL1", offsetof(struct sysreg_restore, tcr_el1));
+ 
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -513,24 +513,7 @@
+ 	mov		x20, x0
+ 	mov		x21, #0
+ 
+-#if defined(SWEET)
+-	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
+-	mov		w1, #-1
+-	mov		x2, #32
+-	mov		x4, #4320
+-Lsweet_mark_row:
+-	mov		x3, #64
+-	mov		x5, x0
+-Lsweet_mark_pixel:
+-	str		w1, [x5], #4
+-	subs	x3, x3, #1
+-	b.ne	Lsweet_mark_pixel
+-	add		x0, x0, x4
+-	subs	x2, x2, #1
+-	b.ne	Lsweet_mark_row
+-	dsb		sy
+-#endif
++/* No guessed physical framebuffer writes before the exception vectors. */
+ 
+ 	// Set low reset vector before attempting any loads
+ 	adrp	x0, EXT(LowExceptionVectorBase)@page
+@@ -680,19 +663,100 @@
+ 
+ #if defined(SWEET)
+ 	/*
+-	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
+-	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
+-	 * create_bootstrap_mapping would replace the RAM L2 table.
+-	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+-	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
+-	 */
+-	MOV64	x10, 0x9c000000
+-	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
+-	orr		x11, x11, x10
+-	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+-	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+-	add		x13, x25, #(2 * PGBYTES)
+-	str		x11, [x13, x12, lsl #TTE_SHIFT]
++	 * Map only the visible Boot_Video surface, not the triple-buffer pool.
++	 * Reuse the actual TTBR0 L2 table: RAM may now be above 4GB and its
++	 * L1 index must not be guessed. A separate zeroed L2 is available when
++	 * the framebuffer occupies another L1. Never replace a RAM block.
++	 * x20/x21/x22..x26, lr and sp remain untouched.
++	 */
++	ldr	x6, [x20, BA_VIDEO_BASE]
++	cbz	x6, Lsweet_fb_map_done
++	ldr	x7, [x20, BA_VIDEO_DEPTH]
++	and	x7, x7, #0xff
++	cmp	x7, #32
++	b.ne	Lsweet_fb_map_done
++	ldr	x7, [x20, BA_VIDEO_WIDTH]
++	cbz	x7, Lsweet_fb_map_done
++	cmp	x7, #4096
++	b.hi	Lsweet_fb_map_done
++	ldr	x8, [x20, BA_VIDEO_ROWBYTES]
++	tst	x6, #3
++	b.ne	Lsweet_fb_map_done
++	tst	x8, #3
++	b.ne	Lsweet_fb_map_done
++	cmp	x8, x7, lsl #2
++	b.lo	Lsweet_fb_map_done
++	cmp	x8, #32768
++	b.hi	Lsweet_fb_map_done
++	ldr	x7, [x20, BA_VIDEO_HEIGHT]
++	cbz	x7, Lsweet_fb_map_done
++	cmp	x7, #8192
++	b.hi	Lsweet_fb_map_done
++	mul	x7, x7, x8
++	mov	x8, #ARM_TT_L2_SIZE
++	cmp	x7, x8
++	b.hi	Lsweet_fb_map_done
++	adds	x7, x6, x7
++	b.cs	Lsweet_fb_map_done
++	/* Refuse a WB alias or overlap with kernel-managed RAM. */
++	ldr	x8, [x20, BA_PHYS_BASE]
++	ldr	x9, [x20, BA_MEM_SIZE]
++	add	x9, x8, x9
++	cmp	x6, x9
++	b.hs	Lsweet_fb_disjoint
++	cmp	x7, x8
++	b.hi	Lsweet_fb_map_done
++Lsweet_fb_disjoint:
++	sub	x7, x7, #1
++	and	x6, x6, #ARM_TTE_BLOCK_L2_MASK
++	and	x7, x7, #ARM_TTE_BLOCK_L2_MASK
++	/* Both blocks must use one L1; otherwise stay headless. */
++	eor	x8, x6, x7
++	lsr	x8, x8, #ARM_TT_L1_SHIFT
++	cbnz	x8, Lsweet_fb_map_done
++	and	x8, x6, #ARM_TT_L1_INDEX_MASK
++	lsr	x8, x8, #ARM_TT_L1_SHIFT
++	ldr	x9, [x25, x8, lsl #TTE_SHIFT]
++	cbnz	x9, Lsweet_fb_l2_present
++	adrp	x10, EXT(sweet_boot_fb_l2)@page
++	add	x10, x10, EXT(sweet_boot_fb_l2)@pageoff
++	mov	x11, #TTE_PGENTRIES
++	mov	x12, x10
++Lsweet_fb_zero_l2:
++	str	xzr, [x12], #8
++	subs	x11, x11, #1
++	b.ne	Lsweet_fb_zero_l2
++	orr	x9, x10, #ARM_TTE_BOOT_TABLE
++	str	x9, [x25, x8, lsl #TTE_SHIFT]
++Lsweet_fb_l2_present:
++	and	x10, x9, #3
++	cmp	x10, #ARM_TTE_BOOT_TABLE
++	b.ne	Lsweet_fb_map_done
++	and	x10, x9, #ARM_TTE_TABLE_MASK
++	/* Validate every slot before changing any descriptor. */
++	mov	x8, #ARM_TT_L2_SIZE
++	mov	x11, x6
++Lsweet_fb_check_slot:
++	and	x12, x11, #ARM_TT_L2_INDEX_MASK
++	lsr	x12, x12, #ARM_TT_L2_SHIFT
++	ldr	x13, [x10, x12, lsl #TTE_SHIFT]
++	cbnz	x13, Lsweet_fb_map_done
++	cmp	x11, x7
++	b.eq	Lsweet_fb_write_begin
++	add	x11, x11, x8
++	b	Lsweet_fb_check_slot
++Lsweet_fb_write_begin:
++	MOV64	x9, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++Lsweet_fb_write_slot:
++	and	x12, x6, #ARM_TT_L2_INDEX_MASK
++	lsr	x12, x12, #ARM_TT_L2_SHIFT
++	orr	x11, x9, x6
++	str	x11, [x10, x12, lsl #TTE_SHIFT]
++	cmp	x6, x7
++	b.eq	Lsweet_fb_map_done
++	add	x6, x6, x8
++	b	Lsweet_fb_write_slot
++Lsweet_fb_map_done:
+ #endif
+ 
+ 	/* Ensure TTEs are visible */
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -1,5 +1,5 @@
+ /*
+- * Redmi Note 10 Pro bootstrap console. No allocation, locks, ADT parsing or
++ * Boot_Video-derived bootstrap console for SWEET and MT6983. No allocation, locks, ADT parsing or
+  * per-CPU state: panic() can reach this before a current thread exists.
+  * start.s maps the splash framebuffer VA=PA as Normal Non-Cacheable memory.
+  * arm_vm_init installs a reserved kernel VA alias before removing TTBR0;
+@@ -11,11 +11,13 @@
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+ 
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
++static volatile uint32_t *early_fb;
++static uint64_t early_phys, early_bytes;
++static unsigned int early_width, early_height, early_stride;
+ #define EARLY_FB early_fb
+-#define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
+-#define EARLY_STRIDE (4320u / 4)
++#define EARLY_WIDTH early_width
++#define EARLY_HEIGHT early_height
++#define EARLY_STRIDE early_stride
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
+ #define EARLY_CELL_H (16u * EARLY_SCALE)
+@@ -27,6 +29,51 @@
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+ static unsigned int early_started, early_disabled, early_panicking;
++
++/* Refuse malformed or unmapped surfaces instead of touching a fallback PA. */
++void
++sweet_early_init(uint64_t base, uint64_t width, uint64_t height, uint64_t stride, uint64_t depth)
++{
++	early_disabled = 1;
++	if (!base || (base & 3) || (depth & 0xff) != 32 ||
++	    width < EARLY_CELL_W || width > 4096 ||
++	    height < EARLY_CELL_H + 32 || height > 8192 ||
++	    stride < width * 4 || stride > 32768 || (stride & 3) ||
++	    stride * height > (32ULL << 20) || base + stride * height < base) {
++		return;
++	}
++	/* start.s may have rejected a RAM collision. Verify both ends before
++	 * any store. PAR_EL1 bit0 is the architectural translation fault bit. */
++	uint64_t first, last;
++	__asm__ volatile("at s1e1w, %1; isb; mrs %0, par_el1" : "=r"(first) : "r"(base) : "memory");
++	__asm__ volatile("at s1e1w, %1; isb; mrs %0, par_el1" : "=r"(last) : "r"(base + stride * height - 4) : "memory");
++	if ((first | last) & 1) {
++		return;
++	}
++	/* Both ends must have the same Normal-NC attributes as start.s. */
++	if ((first >> 56) != 0x44 || (last >> 56) != 0x44) {
++		return;
++	}
++	early_fb = (volatile uint32_t *)(uintptr_t)base;
++	early_phys = base;
++	early_bytes = stride * height;
++	early_width = (unsigned int)width;
++	early_height = (unsigned int)height;
++	early_stride = (unsigned int)(stride / 4);
++	early_row = early_col = early_started = early_panicking = 0;
++	early_disabled = 0;
++}
++
++int
++sweet_early_surface(uint64_t *base, uint64_t *size)
++{
++	if (early_disabled || !early_fb) {
++		return 0;
++	}
++	*base = early_phys;
++	*size = early_bytes;
++	return 1;
++}
+ 
+ static void
+ sweet_early_clear_row(void)
+@@ -42,7 +89,7 @@
+ void
+ sweet_early_putc(char c)
+ {
+-	if (early_disabled) {
++	if (early_disabled || !early_fb) {
+ 		return;
+ 	}
+ 	if (!early_started) {
+@@ -89,12 +136,12 @@
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+-	if (early_disabled || stage > 20) {
++	if (early_disabled || !early_fb || stage > 20) {
+ 		return;
+ 	}
+ 	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
+ 	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
+-		for (unsigned int x = stage * 48; x < (stage + 1) * 48; x++) {
++		for (unsigned int x = stage * 48; x < (stage + 1) * 48 && x < EARLY_WIDTH; x++) {
+ 			EARLY_FB[y * EARLY_STRIDE + x] = color;
+ 		}
+ 	}
+@@ -128,6 +175,10 @@
+ void
+ sweet_early_relocate(uint64_t base)
+ {
++	if (!base || early_disabled) {
++		early_disabled = 1;
++		return;
++	}
+ 	sweet_early_mark(8, "leaving bootstrap TTBR0");
+ 	early_fb = (volatile uint32_t *)(uintptr_t)base;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -7,6 +7,8 @@
+ #include <stdint.h>
+ 
+ #if defined(SWEET)
++void sweet_early_init(uint64_t base, uint64_t width, uint64_t height, uint64_t stride, uint64_t depth);
++int sweet_early_surface(uint64_t *base, uint64_t *size);
+ void sweet_early_mark(unsigned int stage, const char *label);
+ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -831,7 +831,10 @@
+ 	if (SecureDTGetProperty(entry, "stride", (void const **)&val, &size) == kSuccess) {
+ 		fbcon_stride = *val;
+ 	}
+-	if (!fbcon_width || !fbcon_height || fbcon_stride < fbcon_width * 4) {
++	if (fbcon_width < 8 * FBCON_SCALE || fbcon_width > 4096 ||
++	    fbcon_height < 16 * FBCON_SCALE || fbcon_height > 8192 ||
++	    fbcon_stride < fbcon_width * 4 || fbcon_stride > 32768 || (fbcon_stride & 3) ||
++	    !reg[0] || (reg[0] & 3) || reg[1] < (uint64_t)fbcon_stride * fbcon_height) {
+ 		return;
+ 	}
+ 	sweet_early_mark(17, "fbcon config read; mapping");
