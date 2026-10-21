@@ -1,3 +1,15 @@
+diff --git a/osfmk/arm64/Makefile b/osfmk/arm64/Makefile
+index d75b285..bd1c8b5 100644
+--- a/osfmk/arm64/Makefile
++++ b/osfmk/arm64/Makefile
+@@ -41,6 +41,7 @@ EXPORT_MD_LIST = \
+ 	perfmon_arm64_regs.h \
+ 	proc_reg.h \
+ 	sweet_early.h \
++	sweet_matisse_dsi.h \
+ 	asm.h \
+ 	tlb.h \
+ 	pal_hibernate.h
 diff --git a/osfmk/arm64/sweet_matisse_dsi.c b/osfmk/arm64/sweet_matisse_dsi.c
 new file mode 100644
 index 0000000..c4bbd09
