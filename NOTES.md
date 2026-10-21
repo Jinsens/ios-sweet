@@ -46,7 +46,7 @@ mapping cases passed. Whole existing 81-patch series applied to Apple
 xnu-8796.141.3; new patch applies and CI built/linked it. These do not prove
 hardware MMU behavior or screen output.
 
-**LATEST HOST MILESTONE 2026-10-21:** the read-only `display` probe now
+**LATEST HOST MILESTONE 2026-10-21 (commit `4b05707`):** the read-only `display` probe now
 separates FDT/register-window lookup status from the raw register values. The
 old `ffffffffffffffff` mutex fields were ambiguous because the same value was
 also used as the lookup-failure sentinel. Host-decoding the saved live DTB
@@ -62,8 +62,8 @@ all 21 Python tests pass and `git diff --check` is clean. The rebuilt v2
 read-only display probe is `shim/out/entryprobe-display-v2.img` (20,832,256 B,
 SHA256 `a0d33cfa174920eb8da48c78bb956dc40d6345689a24e38f8700addf2c2d2183`);
 it has **not** been transferred, booted or flashed. Fastboot reported zero
-visible devices, so no hardware probe result is available for this milestone. The
-append-only log-store host ASan/UBSan test previously passed. Rebuilt
+visible devices, so no hardware probe result is available for this milestone.
+The append-only log-store host ASan/UBSan test previously passed. Rebuilt
 `shim/out/shim-boot.img` from the CI XNU payload and stock template: v4,
 17,883,136 bytes, SHA256
 `9300e166763b4ba69e85fa17867156f24cfa1d0ec9b1fa961e0515c1efe761cf`.
@@ -98,6 +98,15 @@ DT/driver/GCE material is in ignored `research/matisse/mt6983.dts`,
 `research/matisse/mt6983-gce.h`; the GCE header distinguishes DSI0 TE event
 358 from software STREAM_EOF token 641. These are source observations, not a
 validated XNU port. There is no validated screen-log path yet.
+
+**NEXT CONCRETE ACTION:** when the phone is again visible in fastboot, run the
+read-only `shim/out/entryprobe-display-v2.img` via temporary `fastboot boot`
+(not `fastboot flash`) and collect the same-boot Linux banner from recovery.
+Decode `display_status` before interpreting any all-ones register pair. If
+that probe returns normally, use its mutex/GCE values to begin a source-driven
+XNU panel/DSI/DSC port. No DSI_START/DSI_EN toggles; use the real DSI0 TE
+hardware event rather than software STREAM_EOF. The v2 image has not yet been
+run on hardware.
 
 GitHub CLI is installed in ignored research/host-tools. Upstream is read-only;
 `Jinsens/ios-sweet` fork was created for CI. XNU branch commit has not been

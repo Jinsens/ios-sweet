@@ -195,7 +195,7 @@ prove that CPU framebuffer writes can reach the panel. Its v1 mutex fields
 were ambiguous because raw `0xffffffff` and lookup failure used the same
 encoding.
 
-### Read-only display preflight v2 (host-built; not device-tested)
+### Read-only display preflight v2 (commit `4b05707`; host-built, not device-tested)
 
 The revised snapshot adds a two-bit status per register pair (0 = compatible
 missing, 1 = reg/range invalid, 2 = both MMIO reads completed; thus a raw
