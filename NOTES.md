@@ -75,6 +75,24 @@ after each drawn character; `mkadt.py --board matisse` now emits a
 passes. Patch applies cleanly after 0082. Next: CI build, then temporary
 `shim-boot.img` test (needs explicit user confirmation).
 
+**XNU CI + image (2026-10-22):** GitHub Actions run **39640336293** on
+`Jinsens/ios-sweet` branch `codex/matisse-xnu-screen-log` completed
+**success** (first two runs failed on missing header export, then on `SWEET`
+not being defined without `pexpert/arm64/board_config.h`; both fixed).
+Kernel `xnu/out/ci-39640336293/kernel.development.sweet`: 17,222,800 B,
+Mach-O `arm64`, SHA256
+`bc308789486ee96b380ce374bc7fe4c1894f4a115da9662b4cb0cf9a016b543c`.
+Linked symbols `_sweet_display_init` and `_sweet_display_refresh` present.
+Payload `shim/out/matisse-xnu.payload`: 16,605,680 B, SHA256
+`df778ce8960ad2b8f4fed21103fb9e78d7fe630627e21c5155fadf0fdccae19e`
+(ADT 4456 B with `sweet-display`; cmdline `debug=0xc serial=3 cpus=1
+keepsyms=1 sweetkeys=0 sweettouch=0 sweetbattery=0 sweetusb=0 ufsrw=0
+-noprogress`). Boot image `shim/out/shim-boot.img`: v4, 17,883,136 B,
+SHA256 `f60e9af968f71cb60bf3da8d5d34d1cb6e757f39f3c6b7a99fea444b3ca3c163`.
+**Not flashed or booted.** Booting it is the next hardware step and needs
+explicit confirmation; recovery is Power+VolDown to fastboot, then restore
+`backup/recovery-20261021/boot_a-live-20261021.img` and read back.
+
 **Tooling:** `tools/mkentryprobe.py --level display-kick` (guarded writes,
 21-field compact `SWTX1` banner; field `k` = stage<<16|code) and
 `tools/decode-display-probe.py [--kick]`. The record fits the 407-byte Linux
