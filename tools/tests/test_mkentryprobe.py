@@ -26,32 +26,31 @@ def template(image=None, ramdisk=b'recovery-ramdisk'):
 
 
 class ProbeLayoutTests(unittest.TestCase):
-    def test_display_probe_is_read_only_and_uses_live_fdt_registers(self):
+    def test_display_probe_layout_and_status_word(self):
         self.assertEqual(mkentryprobe.LEVELS['display'], 6)
-        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['el'],
+        self.assertEqual(mkentryprobe.LEVELS['display-kick'], 6)
+        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['0'],
                          ('dsi0.CON_CTRL', 'dsi0.MODE_CTRL'))
-        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['far'],
-                         ('ovl0.L0_ADDR', 'ovl0.L0_PITCH'))
-        self.assertIn('GCE thread 3 WAIT_TOKEN',
-                      mkentryprobe.DISPLAY_FIELDS['gce3'])
-        self.assertEqual(mkentryprobe.DISPLAY_STATUS_SLOTS[5],
-                         'GCE thread 5 CURR_STATUS/WAIT_TOKEN')
-        self.assertIn('mutex0.MOD0', mkentryprobe.DISPLAY_FIELDS['fb'])
-        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['mutex1'],
-                         ('mutex0.reg1.EN', 'mutex0.reg1.SOF'))
-        self.assertEqual(len(mkentryprobe.DISPLAY_STATUS_SLOTS), 14)
+        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['3'],
+                         ('dsi0.CMDQ_SIZE', 'dsi0.SIZE_CON'))
+        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['i'],
+                         ('GCE thread 3 CURR_STATUS',
+                          'GCE thread 3 WAIT_TOKEN'))
+        self.assertEqual(mkentryprobe.DISPLAY_FIELDS['k'],
+                         ('status', 'status'))
+        self.assertIn('OVL not scanning boot fb',
+                      mkentryprobe.DISPLAY_STATUS_CODES.values())
         display_record, display_offsets = mkentryprobe.banner_record('display')
-        self.assertLessEqual(len(display_record), 407)
-        self.assertIn('gce3', display_offsets)
+        kick_record, kick_offsets = mkentryprobe.banner_record('display-kick')
+        self.assertLessEqual(len(display_record), 407)  # measured capacity
+        self.assertLessEqual(len(kick_record), 407)
+        self.assertEqual(len(display_offsets), 21)
+        self.assertEqual(display_offsets, kick_offsets)
         self.assertNotIn('dtb', display_offsets)
-        self.assertEqual(mkentryprobe.DISPLAY_STATUS_SLOTS[12],
-                         'mutex0.reg1.EN/SOF')
-        packed = (2 << (2 * 10)) | (2 << (2 * 12))
-        decoded = mkentryprobe.decode_display_status(packed)
-        self.assertEqual(decoded[10], 2)
-        self.assertEqual(decoded[12], 2)
-        self.assertEqual(decoded[0], 0)
-        self.assertNotIn('display-kick', mkentryprobe.LEVELS)
+        decoded = mkentryprobe.decode_display_status((0x50 << 16) | 7)
+        self.assertEqual(decoded['stage'], 0x50)
+        self.assertEqual(decoded['code'], 7)
+        self.assertEqual(decoded['code_name'], 'frame not completed')
 
     def test_record_offsets(self):
         record, offsets = mkentryprobe.banner_record()

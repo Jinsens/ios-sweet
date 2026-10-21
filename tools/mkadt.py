@@ -212,6 +212,17 @@ def build(seed=None, qemu=False, highmem=False, board="sweet"):
         ('stride', u32(fb_stride)),
     ])
 
+    # MT6983 display window: clock gates, disp_mutex0, disp_ovl0_2l and
+    # dsi0 all fit in the first 0x18000 bytes at 0x14000000. The XNU driver
+    # validates LK's command-mode state before writing anything; absent on
+    # sweet, which has no MediaTek display controller.
+    display = [] if board != 'matisse' else [node('sweet-display', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6983-dsi')),
+        ('reg', u64(0x14000000, 0x18000)),
+        ('panel', cstr('l11_38_0a_0a_dsc_cmd')),
+    ])]
+
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
     ufs = node('sweet-ufs', [
         ph(),
@@ -249,7 +260,7 @@ def build(seed=None, qemu=False, highmem=False, board="sweet"):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu or board == 'matisse' else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + display + product + ([] if qemu or board == 'matisse' else [ufs]))
 
 
 if __name__ == '__main__':
@@ -265,8 +276,9 @@ if __name__ == '__main__':
     except ValueError as e:
         ap.error(str(e))
     if a.board == 'matisse':
-        print('warning: MT6983 requires XNU patch 0082 or newer; '
-              'the ADT does not initialize the command-mode DSI display', file=sys.stderr)
+        print('warning: MT6983 command-mode refresh needs XNU patch 0083 '
+              '(sweet-display node); patches up to 0082 only draw into DRAM',
+              file=sys.stderr)
     blob = adt.serialize(root)
     open(a.out, 'wb').write(blob)
     if a.dump:

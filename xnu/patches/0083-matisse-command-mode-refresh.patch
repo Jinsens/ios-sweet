@@ -1,0 +1,316 @@
+diff --git a/osfmk/arm64/sweet_matisse_dsi.c b/osfmk/arm64/sweet_matisse_dsi.c
+new file mode 100644
+index 0000000..c4bbd09
+--- /dev/null
++++ b/osfmk/arm64/sweet_matisse_dsi.c
+@@ -0,0 +1,218 @@
++/*
++ * MT6983/matisse command-mode DSC refresh for the SWEET framebuffer console.
++ *
++ * Register map and sequence were measured on the attached K50 Pro at LK
++ * handoff and validated by a shim entry probe that made the panel show new
++ * frames (2026-10-22). Vendor reference: Xiaomi_Kernel_OpenSource
++ * rubens-s-oss drivers/gpu/drm/mediatek/mediatek_v2/{mtk_dsi.c,mtk_drm_ddp.c,
++ * mtk_disp_ovl.c} and drivers/clk/mediatek/clk-mt6983-mm.c.
++ *
++ * This driver deliberately does not touch panel rails/reset, the PHY PLL or
++ * DSC setup: LK has already done that to display the boot logo, and every
++ * precondition below is checked before the first write. The XNU framebuffer
++ * is the same physical surface the OVL is already scanning.
++ */
++#include <arm64/sweet_matisse_dsi.h>
++
++#if defined(SWEET)
++
++#include <stdint.h>
++#include <machine/machine_routines.h>
++#include <pexpert/device_tree.h>
++
++/* One register window covers clock gates, mutex, OVL0_2L and DSI0. */
++#define DISP_WINDOW_MIN		0x18000u
++
++#define DISP_CLK_STA0		0x100u	/* bit=1: gated, bit=0: enabled */
++#define DISP_CLK_CLR0		0x108u
++#define DISP_CLK_STA1		0x110u
++#define DISP_CLK_CLR1		0x118u
++#define DISP_CLK_STA2		0x1a0u
++#define DISP_CLK_CLR2		0x1a8u
++#define GATE0_MUTEX		(1u << 0)
++#define GATE0_DSC0		(1u << 27)
++#define GATE0_DSI0		(1u << 29)
++#define GATE1_OVL0_2L		(1u << 8)
++#define GATE2_DSI_CLK		(1u << 0)
++
++#define DISP_MUTEX		0x1000u
++#define MUTEX_CFG		(DISP_MUTEX + 0x08u)
++#define MUTEX_EN		(DISP_MUTEX + 0x20u)
++
++#define DISP_OVL0_2L		0x4000u
++#define OVL_EN			(DISP_OVL0_2L + 0x0cu)
++#define OVL_L0_PITCH		(DISP_OVL0_2L + 0x44u)
++#define OVL_L0_ADDR		(DISP_OVL0_2L + 0xf40u)
++
++#define DISP_DSI0		0x17000u
++#define DSI_START		(DISP_DSI0 + 0x00u)
++#define DSI_INTSTA		(DISP_DSI0 + 0x0cu)
++#define DSI_CON_CTRL		(DISP_DSI0 + 0x10u)
++#define DSI_MODE_CTRL		(DISP_DSI0 + 0x14u)
++#define DSI_TXRX_CTRL		(DISP_DSI0 + 0x18u)
++#define DSI_PSCTRL		(DISP_DSI0 + 0x1cu)
++#define DSI_VACT_NL		(DISP_DSI0 + 0x2cu)
++#define DSI_SIZE_CON		(DISP_DSI0 + 0x38u)
++#define DSI_BUF_CON0		(DISP_DSI0 + 0x400u)
++#define DSI_PHY_LCPAT		(DISP_DSI0 + 0x100u)
++#define DSI_PHY_LCCON		(DISP_DSI0 + 0x104u)
++
++#define DSI_EN			(1u << 1)
++#define DSI_CM_WAIT_DATA_LINE_EN (1u << 24)
++#define DSI_CM_WAIT_FIFO_FULL_EN (1u << 27)
++#define DSI_INT_TE_RDY		(1u << 2)
++#define DSI_PHY_LC_HS_TX_EN	(1u << 0)
++#define DSI_PS_SEL_MASK		(0xfu << 16)
++#define DSI_PS_SEL_DSC		(5u << 16)
++
++/* Values LK programs for this 1440x3200 DSC command panel (2x720 slices). */
++#define EXPECT_SIZE_CON		((3200u << 16) | 480u)
++#define EXPECT_VACT		3200u
++
++static uintptr_t disp_base;
++static uint32_t disp_con_ctrl;
++static uint64_t disp_last;
++static int disp_ready;
++static int disp_busy;
++
++static inline uint32_t
++disp_read(uint32_t off)
++{
++	return *(volatile uint32_t *)(disp_base + off);
++}
++
++static inline void
++disp_write(uint32_t off, uint32_t value)
++{
++	*(volatile uint32_t *)(disp_base + off) = value;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++static uint64_t
++disp_counter(void)
++{
++	uint64_t v;
++	__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(v));
++	return v;
++}
++
++static uint64_t
++disp_frequency(void)
++{
++	uint64_t v;
++	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(v));
++	return v;
++}
++
++void
++sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
++    uint32_t stride)
++{
++	DTEntry entry;
++	uint64_t const *reg;
++	uint32_t size;
++	uint32_t ctl, mode, ps, size_con, vact, buf, gates0, gates1, gates2;
++	uint32_t ovl_en, ovl_addr, ovl_pitch, intsta;
++
++	disp_ready = 0;
++	if (SecureDTFindEntry("name", "sweet-display", &entry) != kSuccess) {
++		return;
++	}
++	if (SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 16 || !reg[0] || (reg[0] & 3) ||
++	    reg[1] < DISP_WINDOW_MIN) {
++		return;
++	}
++	if (!width || !height || !stride || stride < width * 4 ||
++	    height != EXPECT_VACT || stride > 32768) {
++		return;
++	}
++
++	disp_base = ml_io_map(reg[0], reg[1]);
++	if (!disp_base) {
++		return;
++	}
++
++	/* Refuse to write unless the LK state matches the measured, working
++	 * configuration. A different panel or a re-initialized bus stays
++	 * headless instead of pushing bogus frames. */
++	gates0 = disp_read(DISP_CLK_STA0);
++	gates1 = disp_read(DISP_CLK_STA1);
++	gates2 = disp_read(DISP_CLK_STA2);
++	ctl = disp_read(DSI_CON_CTRL);
++	mode = disp_read(DSI_MODE_CTRL);
++	ps = disp_read(DSI_PSCTRL);
++	size_con = disp_read(DSI_SIZE_CON);
++	vact = disp_read(DSI_VACT_NL);
++	buf = disp_read(DSI_BUF_CON0);
++	ovl_en = disp_read(OVL_EN);
++	ovl_addr = disp_read(OVL_L0_ADDR);
++	ovl_pitch = disp_read(OVL_L0_PITCH);
++	intsta = disp_read(DSI_INTSTA);
++
++	if ((gates0 & (GATE0_MUTEX | GATE0_DSC0 | GATE0_DSI0)) ||
++	    (gates1 & GATE1_OVL0_2L) || (gates2 & GATE2_DSI_CLK)) {
++		return;		/* clock gate status 1 = gated off */
++	}
++	if ((mode & 3u) != 0 || (ps & DSI_PS_SEL_MASK) != DSI_PS_SEL_DSC ||
++	    size_con != EXPECT_SIZE_CON || vact != EXPECT_VACT ||
++	    (buf & 1u) == 0) {
++		return;
++	}
++	if ((ovl_en & 1u) == 0 || ovl_addr != (uint32_t)fb_phys ||
++	    ovl_pitch != stride) {
++		return;
++	}
++	if ((intsta & DSI_INT_TE_RDY) == 0) {
++		return;		/* panel not sending TE: leave it alone */
++	}
++
++	disp_con_ctrl = ctl | DSI_EN | DSI_CM_WAIT_DATA_LINE_EN |
++	    DSI_CM_WAIT_FIFO_FULL_EN;
++	disp_write(DSI_PHY_LCPAT, 0x55);
++	disp_write(DSI_PHY_LCCON, disp_read(DSI_PHY_LCCON) |
++	    DSI_PHY_LC_HS_TX_EN);
++	disp_write(DSI_CON_CTRL, disp_con_ctrl);
++	disp_last = 0;
++	disp_ready = 1;
++	sweet_display_refresh(1);
++}
++
++void
++sweet_display_refresh(int force)
++{
++	uint64_t now;
++	uint64_t limit;
++
++	if (!disp_ready) {
++		return;
++	}
++	now = disp_counter();
++	/* At most ~20 frames/s; console bursts must not spin on the panel. */
++	if (!force && disp_last && now - disp_last < disp_frequency() / 20) {
++		return;
++	}
++	if (__atomic_test_and_set(&disp_busy, __ATOMIC_ACQUIRE)) {
++		return;
++	}
++	disp_last = now;
++
++	/* W0C status: clear the stale TE flag, then pace on the next pulse.
++	 * A missing TE still gets one trigger per refresh interval. */
++	disp_write(DSI_INTSTA, ~DSI_INT_TE_RDY);
++	limit = now + disp_frequency() / 100;	/* 10 ms */
++	while ((disp_read(DSI_INTSTA) & DSI_INT_TE_RDY) == 0 &&
++	    disp_counter() < limit) {
++		__asm__ volatile("yield");
++	}
++
++	/* Vendor per-frame packet: CFG=0, EN 0->1, then DSI_START=1. */
++	disp_write(MUTEX_CFG, 0);
++	disp_write(MUTEX_EN, 0);
++	disp_write(MUTEX_EN, 1);
++	disp_write(DSI_START, 1);
++
++	__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
++}
++
++#endif /* SWEET */
+diff --git a/osfmk/arm64/sweet_matisse_dsi.h b/osfmk/arm64/sweet_matisse_dsi.h
+new file mode 100644
+index 0000000..0f2d0f4
+--- /dev/null
++++ b/osfmk/arm64/sweet_matisse_dsi.h
+@@ -0,0 +1,36 @@
++/*
++ * MT6983 (matisse) command-mode DSI refresh.
++ *
++ * LK leaves the panel powered and initialized: rails on, PLL/HS clock on,
++ * DSC command-mode PSCTRL/SIZE_CON/TXRX_CTRL programmed, the DSI cmd-mode
++ * buffer enabled, the OVL scanning the boot framebuffer and the mutex MOD
++ * bits configured. Only the DSI engine is disabled and the mutex is stopped.
++ *
++ * A frame is pushed by enabling the engine once, then pulsing the mutex and
++ * writing DSI_START=1. Completion is not visible in INTSTA bit4 on this
++ * command-mode path (hardware-verified 2026-10-22: the panel refreshed while
++ * FRAME_DONE stayed clear), so refreshes are time-paced instead of polled.
++ */
++#ifndef _ARM64_SWEET_MATISSE_DSI_H_
++#define _ARM64_SWEET_MATISSE_DSI_H_
++
++#include <stdint.h>
++
++#if defined(SWEET)
++/* fb_phys/width/height/stride describe the Boot_Video surface the console
++ * draws into. Must be called after ml_io_map() is usable (serial_init). */
++void sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
++    uint32_t stride);
++/* Push the current framebuffer to the panel. Cheap no-op when inactive or
++ * called again within 50 ms unless force is non-zero. */
++void sweet_display_refresh(int force);
++#else
++static inline void sweet_display_init(uint64_t fb_phys, uint32_t width,
++    uint32_t height, uint32_t stride)
++{
++	(void)fb_phys; (void)width; (void)height; (void)stride;
++}
++static inline void sweet_display_refresh(int force) { (void)force; }
++#endif
++
++#endif /* _ARM64_SWEET_MATISSE_DSI_H_ */
+diff --git a/osfmk/conf/files.arm64 b/osfmk/conf/files.arm64
+index b0dad49..e6b7b86 100644
+--- a/osfmk/conf/files.arm64
++++ b/osfmk/conf/files.arm64
+@@ -41,6 +41,7 @@ osfmk/arm/arm_timer.c		standard
+ osfmk/arm/arm_init.c	optional config_pmap_ppl
+ osfmk/arm64/arm_vm_init.c	optional config_pmap_ppl
+ osfmk/arm64/sweet_early.c	standard
++osfmk/arm64/sweet_matisse_dsi.c	standard
+ osfmk/arm64/arm64_hypercall.c	standard
+ osfmk/arm/io_map.c		standard
+ osfmk/arm64/loose_ends.c	standard
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index ab484a8..03a13bf 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -27,6 +27,7 @@
+ #include <pexpert/arm64/board_config.h>
+ #include <arm64/proc_reg.h>
+ #include <arm64/sweet_early.h>
++#include <arm64/sweet_matisse_dsi.h>
+ #include <pexpert/arm/protos.h>
+ #include <kern/sched_prim.h>
+ #if HIBERNATION
+@@ -767,6 +768,7 @@ fbcon_transmit_data(uint8_t c)
+ 	}
+ 	if (c == '\n') {
+ 		fbcon_newline();
++		sweet_display_refresh(0);
+ 		return;
+ 	}
+ 	if (fbcon_col >= fbcon_cols) {
+@@ -786,6 +788,7 @@ fbcon_transmit_data(uint8_t c)
+ 		}
+ 	}
+ 	fbcon_col++;
++	sweet_display_refresh(0);
+ }
+ 
+ static unsigned int
+@@ -842,6 +845,9 @@ fbcon_probe(void)
+ 	sweet_early_mark(18, "fbcon mapping returned");
+ 	if (fbcon_base != NULL) {
+ 		register_serial_functions(&sweet_fbcon_serial_functions);
++		/* Command-mode DSI: push the console surface LK left scanning.
++		 * Headless when the "sweet-display" ADT node is absent. */
++		sweet_display_init(reg[0], fbcon_width, fbcon_height, fbcon_stride);
+ 	}
+ }
+ 

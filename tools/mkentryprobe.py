@@ -22,68 +22,70 @@ import mkbootimg
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
           'fault', 'esr', 'far', 'pc', 'gicd', 'vtimer', 'fb')
-DISPLAY_RECORD_FIELDS = ('el', 'midr', 'mpidr', 'freq', 'gce3', 'gce5',
-                         'stage', 'fault', 'esr', 'far', 'pc', 'gicd',
-                         'vtimer', 'fb', 'mutex1', 'mutex1_mod',
-                         'display_status')
-LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5, 'display': 6}
+DISPLAY_RECORD_FIELDS = tuple('0123456789abcdefghijk')
+DISPLAY_LEVELS = ('display', 'display-kick')
+LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5,
+          'display': 6, 'display-kick': 6}
 
-# For display, the same banner fields hold (first u32 << 32 | second u32).
-# All bases are live-FDT lookups. No writes or mode changes. The final
-# display_status word stores a 2-bit code per pair: 0=compatible missing,
-# 1=reg/range invalid, 2=both MMIO reads completed (even if they read 0xffffffff).
+# For display levels the banner holds (first u32 << 32 | second u32) per
+# field. All bases are live-FDT lookups. Field K is the status word:
+# (stage << 16) | code. Codes:
+#   0 ok, 1 FDT node missing, 2 DSI clock gates report off,
+#   3 DSI not in the expected LK command/DSC state, 4 OVL not scanning the
+#   boot framebuffer, 5 DSI cmd-mode buffer disabled, 6 no TE pulse,
+#   7 frame not completed, 8 some frames missed.
+# display-kick overwrites I/J with the refresh result:
+#   I = last INTSTA << 32 | completed frames
+#   J = TE seen << 32 | status code
 DISPLAY_FIELDS = {
-    'el': ('dsi0.CON_CTRL', 'dsi0.MODE_CTRL'),
-    'midr': ('dsi0.START', 'dsi0.INTSTA'),
-    'mpidr': ('dsi0.TXRX_CTRL', 'dsi0.PSCTRL'),
-    'freq': ('dsi0.CMDQ_SIZE', 'dsi0.SIZE_CON'),
-    'gce3': ('GCE thread 3 CURR_STATUS', 'GCE thread 3 WAIT_TOKEN'),
-    'gce5': ('GCE thread 5 CURR_STATUS', 'GCE thread 5 WAIT_TOKEN'),
-    'esr': ('ovl0.EN', 'ovl0.SRC_CON'),
-    'far': ('ovl0.L0_ADDR', 'ovl0.L0_PITCH'),
-    'pc': ('ovl0_2l.EN', 'ovl0_2l.SRC_CON'),
-    'gicd': ('ovl0_2l.L0_ADDR', 'ovl0_2l.L0_PITCH'),
-    'vtimer': ('mutex0.EN', 'mutex0.SOF'),
-    'fb': ('mutex0.MOD0', 'mutex0.MOD1'),
-    'mutex1': ('mutex0.reg1.EN', 'mutex0.reg1.SOF'),
-    'mutex1_mod': ('mutex0.reg1.MOD0', 'mutex0.reg1.MOD1'),
+    '0': ('dsi0.CON_CTRL', 'dsi0.MODE_CTRL'),
+    '1': ('dsi0.START', 'dsi0.INTSTA'),
+    '2': ('dsi0.TXRX_CTRL', 'dsi0.PSCTRL'),
+    '3': ('dsi0.CMDQ_SIZE', 'dsi0.SIZE_CON'),
+    '4': ('dsi0.MEM_CONTI', 'dsi0.BUF_CON0'),
+    '5': ('dsi0.BUF_CON1', 'dsi0.TX_BUF_RW_TIMES'),
+    '6': ('dsi0.CMD_TYPE1_HS', 'dsi0.DEBUG_SEL'),
+    '7': ('dsi0.PHY_LCCON', 'dsi0.PHY_LD0CON'),
+    '8': ('mipi.PLL_PWR', 'mipi.PLL_CON0'),
+    '9': ('dsi0.VACT_NL', 'dsi0.PHY_TIMECON0'),
+    'a': ('dispsys.clk_gate0_status', 'dispsys.clk_gate1_status'),
+    'b': ('dispsys.clk_gate2_status', 'disp_mutex0.CFG'),
+    'c': ('disp_ovl0_2l.EN', 'disp_ovl0_2l.L0_ADDR'),
+    'd': ('disp_ovl0_2l.L0_PITCH', 'disp_ovl0_2l.CON0'),
+    'e': ('disp_ovl0_2l.SRC_CON', 'disp_ovl0_2l.SRC_SIZE0'),
+    'f': ('disp_mutex0.EN', 'disp_mutex0.SOF'),
+    'g': ('disp_mutex0.MOD0', 'disp_mutex0.MOD1'),
+    'h': ('disp_mutex0.INTEN', 'disp_mutex0.INTSTA'),
+    'i': ('GCE thread 3 CURR_STATUS', 'GCE thread 3 WAIT_TOKEN'),
+    'j': ('GCE thread 5 CURR_STATUS', 'GCE thread 5 WAIT_TOKEN'),
+    'k': ('status', 'status'),
 }
-
-DISPLAY_STATUS_SLOTS = {
-    0: 'dsi0.CON_CTRL/MODE_CTRL',
-    1: 'dsi0.START/INTSTA',
-    2: 'dsi0.TXRX_CTRL/PSCTRL',
-    3: 'dsi0.CMDQ_SIZE/SIZE_CON',
-    4: 'GCE thread 3 CURR_STATUS/WAIT_TOKEN',
-    5: 'GCE thread 5 CURR_STATUS/WAIT_TOKEN',
-    6: 'ovl0.EN/SRC_CON',
-    7: 'ovl0.L0_ADDR/L0_PITCH',
-    8: 'ovl0_2l.EN/SRC_CON',
-    9: 'ovl0_2l.L0_ADDR/L0_PITCH',
-    10: 'mutex0.EN/SOF',
-    11: 'mutex0.MOD0/MOD1',
-    12: 'mutex0.reg1.EN/SOF',
-    13: 'mutex0.reg1.MOD0/MOD1',
-}
-
 
 DISPLAY_STATUS_CODES = {
-    0: 'compatible missing',
-    1: 'reg or range invalid',
-    2: 'both reads completed',
-    3: 'reserved',
+    0: 'ok', 1: 'FDT node missing', 2: 'DSI clock gates off',
+    3: 'unexpected DSI state', 4: 'OVL not scanning boot fb',
+    5: 'cmd-mode buffer disabled', 6: 'no TE pulse',
+    7: 'frame not completed', 8: 'some frames missed',
+}
+
+DISPLAY_SECONDARY = {
+    'display-kick': {
+        'i': ('kick last INTSTA', 'kick completed frames'),
+        'j': ('kick TE seen', 'kick status code'),
+    },
 }
 
 
 def decode_display_status(value):
-    return {slot: (value >> (2 * slot)) & 3
-            for slot in DISPLAY_STATUS_SLOTS}
+    return {'stage': value >> 16, 'code': value & 0xffff,
+            'code_name': DISPLAY_STATUS_CODES.get(value & 0xffff, 'unknown')}
 
 
 def banner_record(level=None):
-    record = bytearray(b'SWEET-ENTRY v1')
+    display = level in DISPLAY_LEVELS
+    record = bytearray(b'SWTX1' if display else b'SWEET-ENTRY v1')
     offsets = {}
-    fields = DISPLAY_RECORD_FIELDS if level == 'display' else FIELDS
+    fields = DISPLAY_RECORD_FIELDS if display else FIELDS
     for name in fields:
         record += (' ' + name + '=').encode()
         offsets[name] = len(record)
@@ -149,6 +151,19 @@ def build(template_path, out_path, toolchain, level, max_image_size=None):
         config += f'#define ENTRY_BANNER_OFFSET {banner_at}\n'
         config += f'#define ENTRY_BANNER_SIZE {len(banner_record(level)[0])}\n'
         config += ''.join(f'#define ENTRY_{n.upper()} {o}\n' for n, o in offsets.items())
+        if level in DISPLAY_LEVELS:
+            # The assembly always stages EL/MIDR/MPIDR/FREQ and a progress
+            # marker, and its fault path records ESR/FAR/PC. Map those onto
+            # the compact record; C overwrites the data fields afterwards and
+            # keeps its last status in K even if a fault occurs later.
+            for old, new in (('EL', '0'), ('MIDR', '1'), ('MPIDR', '2'),
+                             ('FREQ', '3'), ('DTB', '4'), ('SCTLR', '5'),
+                             ('STAGE', 'K'), ('FAULT', 'J'),
+                             ('ESR', 'H'), ('FAR', 'I'), ('PC', 'J'),
+                             ('GICD', 'A'), ('VTIMER', 'B'), ('FB', 'C')):
+                config += f'#define ENTRY_{old} ENTRY_{new}\n'
+        if level == 'display-kick':
+            config += '#define ENTRY_DISPLAY_KICK 1\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         (tmp / 'probe.ld').write_text('''ENTRY(_head)
 SECTIONS {
@@ -171,8 +186,10 @@ SECTIONS {
             sources += ['mmu.c']
         if 4 <= LEVELS[level] < 6:
             sources += ['entryprobe_timer.c']
-        if level == 'display':
+        if level in DISPLAY_LEVELS:
             sources += ['entryprobe_display.c']
+        if level == 'display-kick':
+            sources += ['console.c']
         objects = []
         flags = ['--target=aarch64-none-elf', '-O2', '-ffreestanding', '-nostdlib',
                  '-fno-pic', '-mgeneral-regs-only', '-mstrict-align',
@@ -202,9 +219,9 @@ SECTIONS {
         'boot_sha256': hashlib.sha256(out_path.read_bytes()).hexdigest(),
         'boot_bytes': out_path.stat().st_size, 'image_size': image_size,
         'stock_entry_offset': PREFIX_SIZE, 'banner_offset_in_stock_image': banner_at,
-        'display_fields': DISPLAY_FIELDS if level == 'display' else None,
-        'display_status_slots': DISPLAY_STATUS_SLOTS if level == 'display' else None,
-        'display_status_codes': DISPLAY_STATUS_CODES if level == 'display' else None,
+        'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
+        'display_secondary': DISPLAY_SECONDARY.get(level),
+        'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
         'banner_fields': offsets, 'original_banner': old_banner.rstrip(b'\0').decode(),
     }
     out_path.with_suffix('.json').write_text(json.dumps(manifest, indent=2) + '\n')

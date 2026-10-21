@@ -62,6 +62,8 @@ Available stages:
 | `mmu` | Exercises shim 16 KiB mappings and restores MMU-off entry | PASS, stage 5 / fault 0 |
 | `timer` | Reads GIC; arms/restores masked virtual timer, observes PPI27 pending | PASS, stage 7 / pending 0->1 |
 | `irq` | Saves/configures GIC, enters actual IRQ vector, EOI, restores state | PASS, stage 9 / rc0 / count1 / INTID27 |
+| `display` | Read-only DSI/clock/OVL/mutex/GCE snapshot, no writes | PASS, stage 0x50 / code 0 |
+| `display-kick` | Guarded cmd-mode refresh (writes DSI/mutex after checks) | PASS, panel visibly refreshed |
 
 The exception fallback is best-effort. In particular, secure-access failures,
 asynchronous external aborts and watchdogs are not guaranteed recoverable.
@@ -194,6 +196,59 @@ does not enable clocks or write DSI/OVL/mutex/GCE registers, and it does not
 prove that CPU framebuffer writes can reach the panel. Its v1 mutex fields
 were ambiguous because raw `0xffffffff` and lookup failure used the same
 encoding.
+
+### Command-mode refresh validated on hardware (2026-10-22)
+
+A guarded shim probe (`--level display-kick`) proved the LK handoff is enough
+to show new pixels: the panel visibly displayed the probe's text and a moving
+bar, then the device returned to recovery in the same boot. No panel rails,
+reset, PHY, DSC or GCE setup was needed.
+
+Every precondition below was measured on the live device before any write
+(raw record: `research/matisse/20261021-live/entryprobe-display-v3-dmesg.txt`):
+
+- clock gates DSI0 (bank0 bit29), DSC0 (27), MUTEX (0), OVL0_2L (bank1 bit8),
+  DSI_CLK (bank2 bit0) enabled. MTK gate status is **active-low** (bit 0 =
+  enabled); the `mtk_clk_gate_ops_setclr` driver's `is_enabled` returns
+  `val == 0`.
+- DSI command mode, DSC PS_SEL=5, `SIZE_CON=0x0c8001e0`, `VACT=3200`,
+  `BUF_CON0=1`, `BUF_CON1=0x0dfd00b1`, `RW_TIMES=512000`, `LCCON` bit0 set,
+  MIPI PLL powered at 1.36 GHz.
+- OVL0_2L enabled at the boot framebuffer (`0xfcb3f000`, pitch 5760), mutex
+  MOD0 `0x004ffff5` (OVL1_2L, DSC0, DSI0), mutex stopped.
+- TE_RDY set (panel sending TE). GCE threads 3/5 idle; GCE is not required.
+
+Validated frame sequence (CPU polling, no GCE):
+
+```text
+DSI_PHY_LCPAT = 0x55
+DSI_PHY_LCCON |= 1          # HS clock
+DSI_INTSTA    = ~TE_RDY     # W0C: clear stale TE
+wait TE_RDY                 # bounded
+DISP_MUTEX_CFG = 0
+DISP_MUTEX_EN  = 0, then 1
+DSI_START      = 1
+```
+
+Repeat that per frame, paced by time. **`INTSTA` bit4 (FRAME_DONE) does not
+assert in command mode** even when the panel refreshes; do not use it as a
+completion check. The probe's first build treated it as required, reported
+"frame not completed", and still produced visible frames. The mutex may stay
+enabled; disable it when stopping output.
+
+XNU patch `0083-matisse-command-mode-refresh.patch`:
+
+- `osfmk/arm64/sweet_matisse_dsi.c` maps the `sweet-display` ADT window
+  (`0x14000000`, 0x18000 bytes), re-checks all preconditions, enables the
+  engine once (`CON_CTRL` DSI_EN + bits 24/27) and pulses the mutex/START from
+  `sweet_display_refresh()` (50 ms throttle).
+- `pexpert/arm/pe_serial.c` initializes it from `fbcon_probe()` and refreshes
+  after each drawn character or newline.
+- `tools/mkadt.py --board matisse` adds the node. Patches up to 0082 alone
+  only draw into DRAM and leave the panel unchanged.
+
+Local compile with the CI compile flags passes for both files; the patch
+applies cleanly after 0082. It has not been booted on hardware yet.
 
 ### Read-only display preflight v2 (commit `4b05707`; host-built, not device-tested)
 

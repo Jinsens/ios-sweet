@@ -1,5 +1,85 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> MATISSE PORT (Redmi K50 Pro, MT6983) - handoff 2026-10-22 <<<
+
+### DISPLAY REFRESH PROVEN ON HARDWARE 2026-10-22
+
+**The panel now refreshes from the LK-handoff state.** A same-boot shim probe
+(`shim/entryprobe_display.c`, level `display-kick`) enabled the DSI engine and
+pushed command-mode frames: the operator saw the test screen and a moving
+green bar change on the phone, then the device returned to recovery in the
+same boot. This is the first verified screen-log path on matisse.
+
+Two hardware runs, temporary `boot_a` writes only, each read back fully:
+
+1. Read-only probe `shim/out/entryprobe-display-v3.img` (20,836,352 B,
+   SHA256 `76a2c57fce82feb238c9b9e96e4894e905f159a5036a054f1eccd5c434ca42e1`)
+   ran from a temporary `boot_a` and returned to recovery. Raw dmesg:
+   `research/matisse/20261021-live/entryprobe-display-v3-dmesg.txt`.
+2. Refresh probe (validated build) `shim/out/entryprobe-display-kick-hw-ok.img`
+   (20,836,352 B, SHA256 `b8cec21a912dc978b7b78fddd343253e9a93b95b3d91e275bca0fe0bc0eeee3f`)
+   showed new frames on the panel. Raw dmesg:
+   `research/matisse/20261021-live/entryprobe-display-kick-v3-dmesg.txt`.
+   Recovery dmesg has **0** `ovl status error` and **0** CMDQ timeouts, so the
+   corrected restore leaves the next kernel's display init healthy (unlike the
+   old direct-trigger experiment).
+3. `boot_a` was restored from `backup/recovery-20261021/boot_a-live-20261021.img`
+   (the exact pre-test live image, SHA256
+   `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`); the
+   full 67,108,864-byte readback matches. Note the live image differs from the
+   older `boot_a-stock.img`; the live one is now the restore source.
+
+**Measured LK handoff (read-only, live FDT, `SWTX1` record):**
+
+| Block | Value |
+| --- | --- |
+| DSI0 CON_CTRL / MODE_CTRL | `0x0` / `0x0` (engine off, command mode) |
+| DSI0 START / INTSTA | `0x1` / `0x4` (TE_RDY set; panel sending TE) |
+| DSI0 TXRX_CTRL / PSCTRL | `0x0001023c` / `0x2c0505a0` (4 lanes, DSC, 1440-byte lines) |
+| DSI0 SIZE_CON / VACT | `0x0c8001e0` / `0xc80` (3200x2x720 DSC) |
+| DSI0 MEM_CONTI / BUF_CON0 | `0x3c` / `0x1` (cmd-mode buffer enabled) |
+| DSI0 BUF_CON1 / RW_TIMES | `0x0dfd00b1` / `512000` |
+| DSI0 LCCON / LD0CON | `0x001f1f01` / `0x8` (HS clock on) |
+| MIPI PLL_PWR / CON0 | `0x1` / `0x9cec4ec4` (PLL running at 1.36 GHz) |
+| clock gates 0/1/2 status | `0x0` / `0x0` / `0x0` = **all enabled** (MTK status bit 0 = on) |
+| OVL0_2L EN / L0_ADDR / pitch | `0x00e00001` / `0xfcb3f000` / `5760` |
+| OVL0_2L SRC_CON / SRC_SIZE0 | `0x1` / `0x0c8002d0` (720-wide slices) |
+| disp_mutex0 EN / SOF | `0x0` / `0x0` (stopped) |
+| disp_mutex0 MOD0 / MOD1 | `0x004ffff5` / `0x202` (OVL1_2L, DSC0, DSI0 present) |
+| GCE threads 3/5 | idle (`CURR_STATUS`/`WAIT_TOKEN` 0) |
+
+**Validated minimal refresh:** LK has already done panel rails/reset, the DSI
+PHY PLL/HS clock, DSC/PPS and the command-mode buffer. No panel power/reset,
+PHY, DSC or GCE programming is needed to show new pixels — the OVL is still
+scanning `boot_args.Video`. The shim sequence that worked:
+
+1. Require clock gates DSI0/DSI_CLK/OVL0_2L enabled, DSI command mode, DSC
+   PSCTRL, expected SIZE_CON/VACT, BUF_CON0 bit0, OVL enabled at the boot
+   framebuffer with the boot stride, and TE_RDY.
+2. `DSI_PHY_LCPAT=0x55`, `DSI_PHY_LCCON |= 1`, clear the stale TE flag.
+3. Wait for TE_RDY (W0C: write `~TE`), then `MUTEX_CFG=0`, `MUTEX_EN=0`,
+   `MUTEX_EN=1`, `DSI_START=1`.
+4. Repeat for each frame; disable the mutex when stopping.
+
+`INTSTA` bit4 (FRAME_DONE) **never asserted** on the command-mode path even
+though the panel refreshed; completion cannot be polled there. Pace refreshes
+by time instead. Do not repeat the old mutex+START-only experiment that
+skipped the clock/DSC/buffer preconditions.
+
+**XNU port (patch 0083, compiled locally, not yet booted):**
+`osfmk/arm64/sweet_matisse_dsi.c` validates the same handoff state and issues
+the same sequence; `pexpert/arm/pe_serial.c` calls it from `fbcon_probe` and
+after each drawn character; `mkadt.py --board matisse` now emits a
+`sweet-display` node (`reg=<0x14000000 0x18000>`, panel
+`l11_38_0a_0a_dsc_cmd`). Local CI-flag syntax/object compile of both files
+passes. Patch applies cleanly after 0082. Next: CI build, then temporary
+`shim-boot.img` test (needs explicit user confirmation).
+
+**Tooling:** `tools/mkentryprobe.py --level display-kick` (guarded writes,
+21-field compact `SWTX1` banner; field `k` = stage<<16|code) and
+`tools/decode-display-probe.py [--kick]`. The record fits the 407-byte Linux
+banner exactly. `tools/xnu-cc.py` now honors `XNU_CC`.
+
 ## >>> MATISSE PORT (Redmi K50 Pro, MT6983) - handoff 2026-10-21 <<<
 
 ### ACTIVE UPDATE 2026-10-21 - XNU built; frame-trigger still blocks visible logs
