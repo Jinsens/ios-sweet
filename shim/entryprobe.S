@@ -205,10 +205,49 @@ probe_hex:
 	b.ge	10b
 	ret
 
+#if ENTRY_LEVEL >= 5
+probe_irq:
+	stp	x0, x1, [sp, #-48]!
+	stp	x2, x3, [sp, #16]
+	stp	x4, x5, [sp, #32]
+	mrs	x0, icc_iar1_el1
+	and	x1, x0, #0xffffff
+	cmp	x1, #1020
+	b.hs	irq_return
+	cmp	x1, #27
+	b.ne	irq_record
+	msr	cntv_ctl_el0, xzr
+	isb
+irq_record:
+	adrp	x2, entryprobe_irq_count
+	add	x2, x2, :lo12:entryprobe_irq_count
+	ldr	x3, [x2]
+	add	x3, x3, #1
+	str	x3, [x2]
+	adrp	x2, entryprobe_irq_last
+	add	x2, x2, :lo12:entryprobe_irq_last
+	str	x1, [x2]
+	msr	icc_eoir1_el1, x0
+	isb
+irq_return:
+	ldp	x2, x3, [sp, #16]
+	ldp	x4, x5, [sp, #32]
+	ldp	x0, x1, [sp], #48
+	eret
+#endif
+
 .macro probe_vector slot
 	.balign 128
+#if ENTRY_LEVEL >= 5
+	.if \slot == 5
+	b	probe_irq
+	.else
+#endif
 	mov	x13, #\slot
 	b	probe_exception
+#if ENTRY_LEVEL >= 5
+	.endif
+#endif
 .endm
 	.balign 2048
 probe_vectors:

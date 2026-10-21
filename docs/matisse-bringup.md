@@ -60,7 +60,8 @@ Available stages:
 | `board` | Actual shim FDT/board parsing | PASS, stage 2 / fault 0 |
 | `logstore` | Adds direct log_store memory access | FAIL to return; opt-in experiment only |
 | `mmu` | Exercises shim 16 KiB mappings and restores MMU-off entry | PASS, stage 5 / fault 0 |
-| `timer` | Reads GIC; arms/restores masked virtual timer, observes PPI27 pending | PASS, stage 7 / pending 0->1; IRQ delivery not yet tested |
+| `timer` | Reads GIC; arms/restores masked virtual timer, observes PPI27 pending | PASS, stage 7 / pending 0->1 |
+| `irq` | Saves/configures GIC, enters actual IRQ vector, EOI, restores state | PASS, stage 9 / rc0 / count1 / INTID27 |
 
 The exception fallback is best-effort. In particular, secure-access failures,
 asynchronous external aborts and watchdogs are not guaranteed recoverable.
@@ -105,3 +106,25 @@ clang -O1 -g -fsanitize=address,undefined -DLOGSTORE_HOST_TEST -Ishim \
   -o shim/out/host_logstore
 shim/out/host_logstore
 ```
+
+## XNU payload profile (not yet boot-tested)
+
+`tools/mkadt.py OUT --board matisse` now supplies the measured single-core
+A510 / 13 MHz / INTID27 profile, correct GIC region sizes, framebuffer
+geometry and the 0x100000000..0x22e000000 kernel RAM window. It retains
+`iPhone10,3` / `D22AP` identity, 1125x2436 logical display canvas, and the
+`xiaomi,sweet` compatibility string required by the existing platform expert.
+It does **not** expose the Qualcomm UFS host. This is not a daumier profile.
+
+`mkpayload.py` recognizes that ADT and automatically requires/adds `cpus=1
+sweetkeys=0 sweettouch=0 sweetbattery=0 sweetusb=0 ufsrw=0 -noprogress`.
+Conflicting arguments or truncation are rejected; sweet/QEMU behavior is
+unchanged. These flags are a guard, **not** proof that the existing XNU is
+safe to boot on MediaTek.
+
+**Next kernel blocker:** XNU patches 0010/0012 still directly write/map
+0x9c000000 and assume 1080x2400 before normal ADT framebuffer discovery.
+Those must be replaced with boot_args Video-derived mappings/geometry or
+an explicitly headless path **before** flashing an XNU payload. Actual
+command-mode DSI refresh remains unimplemented. No XNU build/boot or iOS
+launch is claimed by the successful shim probes.

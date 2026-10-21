@@ -22,7 +22,7 @@ import mkbootimg
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
           'fault', 'esr', 'far', 'pc', 'gicd', 'vtimer', 'fb')
-LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4}
+LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5}
 
 
 def banner_record():

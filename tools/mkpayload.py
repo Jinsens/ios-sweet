@@ -140,6 +140,38 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
+def platform_cmdline(adt_blob, cmdline):
+    """Do not let an MT6983 payload accidentally probe Qualcomm hardware.
+
+    Keep the existing sweet/QEMU behavior unchanged. The measured matisse
+    profile is single-core bring-up only; reject conflicting overrides.
+    """
+    root, _ = adt.parse(adt_blob)
+    if b'xiaomi,matisse' not in (root.prop('compatible') or b'').split(b'\0'):
+        return cmdline
+    required = {'cpus': 1, 'sweetkeys': 0, 'sweettouch': 0,
+                'sweetbattery': 0, 'sweetusb': 0, 'ufsrw': 0}
+    tokens = cmdline.split()
+    present = set()
+    for token in tokens:
+        key, sep, value = token.partition('=')
+        if key in required:
+            try:
+                safe = sep and int(value, 0) == required[key]
+            except ValueError:
+                safe = False
+            if not safe:
+                raise ValueError(f'matisse bring-up requires {key}={required[key]}')
+            present.add(key)
+    tokens += [f'{k}={v}' for k, v in required.items() if k not in present]
+    if '-noprogress' not in tokens:
+        tokens.append('-noprogress')
+    result = ' '.join(tokens)
+    if len(result.encode()) >= BOOT_LINE_LENGTH:
+        raise ValueError('matisse safe boot-args would be truncated')
+    return result
+
+
 def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
@@ -154,6 +186,7 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     kernel_end = (kernel_end + PAGE - 1) & ~(PAGE - 1)
 
     adt_blob = open(adt_path, 'rb').read()
+    cmdline = platform_cmdline(adt_blob, cmdline)
     # The ADT decides where the kernel's RAM is (mkadt.py --highmem).
     PHYS_BASE, MEM_SIZE = adt_dram(adt_blob)
     pieces = [(s['vmaddr'], s['vmsize'], buf[s['fileoff']:s['fileoff'] + s['filesize']]) for s in segs]
@@ -189,6 +222,7 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
         struct.pack_into('<4Q', out, SEG_TABLE + 32 * i, *t)
     info = dict(cputype=hex(m['cputype']), cpusub=m['cpusub'], fixups=nfix, virt_base=hex(virt_base),
                 entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, size=len(out),
+                cmdline=cmdline,
                 segs=[(s['name'], hex(s['vmaddr']), hex(s['vmsize'])) for s in segs])
     return bytes(out), info
 

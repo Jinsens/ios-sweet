@@ -13,6 +13,7 @@ static void field(char *banner, unsigned offset, uint64_t value)
 }
 
 void entryprobe_timer(uint64_t *dctlr, uint64_t *redist, uint64_t *flags);
+void entryprobe_irq(uint64_t redist, uint64_t *count, uint64_t *last, uint64_t *rc);
 
 void entryprobe_board(uint64_t dtb, char *banner)
 {
@@ -57,6 +58,15 @@ void entryprobe_board(uint64_t dtb, char *banner)
 	field(banner, ENTRY_FAR, redist);
 	field(banner, ENTRY_PC, flags);
 	field(banner, ENTRY_STAGE, 7);
+#if ENTRY_LEVEL >= 5
+	uint64_t irq_count, irq_last, irq_rc;
+	field(banner, ENTRY_STAGE, 8);
+	entryprobe_irq(redist, &irq_count, &irq_last, &irq_rc);
+	field(banner, ENTRY_ESR, irq_rc);
+	field(banner, ENTRY_FAR, irq_count);
+	field(banner, ENTRY_PC, irq_last);
+	field(banner, ENTRY_STAGE, 9);
+#endif
 #endif
 #endif
 }

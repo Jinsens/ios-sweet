@@ -9,8 +9,7 @@
 # --v2 / --v4    force the header version (default: the template's, else v4)
 #
 # Works with an aarch64-linux-gnu cross toolchain or with clang + lld.
-set -eu
-set -o pipefail
+set -euo pipefail
 cd "$(dirname "$0")"
 
 SRCS="start.S shim.c console.c mmu.c fdt.c board.c loader.c ufs.c str.c logstore.c"
@@ -99,7 +98,7 @@ fi
 # ABL takes the raw Image. Follow the template's shape when there is one.
 KERNEL=out/Image
 if [ -n "$TEMPLATE" ]; then
-	${PYTHON:-python3} - "$TEMPLATE" out/Image out/Image.gz <<'EOF'
+	KERNEL=$(${PYTHON:-python3} - "$TEMPLATE" out/Image out/Image.gz <<'EOF'
 import gzip, struct, sys
 tpl, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
 b = open(tpl, 'rb').read()
@@ -109,9 +108,12 @@ k = b[4096:4096 + ks]
 if hv >= 3 and k[:2] == b'\x1f\x8b':
     with gzip.GzipFile(dst, 'wb', 9, mtime=0) as g:
         g.write(open(src, 'rb').read())
-    print(f'kernel: gzip (template kernel is gzip, {ks} bytes)')
+    print(f'kernel: gzip (template kernel is gzip, {ks} bytes)', file=sys.stderr)
+    print(dst)
+else:
+    print(src)
 EOF
-	[ -f out/Image.gz ] && KERNEL=out/Image.gz
+)
 fi
 
 ARGS="--kernel $KERNEL --ramdisk out/ramdisk.bin --out out/shim-boot.img"

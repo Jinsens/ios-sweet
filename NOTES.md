@@ -2,98 +2,93 @@
 
 ## >>> MATISSE PORT (Redmi K50 Pro, MT6983) - handoff 2026-10-21 <<<
 
-### ACTIVE UPDATE 2026-10-21 - same-boot entry probe works on hardware
+### ACTIVE UPDATE 2026-10-21 - hardware entry/MMU/IRQ proven; phone restored
 
-This section supersedes the conflicting device-state snapshots below.
+**CURRENT DEVICE STATE (latest):** OrangeFox recovery, boot_a fully restored
+from `backup/boot_a-stock-trim.img`. Entire 67,108,864-byte partition readback
+`backup/recovery-20261021/boot_a-final-after-all-probes.img` byte-matches
+`backup/boot_a-stock.img`, SHA256
+`7a6a462d5e8858c6f7ecd77655363dd84964d44ea6e7c239e961632996a96e94`.
+No test image remains installed. No userdata, vendor_boot, LK/preloader,
+GPT or calibration writes were performed. This is the preserved known-good
+(possibly Magisk-patched) backup, not a newly verified pristine vendor image.
 
-- User explicitly requested direct porting and authorized restoring boot_a
-  and entering recovery. Restored `backup/boot_a-stock-trim.img` via
-  `tools/fbraw.py`; download/flash/reboot-recovery each returned OKAY.
-  Product matisse, active slot a, unlocked yes. OrangeFox ADB is root.
-- Full 64 MiB boot_a readback **byte-matched** `backup/boot_a-stock.img`,
-  SHA256 `7a6a462d5e8858c6f7ecd77655363dd84964d44ea6e7c239e961632996a96e94`.
-  The 20,873,216-byte trimmed backup is an exact prefix (SHA256
-  `fe6e8fbf321ea542eb060efcda27b70ae96065e82cc871d4c71082b7268c220d`).
-  This is the user's preserved boot backup, previously noted as Magisk-patched,
-  not a newly authenticated pristine vendor image.
-- Fresh local-only artifacts: `research/matisse/20261021-live/` has live.dtb
-  (410,235 bytes), dmesg-stock.txt, pl_lk-stock.bin, storage-iomem.txt.
-  `backup/recovery-20261021/manifest.json` records full read-only backups
-  of boot_a, vendor_boot_a, dtbo_a, lk_a/b, vbmeta_a/b, misc, persist,
-  nvcfg/nvdata/nvram, protect1/2, seccfg. No calibration/bootloader changes.
-- **Hardware PASS:** new `tools/mkentryprobe.py` + `shim/entryprobe.S`
-  execute a position-independent prefix, patch the bundled Linux kernel's
-  banner with the actual entry registers, then branch to that original
-  kernel within the SAME boot. No reset-persistence assumption and no
-  display/UFS driver is needed. Entry-only image SHA256
-  `e74ab1cc98e53483dade608eeca4fa261d52a11228aeb59db2251d0e3658196b`,
-  20,828,160 bytes, full flashed prefix readback MATCH, OrangeFox boots.
-  dmesg contains SWEET-ENTRY: EL1, MIDR 0x410fd462, MPIDR 0x81000000,
-  CNTFRQ 0xc65d40 (13 MHz), x0/DTB 0x47c80000,
-  SCTLR_EL1 0x30d00980 (M=0, C=0), stage=1, fault=0.
-  Exact log: entryprobe-entry-dmesg.txt in the live artifact directory.
-- Host FDT parser passed on this freshly dumped tree: fb 0xfcb3f000,
-  1440x3200/stride5760; GICD 0xc400000/GICR 0xc440000;
-  virtual timer INTID27; UFS 0x112b0000; DRAM 0x40000000+8GiB.
-- **Code defect found (inspection, not yet blamed as the hardware hang):**
-  old dram_log() copied text INTO the 256-byte log_store header, including
-  its packed pointer and signature. Replaced with bounded append-only
-  logstore_write(); never write ram_console without its format. Removed
-  guessed physical-address fallback. Partition logging defaults off;
-  SHIM_STORAGE_LOG is required for destructive UFS log experiments.
-  Host ASan+UBSan append/bounds/overflow/long-tag checks PASS.
-- Second probe result: **FAIL to return to recovery**, user confirmed. The
-  logstore-level image (SHA256 e832e53a..., full prefix readback matched)
-  combines board_probe + logstore_write, so neither individual stage is
-  hardware-proven and the failure is NOT yet attributed to either one.
-  User entered fastboot; restored the preserved boot_a backup again and
-  reboot-recovery returned OKAY. OrangeFox is back. Full 64 MiB readback
-  (`boot_a-restored-final.img`) again exactly matches the backup SHA256
-  7a6a462d... . **Current phone state is restored stock-backup boot_a,
-  in recovery.** No userdata/vendor_boot/LK/PMIC/calibration writes.
-- Local Unicorn ARM64 execution of both packed probes, with the fresh real
-  DTB and synthetic valid log_store, reaches bundled Linux successfully.
-  logstore-level runs 2,227,015 instructions with stage=3, valid discovered
-  GICD/INTID27/fb, and correct appended text. This DOES NOT emulate MMU-off
-  Device-memory alignment, SoC access controls or watchdog timing.
-  Next separate board-only from logstore access; do not assume the generic
-  simulation proves real hardware. Preserve the recovery fallback.
-- **Hardware PASS, board-only isolation:** entryprobe-board.img SHA256
-  e31c96df3fd09d82f0f692b52f6bbd365325bd9f5217c2bab742d28a1e4cb0c1,
-  20,832,256 bytes, full prefix readback MATCH, OrangeFox returns. dmesg
-  stage=2/fault=0, GICD=0xc400000, vtimer=27, fb=0xfcb3f000.
-  Evidence: entryprobe-board-dmesg.txt. The added logstore-access path is
-  now the isolated failing delta, NOT a general failure of board_probe.
-  Root cause within that path is still unknown (do not claim MMIO lock as
-  established). Normal shim dram_log is now compiled out unless explicitly
-  enabled with SHIM_LOGSTORE_MARK, and no storage logging defaults on.
-  Current phone temporarily runs the board-only probe in boot_a/recovery.
-- **Hardware PASS, 16 KiB MMU:** entryprobe-mmu.img SHA256
-  cabdfa644bfaa3b0514fad5e2fae44469e8e2e56c9a38e21c8808c2f7d14bbb2,
-  stage=5/fault=0, mmu_enable rc=0; successful AT S1E1R result
-  PAR_EL1=0xff00000040001b80, enabled SCTLR_EL1=0x30d01985.
-  The wrapper cleans its cache lines, restores MMU-off state and returns
-  to the original Linux/recovery. This exercises the actual shim/mmu.c.
-- **Hardware PASS, virtual timer -> PPI27 pending:** entryprobe-timer.img
-  SHA256 c8d5c402126d9a699cca197b00cb5559d0cae0563b7d466c62f949db834d5a2b,
-  stage=7/fault=0; GICD_CTLR=0x12, boot-core redistributor=0xc440000;
-  flags=0x5180b: counter elapsed 0x518=1304 ticks (~100us at 13MHz),
-  timer ISTATUS asserted, PPI27 pending changed 0->1. DAIF stayed masked;
-  **IRQ vector delivery/EOI is not tested by this stage.** No GIC config
-  changed; timer control/compare restored, recovery returned normally.
-  Evidence: entryprobe-mmu-dmesg.txt and entryprobe-timer-dmesg.txt.
-  Current device temporarily has the timer probe in boot_a, in recovery.
-- Local checks: 7 mkentryprobe layout/validation tests PASS; host FDT reader
-  on live DTB PASS under ASan/UBSan; logstore append/invalid/full/overflow/
-  long-tag tests PASS under ASan/UBSan; complete shim cross-build PASS
-  (one pre-existing unused reset() warning); no C ABS64 relocations.
-  No XNU patch changed and no CI kernel build was started this milestone.
-- Local build toolchain found in installed Android NDK:
-  `/Users/xiaohuasheng/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin`.
-  ADB/fastboot need unsandboxed USB access. Plain `adb wait-for-device`
-  can remain waiting despite recovery enumerating: use `adb devices -l`
-  then direct `adb exec-out` once recovery appears.
+**Completed implementation commit:** `3021f5a` (same-boot entry/FDT/MMU/timer
+probe + logging safety). Further completed work below adds actual IRQ/EOI
+and matisse ADT/payload guards; see newest git log for its commit.
 
+**NEXT CONCRETE KERNEL ACTION:** do NOT boot the old sweet XNU yet.
+`xnu/patches/0010-sweet-early-framebuffer-debug.patch` and
+`0012-sweet-keep-debug-console-after-ttbr0.patch` write/map **0x9c000000**
+with 1080x2400 geometry before normal ADT discovery. Port that assembly/C
+path to boot_args Video or an explicit headless mode, then validate patch
+order, compile and use `gh` for a kernel CI build. No XNU patch was changed,
+no XNU CI run started, and no XNU/iOS boot is claimed this session.
+The Apple upstream start.s for the correct xnu-8796.141.3 was downloaded to
+`research/matisse/start-upstream.s` for this work; local full XNU sources and
+GitHub CLI are not currently installed here.
+
+**Additional completed host work:** `mkadt.py --board matisse`: one A510
+(affinity=0), 13MHz, PPI27, GICD 0xc400000/size0x40000, GICR
+0xc440000/size0x200000, fb 0xfcb3f000/1440x3200/stride5760, kernel RAM
+0x100000000+0x12e000000, no Qualcomm UFS node. Retains iPhone10,3/D22AP
+and logical 1125x2436 canvas. Not a generic daumier profile. `mkpayload.py`
+recognizes it and rejects conflicting/truncated boot-args, requiring
+cpus=1/sweetkeys=0/sweettouch=0/sweetbattery=0/sweetusb=0/ufsrw=0.
+13 host unit tests PASS, existing sweet/QEMU profiles tested unchanged.
+Apple /product ADT is missing locally; generator warns and omits that node.
+
+**Hardware results:**
+
+| Probe | Stage/fault | Observation |
+| --- | --- | --- |
+| entry | 1 / 0 | EL1, MIDR0x410fd462, MPIDR0x81000000, CNTFRQ13MHz, DTB0x47c80000, SCTLR0x30d00980 |
+| board | 2 / 0 | Actual shim board_probe discovers GICD0xc400000, PPI27, fb0xfcb3f000 |
+| mmu | 5 / 0 | Actual shim/mmu.c enables 16KiB granule, rc0, AT succeeds; SCTLR0x30d01985 |
+| timer | 7 / 0 | Redist0xc440000, GICD_CTLR0x12; ISTATUS and PPI27 pending asserted after ~100us |
+| irq | 9 / 0 | **Actual IRQ entry/EOI PASS**: rc0, count1, last INTID27; returns to recovery |
+| logstore | no Linux result | FAIL to return; isolated extra direct PL/LK memory-access path, root cause unknown |
+
+Every successful probe handed back to the preserved original Linux kernel
+within the SAME boot and returned to recovery. Each flashed prefix was
+read back fully and matched first. IRQ test saves/restores modified GIC
+and timer state; timer-only stage leaves CPU DAIF masked. IRQ probe SHA256
+`961f9a260d7dffd2e267b08102a8cb6ca53461d2c76b9a50a4318261128e77f5`
+(20,832,256 bytes). Exact raw dmesg logs, readbacks and source/layout/hash
+manifests are gitignored under `research/matisse/20261021-live/` and
+`shim/out/entryprobe-{entry,board,mmu,timer,irq}.{img,json,elf}`.
+MMU image SHA256 cabdfa644bfaa3b0514fad5e2fae44469e8e2e56c9a38e21c8808c2f7d14bbb2;
+timer image SHA256 c8d5c402126d9a699cca197b00cb5559d0cae0563b7d466c62f949db834d5a2b.
+
+**Safety fix:** old dram_log() wrote text INTO the packed 256-byte
+log_store header (including pointer/signature). New writer is append-only,
+validates bounds/overflow/tag length and needs a live FDT-provided header;
+ASan+UBSan host cases PASS. Nonetheless direct log_store access is NOT
+hardware-working: normal dram_log and markers are disabled unless explicitly
+SHIM_LOGSTORE_MARK. Raw partition logs and misc BCB writes are opt-in only
+via SHIM_STORAGE_LOG. Stop relying on a warm-reset PL/LK log reader.
+
+Fresh backup set (read-only) at `backup/recovery-20261021/manifest.json`:
+boot_a, vendor_boot_a, dtbo_a, lk_a/b, vbmeta_a/b, misc, persist,
+nvcfg/nvdata/nvram, protect1/2, seccfg. Fresh live DTB (410,235 bytes),
+stock dmesg, PL/LK log, partitions and iomem in the live research directory.
+Host FDT reader passes on this live tree under ASan/UBSan. Complete shim
+cross-build passes (pre-existing unused reset() warning only); C ABS64
+relocation check passes. No Apple artifact/device dump/serial is tracked.
+
+Local toolchain: installed Android NDK
+`/Users/xiaohuasheng/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin`.
+ADB/fastboot:
+`/Users/xiaohuasheng/Library/Android/sdk/platform-tools/{adb,fastboot}`;
+USB needs escalated access. `tools/fbraw.py` works around LK's macOS
+platform-tools pipe error. Prefer `adb devices -l` then direct exec-out:
+`adb wait-for-device` sometimes remains waiting although recovery enumerates.
+The linked kernel/boot probes and same-boot diagnostic format are documented
+in `docs/matisse-bringup.md`.
+
+All device-state summaries and experiments BELOW are historical and
+superseded by this section; in particular the old bootloop snapshot is NOT
+current.
 
 ### UPDATE 2026-10-21 late - log channel found, phone needs stock boot restored
 
