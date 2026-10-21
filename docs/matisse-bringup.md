@@ -6,8 +6,8 @@ This is an **early kernel port**, not a bootable iOS release. Do not write an
 ## Measurements from the attached matisse (2026-10-21)
 
 - LK supports `download`/`flash`, but not temporary `fastboot boot`.
-- Known-good backup uses boot header v4, gzip Linux Image, and stock ramdisk.
-  Recovery is supplied by vendor_boot; leave it unchanged.
+- Known-good backup uses boot header v4, gzip Linux Image, and a generic
+  boot.img ramdisk. Recovery's ramdisk is in vendor_boot; leave it unchanged.
 - Same-boot hardware entry probe reports EL1, MIDR 0x410fd462, MPIDR
   0x81000000, CNTFRQ 13,000,000, x0=DTB at 0x47c80000,
   SCTLR_EL1=0x30d00980 (MMU/data/instruction caches off).
@@ -23,6 +23,24 @@ This is an **early kernel port**, not a bootable iOS release. Do not write an
 Device dumps, images, private hardware identifiers and downloaded third-party
 artifacts belong in gitignored `backup/` or `research/`, never in commits.
 See NOTES.md for the exact current device state and artifact hashes.
+
+## 2026-10-22 XNU payload delivery (host-verified only)
+
+The prior boot-v4 image put the raw XNU payload after boot.img's compressed
+generic ramdisk, at offset 1 modulo 8; `loader.c` only scanned aligned
+addresses. Whether MTK LK also truncates the trailer is not established.
+The recovery ramdisk is in vendor_boot, not boot.img, and is never touched.
+
+`shim/build.sh` now embeds a `SWEETAPP` marker, length and the SWEETXNU
+payload at the aligned end of the shim kernel Image, updates the Image
+header size, and keeps boot.img's generic ramdisk byte-identical to the
+verified backup. The legacy boot-v2 ramdisk path remains available.
+The new `shim/out/shim-boot.img` (7,004,160 bytes; SHA256
+`8b4a6986111d6d75363b83ff429faf83c8bcdf33b084cb0edcd57e9e0aefb943`)
+contains the XNU payload from CI run 39640336293. Unit tests and a local
+cross-build passed. This supersedes the older 17,883,136-byte candidate
+below; **the new candidate has not been hardware-booted by this update**. Confirm
+each boot_a write before testing, then restore and hash the full 64 MiB.
 
 ## Same-boot entry probe
 

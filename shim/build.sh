@@ -3,7 +3,8 @@
 #
 #   build.sh [PAYLOAD] [--template STOCK_BOOT_IMG] [--dtb DTB] [--v2] [--v4]
 #
-# PAYLOAD        xnu payload from tools/mkpayload.py; appended to the ramdisk
+# PAYLOAD        xnu payload from tools/mkpayload.py; boot v4 embeds it in
+#                the kernel Image (v2 still uses the legacy ramdisk channel)
 # --template     copy the header shape (and boot signature) from this image
 # --dtb          boot image v2 only: append the device tree (sweet)
 # --v2 / --v4    force the header version (default: the template's, else v4)
@@ -27,6 +28,27 @@ while [ $# -gt 0 ]; do
 	*) PAYLOAD=$1; shift ;;
 	esac
 done
+
+# On boot v4, keep boot.img's generic ramdisk byte-for-byte intact; the
+# recovery ramdisk resides separately in vendor_boot. A raw payload appended
+# to the generic ramdisk's compressed LZ4 stream has unverified parsing; the old
+# 1,250,233-byte stream put SWEETXNU at an unaligned address that the loader
+# never scanned. Carry the payload in the kernel Image instead.
+EMBED_PAYLOAD=""
+if [ -n "$PAYLOAD" ] && [ -n "$TEMPLATE" ]; then
+    template_hv=$(${PYTHON:-python3} - "$TEMPLATE" <<'EOF'
+import struct, sys
+with open(sys.argv[1], 'rb') as f:
+    f.seek(40)
+    print(struct.unpack('<I', f.read(4))[0])
+EOF
+)
+    if [ "$template_hv" -ge 4 ]; then
+        EMBED_PAYLOAD="$PAYLOAD"
+        payload_bytes=$(${PYTHON:-python3} -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$PAYLOAD")
+        EXTRA_CFLAGS="${EXTRA_CFLAGS:-} -DEMBEDDED_XNU_BYTES=$payload_bytes"
+    fi
+fi
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
 	CC=aarch64-linux-gnu-gcc
@@ -67,6 +89,12 @@ end=$($NM out/shim.elf | awk '$3=="_end"{print $1}')
 size=$((0x$end))
 truncate -s "$size" out/Image
 
+if [ -n "$EMBED_PAYLOAD" ]; then
+    # Measured matisse LK loads the Image at 0x40000000; DTB starts at
+    # 0x47c80000. Do not let an embedded payload overwrite the live DTB.
+    ${PYTHON:-python3} ../tools/embed_payload.py out/Image "$EMBED_PAYLOAD" --max-image-size 0x7c80000
+fi
+
 # Ramdisk: an xnu payload if given, else a tiny newc cpio (some bootloaders
 # dislike a zero-size ramdisk).
 if [ -n "$PAYLOAD" ]; then
@@ -76,9 +104,11 @@ else
 fi
 
 if [ -n "$TEMPLATE" ]; then
-	# Keep the stock ramdisk (the bootloader and the kernel expect it) and
-	# append the payload to it.
-	${PYTHON:-python3} - "$TEMPLATE" out/ramdisk.bin "$PAYLOAD" <<'EOF'
+	# Only the legacy boot v2 path appends a payload to the ramdisk. Boot v4
+	# keeps the stock ramdisk unchanged and uses the embedded kernel payload.
+	RAMDISK_PAYLOAD="$PAYLOAD"
+	[ -z "$EMBED_PAYLOAD" ] || RAMDISK_PAYLOAD=""
+	${PYTHON:-python3} - "$TEMPLATE" out/ramdisk.bin "$RAMDISK_PAYLOAD" <<'EOF'
 import struct, sys
 tpl, dst, payload = sys.argv[1], sys.argv[2], sys.argv[3]
 b = open(tpl, 'rb').read()
