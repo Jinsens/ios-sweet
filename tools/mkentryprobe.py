@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 import mkbootimg
-from xnu_breakpoint import early_vector_pa
+from xnu_breakpoint import early_vector_pa, high_vector_pa
 
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
@@ -134,7 +134,7 @@ def prepare(template, level=None):
 
 
 def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None,
-          xnu_vector_offset=None):
+          xnu_vector_offset=None, xnu_high_vector_offset=None):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
@@ -146,6 +146,11 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
         if level != 'el1-xnu':
             raise ValueError('early-vector relay requires el1-xnu')
         vector_pa = early_vector_pa(payload, xnu_vector_offset)
+    high_pa = None
+    if xnu_high_vector_offset is not None:
+        if vector_pa is None:
+            raise ValueError('high-vector relay requires the early-vector relay')
+        high_pa = high_vector_pa(payload, xnu_high_vector_offset)
     payload_offset = None
     if payload is not None:
         if len(payload) < 0x2a8 or payload[:8] != b'SWEETXNU':
@@ -187,6 +192,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
             config += '#define ENTRY_LOADER_PROBE 1\n'
         if vector_pa is not None:
             config += f'#define ENTRY_XNU_VECTOR_PA {vector_pa:#x}ULL\n'
+        if high_pa is not None:
+            config += f'#define ENTRY_XNU_HIGH_VECTOR_PA {high_pa:#x}ULL\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         linker = '''ENTRY(_head)
 SECTIONS {
@@ -204,6 +211,8 @@ SECTIONS {
 '''
         if payload_offset is not None:
             linker = linker.replace('_end = .;', f'_end = {payload_offset};')
+        if high_pa is not None:
+            linker += '\nASSERT(probe_mmu_vector_end - probe_mmu_vector <= 128, "MMU relay exceeds vector slot")\n'
         (tmp / 'probe.ld').write_text(linker)
         sources = ['entryprobe.S']
         if LEVELS[level]:
@@ -259,6 +268,7 @@ SECTIONS {
         'payload_offset': payload_offset,
         'payload_sha256': hashlib.sha256(payload).hexdigest() if payload else None,
         'xnu_vector_pa': vector_pa,
+        'xnu_high_vector_pa': high_pa,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
@@ -276,13 +286,15 @@ def main():
     ap.add_argument('--payload', help='embedded SWEETXNU payload for el1-xnu/el1-load')
     ap.add_argument('--xnu-vector-offset', type=lambda s: int(s, 0),
                     help='diagnostic: relay early XNU vectors at this entry-relative offset; MMU-off only')
+    ap.add_argument('--xnu-high-vector-offset', type=lambda s: int(s, 0),
+                    help='diagnostic: relay high vectors via an identity alias immediately after MMU enable')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
     a = ap.parse_args()
     try:
         build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload,
-              a.xnu_vector_offset)
+              a.xnu_vector_offset, a.xnu_high_vector_offset)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

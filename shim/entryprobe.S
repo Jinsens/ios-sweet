@@ -266,7 +266,7 @@ probe_finish_el2:
 	b.lo	6b
 7:
 	dsb	sy
-#if ENTRY_LEVEL >= 3 && ENTRY_LEVEL < 6
+#if (ENTRY_LEVEL >= 3 && ENTRY_LEVEL < 6) || defined(ENTRY_LOADER_PROBE)
 	adr	x9, probe_saved
 	ldr	x10, [x9, #56]
 	msr	sctlr_el1, x10
@@ -382,6 +382,34 @@ probe_vectors:
 	probe_vector 13
 	probe_vector 14
 	probe_vector 15
+
+#ifdef ENTRY_XNU_HIGH_VECTOR_PA
+	/* Copied verbatim into each XNU high vector slot. All references are
+	 * local PC-relative literals, valid at both physical and virtual aliases.
+	 * Use only immediately after MMU enable, before cached data writes. */
+	.balign 8
+	.globl probe_mmu_vector, probe_mmu_vector_end, probe_mmu_identity
+	.globl probe_mmu_physical, probe_mmu_recorder
+probe_mmu_vector:
+	ldr	x16, probe_mmu_physical
+	br	x16
+probe_mmu_identity:
+	mrs	x16, sctlr_el1
+	bic	x16, x16, #1
+	bic	x16, x16, #4
+	bic	x16, x16, #(1 << 12)
+	dsb	sy
+	msr	sctlr_el1, x16
+	isb
+	ldr	x16, probe_mmu_recorder
+	br	x16
+	.balign 8
+probe_mmu_physical:
+	.quad 0
+probe_mmu_recorder:
+	.quad 0
+probe_mmu_vector_end:
+#endif
 
 	.data
 	.balign 16

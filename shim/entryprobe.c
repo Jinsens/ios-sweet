@@ -46,6 +46,25 @@ void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 		v[4] = 0xd61f0200; /* br x16 */
 	}
 #endif
+#ifdef ENTRY_XNU_HIGH_VECTOR_PA
+	/* Only for the immediate MMU-on checkpoint, before C writes cached
+	 * data or removes the bootstrap identity map. The copied assembly
+	 * uses local literals, switches to its physical alias, disables
+	 * translation/caches and branches to our stackless recorder. */
+	extern const uint32_t probe_mmu_vector[], probe_mmu_vector_end[];
+	extern const uint32_t probe_mmu_identity[], probe_mmu_physical[], probe_mmu_recorder[];
+	unsigned words = ((uintptr_t)probe_mmu_vector_end - (uintptr_t)probe_mmu_vector) / 4;
+	for (unsigned slot = 0; slot < 16; slot++) {
+		uintptr_t dst = ENTRY_XNU_HIGH_VECTOR_PA + slot * 128;
+		volatile uint32_t *v = (volatile uint32_t *)dst;
+		for (unsigned i = 0; i < words; i++)
+			v[i] = probe_mmu_vector[i];
+		*(volatile uint64_t *)(dst + (uintptr_t)probe_mmu_physical - (uintptr_t)probe_mmu_vector) =
+		    dst + (uintptr_t)probe_mmu_identity - (uintptr_t)probe_mmu_vector;
+		*(volatile uint64_t *)(dst + (uintptr_t)probe_mmu_recorder - (uintptr_t)probe_mmu_vector) =
+		    (uintptr_t)probe_vectors + slot * 128;
+	}
+#endif
 }
 #endif
 #if defined(ENTRY_XNU)

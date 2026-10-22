@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU page-table checkpoint passed; MMU config checkpoint next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU MMU configuration passed; MMU-on checkpoint next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
@@ -73,10 +73,9 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request separate approval for the MMU configuration
-checkpoint below. The completed probes now prove hardware execution through
-boot_args loads, stack setup and page-table preparation. Next isolate
-TCR/TTBR/MAIR and TLB/cache setup before the high-VA VBAR switch/MMU enable.
+**Next concrete action:** obtain separate approval for the MMU-on test below.
+Hardware has reached `0x10148e4f8`, immediately before the high-VA VBAR write
+and MMU enable. Next determine whether the real transition succeeds.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -125,7 +124,7 @@ to Recovery. Full 64 MiB original boot_a hash verified after restoration.
 Next prepare a breakpoint before the high-VA VBAR switch at `0x10148e4f8`,
 after TCR/TTBR/MAIR and TLB/cache operations, still before MMU enable.
 
-**Prepared, NOT flashed: MMU configuration checkpoint**
+**Completed: MMU configuration checkpoint**
 `shim/out/entryprobe-el1-mmu-config-brk.img`, 26562560 B, SHA256
 `36228bdb46ade73cb03dc5fc628c5cf675b5ac87956398d4c17f08e26c334f51`.
 Payload SHA256 `3f7c78fbc5b7f1ab25a18d88cc3afc4f64f57d61010721fe4fed6aca181d2f58`.
@@ -133,10 +132,38 @@ BRK offset `0x2070` replaces MSR VBAR_EL1 at `0x10148e4f8`, just before
 XNU changes from low physical vectors to its high virtual vectors.
 The same early-vector relay remains enabled. Host execution with modeled
 MMIO/BRK reached `0x10148e4f8`, then returned to stock Linux with original
-SP/SPSel/DTB restored (`mmu-config-brk-emulation.txt`). Real hardware still
-needs this separate test. Predicted partition SHA256
+SP/SPSel/DTB restored (`mmu-config-brk-emulation.txt`). Hardware PASS with explicit approval: same-boot Recovery recorded
+`stage=87 fault=1 esr=f2005357 far=0 pc=10148e4f8`. All pre-MMU
+TCR/TTBR/MAIR and TLB/cache operations executed. Automatic return and full
+64 MiB restoration verified (`mmu-config-brk-dmesg.txt` and readback). Predicted partition SHA256
 `d99e68b1110f8b421ecd8bf88a0f6ff0de8872962381de66d391761f22b4ce00`.
 Device remains in restored Recovery; no new write yet.
+
+**Prepared, NOT flashed: immediate MMU-on checkpoint**
+`shim/out/entryprobe-el1-mmu-on-brk.img`, 26562560 B, SHA256
+`7937d19c9ef74c5c7c9557098596902c054010b4553d6a7a6e2f9d152fc15f16`.
+Payload SHA256 `38ac4bda2a6a711c45adc09ecd97488313415c14efddb0cfbac68aef463aaa9e`.
+BRK at entry+`0x20a8` = `0x10148e530` replaces RET to arm_init after
+MMU enable, CPACR and TPIDR initialization. No kernel C code runs.
+The low vector relay is retained. `--xnu-high-vector-offset=-0x4488`
+validates branch/NOP slots and installs a copied stackless assembly relay
+in the high vector table at PA `0x101488000`. It first branches from the
+high virtual mapping to its own physical identity alias, then disables
+M/C/I and jumps back to the probe. The probe restores original SCTLR and
+SPSel/SP. **Only safe for the immediate checkpoint before cached C writes
+or bootstrap identity-map teardown; do not use for arbitrary later stages.**
+XNU's original high VBAR and SCTLR writes execute unchanged.
+
+32 host tests pass. Unicorn's CPU model advertises MMFR0 `0x1124` (no 16K
+granule), so CPU-mode emulation faults at MMU enable and cannot validate
+this target. With a modeled 16K translation callback walking XNU's actual
+L1/L2 descriptors, actual startup/relay code reaches `0x10148e530` and
+returns to stock Linux with original SCTLR/SP/SPSel/DTB restored. This is
+host model evidence only, not a real CPU transition. Logs:
+`mmu-on-brk-emulation.txt`, `mmu-on-brk-modeled-emulation.txt`.
+The earlier independent hardware MMU probe did verify 16K support.
+Predicted partition SHA256 `557bdf81d00c77f5d81ee683de2989a4257cce30cccfe329193ae3a66fc8ae56`.
+Device is still restored in Recovery; await this test's separate approval.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,

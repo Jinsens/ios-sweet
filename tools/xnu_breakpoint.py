@@ -21,8 +21,8 @@ def payload_location(payload, offset=0, length=4):
     virt, entry = struct.unpack_from('<QQ', payload, 16)
     phys, = struct.unpack_from('<Q', payload, 56)
     target = entry + offset
-    if offset < 0 or target > 0xffffffffffffffff or target & 3:
-        raise ValueError('breakpoint must be an aligned nonnegative entry offset')
+    if target < 0 or target + requested_length > 0x10000000000000000 or target & 3:
+        raise ValueError('target must be an aligned address in the payload')
     matches = []
     for i in range(count):
         va, size, source, length = struct.unpack_from('<4Q', payload, 0x2a8 + i * 32)
@@ -48,7 +48,24 @@ def early_vector_pa(payload, offset):
     return pa
 
 
+def high_vector_pa(payload, offset):
+    at, _, pa = payload_location(payload, offset, 2048)
+    if pa & 2047:
+        raise ValueError('high vector table must be 2048-byte aligned')
+    for slot in range(16):
+        words = struct.unpack_from('<32I', payload, at + slot * 128)
+        if (words[0] & 0xfc000000 != 0x14000000 and words[0] != 0xd503201f) or any(
+                word != 0xd503201f for word in words[1:]):
+            raise ValueError('expected branch/NOP padded high exception slots')
+    phys, size = struct.unpack_from('<QQ', payload, 56)
+    if pa < phys or pa + 2048 > phys + size:
+        raise ValueError('high vector table outside declared physical memory')
+    return pa
+
+
 def insert_breakpoint(payload, offset=0):
+    if offset < 0:
+        raise ValueError('breakpoint offset must be nonnegative')
     at, target, pa = payload_location(payload, offset)
     original, = struct.unpack_from('<I', payload, at)
     instruction = 0xd4200000 | (0x5357 << 5)  # BRK #0x5357

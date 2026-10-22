@@ -5,7 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from xnu_breakpoint import insert_breakpoint, early_vector_pa
+from xnu_breakpoint import insert_breakpoint, early_vector_pa, high_vector_pa
 
 
 def payload():
@@ -57,6 +57,19 @@ class BreakpointTests(unittest.TestCase):
         struct.pack_into('<I', source, 0x300 + 15 * 128, 0xd503201f)
         with self.assertRaisesRegex(ValueError, 'B .'):
             early_vector_pa(source, 0)
+
+    def test_high_vector_table_before_entry_and_padding_validation(self):
+        source = bytearray(payload()) + bytearray(0xc00)
+        struct.pack_into('<Q', source, 24, 0xfffffe0006001800)
+        struct.pack_into('<4Q', source, 0x2a8,
+                         0xfffffe0006001000, 0x1000, 0x300, 0x800)
+        for slot in range(16):
+            struct.pack_into('<32I', source, 0x300 + slot * 128,
+                             0x14000400, *([0xd503201f] * 31))
+        self.assertEqual(high_vector_pa(source, -0x800), 0x100001000)
+        struct.pack_into('<I', source, 0x300 + 15 * 128 + 120, 0)
+        with self.assertRaisesRegex(ValueError, 'padded'):
+            high_vector_pa(source, -0x800)
 
 
 if __name__ == '__main__':
