@@ -1,9 +1,9 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): selective vectors host-validated; bootstrap-thread attempt failed and device was fully restored <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU reaches kernel_bootstrap_thread on hardware; selective vectors pass <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`thread-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`thread-brk-v2-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
@@ -17,13 +17,52 @@ machine_startup and kernel_bootstrap have now reached vm_mem_bootstrap;
 vm_page_bootstrap, zone_bootstrap, vm_object_bootstrap, vm_map_init,
 kmem_init (with the KMEM and ZALLOC startup phases, including zone_init) and
 vm_fault_init have all returned on hardware: the **complete
-vm_mem_bootstrap returned** to kernel_bootstrap. Scheduler/BSD startup,
-userspace and full kernel boot remain unproven. The first selective-vector
-bootstrap-thread attempt did not return and was fully restored; see the
-failed-attempt block below.
+vm_mem_bootstrap returned** to kernel_bootstrap. `sched_init`, task/thread
+init and `load_context` then ran, and the **bootstrap thread executed on
+hardware** (`kernel_bootstrap_thread` after `current_processor`). Selective
+diagnostic vectors are hardware-proven. Remaining scheduler startup,
+interrupt delivery, BSD/userspace and full kernel boot remain unproven.
 These checkpoints alone do not verify visible panel refresh.
 
-**Failed hardware attempt: bootstrap-thread checkpoint; full restore verified.**
+**Completed: bootstrap-thread checkpoint (hardware PASS).**
+`shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
+vectors, 26,562,560 B, SHA256
+`154449c1e72284e4111a353c969549d7a810c9a7906cafe6b2160191a39be872`.
+Payload SHA256 `3b44b2bf052a865074a19b51ad0b447e0f5552f2b5cda370233fc2ef75d08d06`.
+BRK offset `0x6232c4` at VA `0xfffffe0007aaf74c` / PA `0x101aaf74c`, after
+`current_processor` returns inside `kernel_bootstrap_thread`. Cleanup range
+stayed `[0x100000000, 0x108000000)` (128 MiB).
+
+Same-boot `thread-brk-v2-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aaf74c`, with
+x0 `fffffe0007b88180`. Kernel thread creation, `load_context` and the
+bootstrap thread's first C call therefore ran on hardware. The ESR is the
+inserted BRK. Automatic Recovery return and the complete original
+67,108,864-byte boot_a restoration/readback SHA256 `2931647a...` were
+verified; the written partition matched the predicted `c57c8252...` hash.
+Per user direction this image was tested directly, without host emulation;
+evidence is the BRK record plus the full restoration check.
+
+**Completed: selective diagnostic vectors (hardware PASS; EL1t root cause).**
+- XNU executes with SPSel=0 (EL1t), so a BRK from kernel C code takes vector
+  slot 0, not slot 4. The first selective image patched only slot 4; the BRK
+  reached XNU's original EL1t handler instead, which reset the device. The
+  bootstrap-thread checkpoint itself was never implicated.
+- Fix: the stub is installed in **both** synchronous slots 0 and 4; each
+  copy has its forward B and its relay B patched at install time. The stub
+  saves/restores x16/x17 and preserves every GPR on the forward path.
+  IRQ/FIQ/SError and EL0 synchronous slots stay original; the diagnostic
+  relay lives in unused AArch32 slots 12/13.
+- Hardware PASS on the known-good vm-return checkpoint:
+  `shim/out/entryprobe-el1-vm-return-sel.img`, SHA256
+  `81652ccf2912acb70630fe781985386eedce35c12cf90ad13f9f7d8fb50ceced`,
+  partition `281a4a26...`. `sel-vm-return-v2-dmesg.txt` records
+  `stage=87 fault=1 esr=f2005357 pc=fffffe00073644d8`, x0
+  `fffffe00080bbbc0`; automatic return and full restore verified.
+- 23 tool tests and `selective-stub-microtest.txt` pass. Commits `5f3ba55`
+  (initial) and `42d6582` (dual-slot fix).
+
+**Historical (superseded): first bootstrap-thread attempt with slot-4-only vectors.**
 `shim/out/entryprobe-el1-thread-brk.img`, 26,562,560 B, SHA256
 `1787a79128f3eb39edabcbdbadbc0fd56ab44203806f5835f7685ac6151f0dcc`.
 Payload SHA256 `3b44b2bf052a865074a19b51ad0b447e0f5552f2b5cda370233fc2ef75d08d06`.
@@ -42,33 +81,14 @@ read back; SHA256 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf8
 verified. The device is in Recovery. Evidence: `thread-brk-restore.log` and
 `thread-brk-restored.img`.
 
-The cause is **not established**. There is no Linux dmesg because Recovery
-never ran from the test image. Three possibilities to separate next, not
-conclusions: the selective vector path is not yet hardware-proven; the new
-thread stack/per-CPU dirty pages may lie outside the 128 MiB clean range;
-or the kernel hung/panicked before the BRK. This attempt does not prove the
-bootstrap-thread checkpoint is unreachable.
+The cause is established by the later dual-slot hardware pass: XNU executes
+with SPSel=0, so the BRK took vector slot 0 (EL1t) while this image patched
+only slot 4. It reached XNU's original EL1t handler and reset. The
+bootstrap-thread checkpoint itself was never implicated.
 
-**Selective diagnostic vectors (host-validated, NOT hardware-tested).**
-- Only the EL1h synchronous slot (4) is redirected; IRQ/FIQ/SError and EL0
-  synchronous slots keep XNU's original handlers. Non-BRK exceptions are
-  forwarded through a runtime-patched direct B, so no guest GPR is changed.
-- The diagnostic relay body is copied to unused AArch32 slots 12/13.
-- 23 tool tests pass. `selective-stub-microtest.txt` proves forward with
-  registers preserved, the diagnostic brk path and forwarding of other BRK
-  immediates. The selective vm-return image `4d67b49b...` passes the full
-  diagnostic path, 128 MiB cleanup, bootstrap-TTBR0 restore and Linux return
-  in the model (`vm-return-sel-emulation.txt`).
-- Commit `5f3ba55` (implementation; also contains the pre-existing untested
-  mkentryprobe xnu-level edits).
-
-**Prepared fallback: sched_init checkpoint (not tested).**
-`shim/out/entryprobe-el1-sched-init-brk.img`, 26,562,560 B, SHA256
-`e7fe406e766be3e4070e06149c363f4820781602b09e14d7b7caf4e8c1e09f1f`,
-selective vectors, BRK offset `-0x127dec` at VA `0xfffffe000736469c` after
-`sched_init` returns. Host emulation has not been run. Use it to separate the
-vector mechanism from the thread context switch before retrying the thread
-checkpoint.
+The earlier slot-4-only selective image `4d67b49b...` and its model evidence
+are superseded. The `sched_init` fallback image `e7fe406e...` was also built
+with slot-4-only vectors; do not use it without rebuilding.
 
 **Completed: full vm_mem_bootstrap return (hardware PASS).**
 `shim/out/entryprobe-el1-vm-return-brk.img`, 26,562,560 B, SHA256
@@ -210,18 +230,18 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** hardware-test the selective vector mechanism on
-the already-proven vm-return checkpoint first:
-`shim/out/entryprobe-el1-vm-return-sel.img`, 26,562,560 B, SHA256
-`4d67b49bd7af34a659a4d34f1c516dd269684f2160136decf7c8a90a7918f9ea`,
-expected `pc=fffffe00073644d8`, x0 `fffffe00080bbbc0`. If it returns, test
-the sched_init image `e7fe406e` next. Retry the bootstrap-thread image only
-after measuring the new thread stack/per-CPU dirty physical range; the
-128 MiB range was not validated for them. The rest of kernel_bootstrap,
-bsd_init and userspace remain untested. The full-return image `99d68ed6`
-passed and was fully restored; zone/object `e4231b90` and post-vm_page
-`e9b81b88` likewise passed (commit `490c41f`). No device test is currently
-authorized.
+**Next concrete action:** extend the bootstrap-thread checkpoint to
+`sched_startup`/`idle_thread_create` and then to `thread_daemon_init`, still
+with the dual-slot selective vectors. After that, verify timer interrupt
+delivery with normal XNU vectors and a running thread. Per user direction,
+go directly to device tests; do not spend time on full-boot emulation.
+Re-check the dirty physical range at each deeper checkpoint; the 128 MiB
+window covered this thread entry but is not proven for later allocations.
+The bootstrap-thread image `154449c1` passed and was fully restored;
+selective vectors `81652ccf` passed at the vm-return checkpoint; the earlier
+full-return `99d68ed6`, zone/object `e4231b90` and post-vm_page `e9b81b88`
+also passed. Rebuild the stale `sched_init` image before any use. No device
+test is currently authorized.
 The requested standalone Chinese report is
 [docs/matisse-xnu-ios-roadmap-zh.md](docs/matisse-xnu-ios-roadmap-zh.md):
 complete progress, minimal userspace, real iOS, UFS, touch, USB and acceptance
