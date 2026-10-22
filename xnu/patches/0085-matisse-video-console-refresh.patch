@@ -35,22 +35,18 @@ diff --git a/osfmk/arm64/sweet_matisse_dsi.c b/osfmk/arm64/sweet_matisse_dsi.c
 diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
 --- a/osfmk/console/video_console.c
 +++ b/osfmk/console/video_console.c
-@@ -81,6 +81,10 @@
+@@ -89,6 +89,8 @@
  #include <console/video_console.h>
  #include <console/serial_protos.h>
  
-+#if defined(SWEET)
 +#include <arm64/sweet_matisse_dsi.h>
-+#endif
 +
  #include <kern/kern_types.h>
  #include <kern/kalloc.h>
  #include <kern/debug.h>
-@@ -1240,3 +1244,6 @@ vcputc_options(char c, __unused bool poll)
+@@ -1244,4 +1246,5 @@ vcputc_options(char c, __unused bool poll)
  #endif /* SCHED_HYGIENE_DEBUG */
  		VCPUTC_LOCK_UNLOCK();
-+#if defined(SWEET)
 +		sweet_display_refresh(0);
-+#endif
  	}
  }
