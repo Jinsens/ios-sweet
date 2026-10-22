@@ -1,5 +1,13 @@
 # MT6983/matisse bring-up checkpoints
 
+**Latest status (2026-10-22):** hardware checkpoints now reach the return
+from `vm_page_bootstrap` inside XNU `kernel_bootstrap`. Full boot_a restoration
+has been verified. See the [Chinese progress and driver roadmap](matisse-xnu-ios-roadmap-zh.md)
+and the ACTIVE section of [NOTES.md](../NOTES.md) for current evidence. The
+dated sections below retain earlier observations and candidate states; later
+results supersede their "not yet booted" statements. Userspace is not yet
+verified on matisse.
+
 This is an **early kernel port**, not a bootable iOS release. Do not write an
 `ios16-root` image to userdata until XNU itself has a stable diagnostic path.
 

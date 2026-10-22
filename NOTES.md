@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU passes vm_page_bootstrap; userland/driver roadmap next <<<
+## >>> ACTIVE 2026-10-22 (Asia/Shanghai): XNU passes vm_page_bootstrap; roadmap delivered <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`post-vm-page-brk-restored.img`) matches original SHA256
@@ -85,13 +85,36 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
 **Next concrete action:** prepare a checkpoint after zone/object bootstrap,
-before vm_retire_boot_pages, with a fresh allocation/cache-range review.
-The approved post-vm_page_bootstrap image `e9b81b88` passed and was restored.
-The user requests a separate Chinese Markdown report covering the complete
-process, userspace/iOS path, UFS, touch, USB and remaining constraints.
-Finish that report before requesting another device test.
-Do not use the bootstrap-table relay after
-vm_retire_boot_pages without separately proving those tables survive.
+then the rest of vm_mem_bootstrap, with a fresh allocation/cache-range review.
+The approved post-vm_page_bootstrap image `e9b81b88` passed and was restored
+(result commit `490c41f`). No next device test is authorized or prepared.
+The requested standalone Chinese report is
+[docs/matisse-xnu-ios-roadmap-zh.md](docs/matisse-xnu-ios-roadmap-zh.md):
+complete progress, minimal userspace, real iOS, UFS, touch, USB and acceptance
+criteria. The latest user request is to receive this report after the test.
+
+**Source/Recovery corrections established while preparing the report:**
+- This exact CI kernel has only RET at vm_retire_boot_pages
+  (`0xfffffe0007439678`); the source implementation is empty. Earlier warnings
+  treating that function itself as a page-table teardown are too conservative.
+  Later allocations/mapping changes still require lifetime/cleanup review.
+- The diagnostic vector table must not replace normal XNU IRQ/SVC/page-fault
+  handling when proceeding into interrupts and userspace. Preserve/restore
+  normal vectors or implement a selective diagnostic handler first.
+- Touch is **ST FTS**, not the historical FocalTech label: live spi6.0
+  compatible is `st,spi`, bound driver `fts`, Recovery module
+  `fts_touch_spi.ko`, firmware `st_fts_L11.ftb`. Exact IC still needs ID
+  confirmation. SPI6/CS0/mode0/12 MHz and 14400x32000 coordinate range agree
+  with device logs and vendor DTS. Evidence: `touch-driver-binding.txt`.
+- Pending shim UFS review: GPT LE fields are read using be32 (entry LBA is
+  also 64-bit), write UPIU lacks W flag, timeout assumes 19.2 MHz instead of
+  measured 13 MHz. These are source findings, not a proven explanation of
+  earlier host-takeover failure; no UFS source changes made this turn.
+- Existing XNU UFS init also launches keys/touch/USB; decouple these for
+  independent RAM-disk driver tests. Current payload has no RAMDisk/root arg.
+
+Do not reuse the bootstrap-table relay at later stages without separately
+proving its tables, vectors, saved state and cleanup mappings survive.
 The shared relay restores bootstrap TTBR0 only on exception; the older
 per-slot relay cannot be used after identity-map teardown.
 
