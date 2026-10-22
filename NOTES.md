@@ -27,9 +27,10 @@ reached `spllo()` with interrupts enabled and returned from
 500 ms CNTVCT busy-wait with interrupts enabled advanced `sched_tick` by 3:
 timer-interrupt delivery and scheduler maintenance are proven. A direct jump
 to the `bl bsd_init` call failed into an infinite reboot loop; `boot_a` was
-fully restored. The post-lockdown checkpoint then passed, so the failure is
-after lockdown (CONFIG_XNUPOST tests or later). BSD/userspace and full kernel
-boot remain unproven. These checkpoints alone do not verify visible panel
+fully restored. The post-lockdown checkpoint then passed; the XNUPOST-skip
+diagnostic still looped, narrowing the suspect to
+`kperf_init_early()`/`ml_wait_max_cpus()` or the remaining pre-`bsd_init`
+calls. BSD/userspace and full kernel boot remain unproven. These checkpoints alone do not verify visible panel
 refresh.
 
 **Completed: `sched_startup` return (hardware PASS).**
@@ -90,25 +91,38 @@ back the full original and verify the hash; on failure, restore the trimmed
 stock prefix via fastboot, boot Recovery, then write the full backup. Never
 leave a test image in `boot_a`.
 
-**Next:** bypass the CONFIG_XNUPOST calls in a diagnostic payload (NOP
-`kernel_list_tests`, `kernel_do_post` and the failure branch at
-`0xfffffe0007aafb54..0x7aafb5c`, then break at `bl bsd_init`) to separate the
-test suite from `PE_lockdown_iokit`/`kperf_init_early`. A RAM-disk root is
-still absent from the payload.
+**Next:** flash the prepared NOP-kperf diagnostic (`14bef24d`). If it reaches
+`bl bsd_init`, fix the `kperf_init_early()`/`ml_wait_max_cpus()` barrier for
+the `cpus=1` topology. A RAM-disk root is still absent from the payload.
 
-**Prepared, host-verified, NOT flashed: XNUPOST-skip diagnostic.**
+**Failed: XNUPOST-skip diagnostic (hardware, infinite reboot).**
 `shim/out/entryprobe-el1-bsd-init-skiptest-brk.img`, 26,562,560 B, SHA256
 `ce02efbf38a55aac1186e7b653e53505836cc4a4e29d0271fec1456c5283021a`;
-payload SHA256 `29beb4b8bfd0508764101d9b5b4628a3ae6c33bfb34912edf9dfa7477969e10e`
-(`research/.../skip-xnupost-build.py`). It NOPs `bl kernel_list_tests`
-(`0x7aafb54`), `bl kernel_do_post` (`0x7aafb58`) and the `cbnz w0` panic
-branch (`0x7aafb5c`), then inserts BRK at the `bl bsd_init` site
-(`0x7aafbe0`). Only those 16 payload bytes differ from the debug payload.
-This is diagnostic only: it tells whether the XNUPOST suite is the reason
-the unmodified `bsd_init` checkpoint loops. If this image reaches
-`pc=fffffe0007aafbe0`, the remaining path is `bsd_init` itself; if it loops,
-the failure is in `PE_lockdown_iokit`, `vm_set_restrictions`,
-`kperf_init_early`, or the return after them.
+payload SHA256 `29beb4b8bfd0508764101d9b5b4628a3ae6c33bfb34912edf9dfa7477969e10e`.
+It NOPed `kernel_list_tests`, `kernel_do_post` and the `cbnz w0` panic
+branch, then inserted BRK at `bl bsd_init`. The written partition matched the
+predicted SHA256 `13524b46...`. The device still entered an infinite reboot
+loop; no SWEET-ENTRY. Recovery used the same manual-fastboot → trimmed-prefix
+→ full-backup path; `boot_a` verified `2931647a...`. CONFIG_XNUPOST is
+therefore not the blocker.
+
+**Prepared, host-verified, NOT flashed: NOP-kperf diagnostic.**
+`shim/out/entryprobe-el1-bsd-init-nokperf-brk.img`, 26,562,560 B, SHA256
+`14bef24d4f369ea13bbcb854eeedb1c7ba540cd3601250a6c8e6bac4fe183cf1`;
+payload SHA256 `b2ae537f5e791b6441c780708a2598d2165b588d3d240188a9847c3cabc0c4f6`
+(`research/.../nokperf-build.py`). It NOPs both XNUPOST calls and the panic
+branch, NOPs `bl kperf_init_early` (`0x7aafbdc`), and breaks at the
+`bl bsd_init` site (`0x7aafbe0`). Only 20 payload bytes differ from the debug
+payload. If it reaches `pc=fffffe0007aafbe0`, `kperf_init_early()`,
+`PE_lockdown_iokit()` and `vm_set_restrictions()` returned and kperf is the
+post-lockdown blocker. If it loops, the failure is before kperf.
+
+Source finding: `kperf_init_early()` calls `ml_wait_max_cpus()`, which blocks
+until `ml_set_max_cpus()` sets `max_cpus_initialized = MAX_CPUS_SET`. That
+setter is called from the IOKit CPU topology paths (`SweetCPU.cpp`,
+`AppleARMSMP.cpp`, `IOCPU.cpp`); on this `cpus=1` boot the ADT topology may
+advertise CPUs that never register, so the barrier can sleep forever. This is
+the leading hypothesis, not yet hardware-confirmed.
 
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
