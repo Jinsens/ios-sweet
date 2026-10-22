@@ -223,11 +223,16 @@ def build(seed=None, qemu=False, highmem=False, board="sweet"):
         ('panel', cstr('l11_38_0a_0a_dsc_cmd')),
     ])]
 
-    # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
+    # bsd/dev/sweet_ufs.c: the UFS host the bootloader leaves running.
+    # matisse is MediaTek ufshci@112b0000; sweet is the Qualcomm host.
+    if board == 'matisse':
+        ufs_compat, ufs_base, ufs_size = 'mediatek,mt8183-ufshci', 0x112b0000, 0x1000
+    else:
+        ufs_compat, ufs_base, ufs_size = 'qcom,ufshc', UFS, UFS_SIZE
     ufs = node('sweet-ufs', [
         ph(),
-        ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(UFS, UFS_SIZE)),
+        ('compatible', cstr(ufs_compat)),
+        ('reg', u64(ufs_base, ufs_size)),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -260,7 +265,7 @@ def build(seed=None, qemu=False, highmem=False, board="sweet"):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + display + product + ([] if qemu or board == 'matisse' else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + display + product + ([] if qemu else [ufs]))
 
 
 if __name__ == '__main__':

@@ -38,7 +38,7 @@ class BoardProfileTests(unittest.TestCase):
         self.assertEqual((d+mkadt.SOC_BASE, ds, r+mkadt.SOC_BASE, rs),
                          (0xc400000, 0x40000, 0xc440000, 0x200000))
 
-    def test_matisse_ram_framebuffer_identity_and_no_qualcomm_ufs(self):
+    def test_matisse_ram_framebuffer_identity_and_mtk_ufs(self):
         root = self.build(board='matisse')
         blob = adt.serialize(root)
         self.assertEqual(mkpayload.adt_dram(blob), (0x100000000, 0x12e000000))
@@ -47,7 +47,9 @@ class BoardProfileTests(unittest.TestCase):
         self.assertEqual(words(fb.prop('width'), 32), (1440,))
         self.assertEqual(words(fb.prop('height'), 32), (3200,))
         self.assertEqual(words(fb.prop('stride'), 32), (5760,))
-        self.assertNotIn('sweet-ufs', [c.name for c in root.children])
+        ufs = child(root, 'sweet-ufs')
+        self.assertIn(b'mediatek,mt8183-ufshci\0', ufs.prop('compatible'))
+        self.assertEqual(words(ufs.prop('reg')), (0x112b0000, 0x1000))
         self.assertEqual(root.prop('model'), b'iPhone10,3\0')
         self.assertIn(b'D22AP\0', root.prop('compatible'))
         self.assertIn(b'xiaomi,matisse\0', root.prop('compatible'))
