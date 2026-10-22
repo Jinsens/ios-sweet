@@ -23,9 +23,11 @@ hardware** (`kernel_bootstrap_thread` after `current_processor`).
 `idle_thread_create`, `sched_startup` (first real `thread_block` round trip)
 and `thread_daemon_init` have also returned on hardware. The kernel then
 reached `spllo()` with interrupts enabled and returned from
-`initialize_screen`. Selective diagnostic vectors are hardware-proven.
-Timer-interrupt delivery, BSD/userspace and full kernel boot remain unproven.
-These checkpoints alone do not verify visible panel refresh.
+`initialize_screen`. Selective diagnostic vectors are hardware-proven, and a
+500 ms CNTVCT busy-wait with interrupts enabled advanced `sched_tick` by 3:
+timer-interrupt delivery and scheduler maintenance are proven. BSD/userspace
+and full kernel boot remain unproven. These checkpoints alone do not verify
+visible panel refresh.
 
 **Completed: `sched_startup` return (hardware PASS).**
 `shim/out/entryprobe-el1-sched-startup-brk.img`, 26,562,560 B, SHA256
@@ -85,9 +87,9 @@ back the full original and verify the hash; on failure, restore the trimmed
 stock prefix via fastboot, boot Recovery, then write the full backup. Never
 leave a test image in `boot_a`.
 
-**Next:** checkpoint after `kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL)`
-and then reach `spllo()`/`initialize_screen`; timer IRQ delivery under the
-normal XNU vectors is still unproven.
+**Next:** extend execution past `initialize_screen` toward `bsd_init`, then
+provide a RAM-disk root; the current payload still has no `RAMDisk` node and
+no root-device boot argument.
 
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
@@ -109,13 +111,11 @@ Recovery about 30 s after `adb reboot recovery`; predicted written-partition
 SHA256 `8ac9faaa...` matched the full readback, and the complete original was
 written back and verified as `2931647a...`.
 
-This still does **not** prove a timer IRQ was delivered: the scheduler tick
-interval is 125 ms (`SCHED_TICK_SHIFT=3`), and the code between `spllo()` and
-this checkpoint may be shorter. A dedicated tick probe (busy-wait with
-interrupts enabled, then read `sched_tick`, which only increments in the
-scheduler maintenance continuation) is the next step.
+That checkpoint alone did not prove a timer IRQ was delivered (the scheduler
+tick interval is 125 ms and the code between `spllo()` and it may be shorter).
+The dedicated probe below did.
 
-**Prepared, host-verified, NOT flashed: timer-tick proof.**
+**Completed: timer-tick proof (hardware PASS).**
 `shim/out/entryprobe-el1-tick-brk.img`, 26,562,560 B, SHA256
 `80c8f80fc924c94900c11f3c37b35a2a116dd728d81c21e1b80075c22a731a64`;
 payload SHA256 `a9dcaf248023333832276bffab285cacb5fc8f7ca43789ed3647b332ba9ca9fb`.
@@ -127,14 +127,16 @@ reads `sched_tick` (VA `0xfffffe0007b94698`), busy-waits 6,500,000
 `CNTVCT_EL0` ticks (500 ms at the measured 13 MHz) with interrupts left
 enabled, re-reads `sched_tick`, subtracts, and executes BRK #0x5357.
 
-Expected same-boot record: `pc=fffffe000748d744`, `esr=f2005357`,
-`x0 = sched_tick delta`. **x0 > 0 proves timer interrupt delivery and a live
-scheduler-maintenance wakeup** (the 125 ms maintenance deadline woke the
-thread). x0 = 0 only means no maintenance wakeup ran during the window, not
-that no IRQ was ever delivered. The wait uses CNTVCT directly, so a broken
-interrupt path still returns instead of hanging. New tool
-`tools/xnu_tickprobe.py`; 44 tools tests pass. The image uses the same
-dual-slot selective vectors, 128 MiB cleanup range and TTBR0 restore.
+Same-boot `tick-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe000748d744`, x0 `3`. The
+`sched_tick` delta of 3 over 500 ms proves timer interrupts were delivered,
+XNU's normal IRQ path ran, and the scheduler maintenance continuation ran
+three times. The wait uses CNTVCT directly, so a broken interrupt path would
+still have returned with x0 0. Predicted written-partition SHA256
+`2f895215...` matched the full readback; the complete original was written
+back and verified as `2931647a...`. Tool `tools/xnu_tickprobe.py`; 44 tools
+tests pass. The image uses the same dual-slot selective vectors, 128 MiB
+cleanup range and TTBR0 restore.
 
 **Completed: bootstrap-thread checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
