@@ -78,6 +78,30 @@ exists, and Recovery dmesg says `mtk-wdt 1c007000.watchdog: Watchdog enabled
 shim leaves the WDT disabled in these probe builds. A probe that misses will
 hang with no automatic Recovery return; recover with Power + Volume Down.
 
+
+**UFS fixes and matisse probe (2026-10-23).** Three shim bugs from the roadmap
+review are fixed (commit `b2dc0c2`): GPT entry LBA/count are now little-endian
+with a 64-bit entry LBA and a 128-byte entry-size check; the Command UPIU sets
+the W flag for host-to-device writes; the command timeout uses the real
+`cntfrq_el0` instead of a fixed 19.2 MHz. The matisse ADT now exposes
+`/sweet-ufs` at `0x112b0000/0x1000`, compatible `mediatek,mt8183-ufshci`
+(commit `d242d41`), so `bsd/dev/sweet_ufs.c` can attempt the host takeover.
+
+Recovery baseline (read-only): `ufshcd-mtk 112b0000.ufshci`, Samsung
+KLUDG4UHGC-B0E1, three LUNs; LUN0 is `sdc`, 124,960,768 KiB; link is gear 4,
+2 lanes, FAST MODE. The live FDT UFS base is `0x112b0000`.
+
+UFS probe image prepared, NOT flashed: `shim/out/shim-boot-0085-ufs.img`,
+7,004,160 B, SHA256
+`d4f3746ce3cffe3f29f013da8b11224e49d09ce7b797a58aeef5c4804815c512`;
+payload 16,605,840 B SHA256
+`60f82519ca572b355c44986a81cd36f05cd7e70215fd9ecf2022a8294e02d77f`,
+ADT 4664 B SHA256 `1020d120...`, cmdline includes `rd=ufsroot0 ufsrw=0
+serial=0`. Predicted partition `1f41b3a7280582351b9724282ef4cb081077b6c8cb24b007407baa269aa34271`.
+Expected panel output: `SWEET UFS: "userdata" on LUN 0 ... read-only`. Since
+userdata is still Android f2fs, the HFS root mount will then fail; that is
+expected. The UFS driver lines are the test.
+
 **Display constants audit.** For matisse the active values are correct:
 `shim/board.c` and `tools/mkadt.py` select `0xfcb3f000`, 1440x3200, stride
 5760, and the live FDT overrides them. `0x9c000000` / 1080x2400 are only the
