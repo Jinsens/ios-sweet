@@ -97,6 +97,19 @@ leave a test image in `boot_a`.
 
 **Docs:** `docs/matisse-xnu-ios-roadmap-zh.md` updated on 2026-10-23 with the scheduler, timer-IRQ, lockdown, kperf and `bsd_init` results.
 
+**ACTIVE: production RAM-disk boot reaches load_init but console is dark
+(2026-10-23).** Production images `fa6607a8...` (original waits) and
+`236b9828...` (RTC/IOMedia waits bypassed) were flashed; both stayed static
+with a black/logo screen and no Recovery, so the AP watchdog remained off and
+the kernel did not reset. A third production image `996197e5...` also NOPed the
+`bl sweet_display_init` in `serial_init` (`0xfffffe0007a7c73c`); the screen
+stayed dark. Diagnostic BRK evidence proves `bsd_init` executed through
+`vfs_mountroot` (x0=0) and `load_init_program` entry. `mountroot` success means
+mockfs/md0 is mounted. What remains unproven is PID 1 execution/console: the
+framebuffer console shows nothing, and the init's first action
+`open("/dev/console")` may block or the console may be headless. Next evidence
+path should be the XNU msgbuf/serial, not more blind framebuffer boots.
+
 **ACTIVE: diagnostic watchdog artifact found (2026-10-23).**
 `mkentryprobe.py` compiles the shim with `WDT_AUTO_RESET`, which re-arms the
 MT6983 31 s AP watchdog so a hung XNU resets. Every "infinite reboot" after a
