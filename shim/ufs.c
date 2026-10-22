@@ -84,6 +84,11 @@ static uint32_t be32(const uint8_t *p)
 	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
+static uint32_t le32(const uint8_t *p)
+{
+	return (uint32_t)p[3] << 24 | (uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0];
+}
+
 static uint64_t le64(const uint8_t *p)
 {
 	uint64_t v = 0;
@@ -113,7 +118,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 
 	/* Command UPIU: header (12 bytes), expected length, CDB. */
 	ucd.cmd[0] = 0x01;			/* transaction type: COMMAND */
-	ucd.cmd[1] = dir == 1 ? 0x40 : 0x00;	/* flags: R (data in) */
+	ucd.cmd[1] = dir == 1 ? 0x40 : dir == 2 ? 0x20 : 0x00;	/* R / W data direction */
 	ucd.cmd[2] = lun;
 	ucd.cmd[3] = ++tag;
 	ucd.cmd[12] = len >> 24;
@@ -141,8 +146,10 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 
 	ufs_wr(REG_UTRLDBR, 1);
 	uint64_t start = ticks();
+	uint64_t freq;
+	__asm__ volatile("isb; mrs %0, cntfrq_el0" : "=r"(freq));
 	while (ufs_rd(REG_UTRLDBR) & 1) {
-		if (ticks() - start > 19200000) {	/* 1 s */
+		if (ticks() - start > freq) {		/* 1 s at the real CNTFRQ */
 			ufs_wr(REG_UTRLCLR, ~1u);	/* clear slot 0 (write 0 to the bit) */
 			return 1;			/* timeout */
 		}
@@ -215,8 +222,11 @@ static int gpt_entries(uint32_t *entry_lba, uint32_t *nent)
 	if (gpt[0] != 'E' || gpt[1] != 'F' || gpt[2] != 'I' || gpt[3] != ' ' ||
 	    gpt[4] != 'P' || gpt[5] != 'A' || gpt[6] != 'R' || gpt[7] != 'T')
 		return 1;
-	*entry_lba = be32(gpt + 72);
-	*nent = be32(gpt + 80);
+	uint64_t entry = le64(gpt + 72);		/* GPT fields are little-endian */
+	*nent = le32(gpt + 80);
+	if (entry > 0xffffffffu || le32(gpt + 84) != 128)
+		return 1;
+	*entry_lba = (uint32_t)entry;
 	return *nent > 128 ? 1 : 0;
 }
 
