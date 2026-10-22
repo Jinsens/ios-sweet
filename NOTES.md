@@ -1,16 +1,17 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): complete XNU arm_vm_init passed; console initialization next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU serial_init succeeds; later platform startup next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`post-vm-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`post-serial-x0-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
 construction and the first switch to those tables inside arm_vm_init are
 hardware-proven, as are TTBR0 teardown, TLB invalidation and early console
 mark 10 using the relocated framebuffer, and the complete arm_vm_init return.
-Console initialization, later startup and full kernel boot remain unproven.
+serial_init also returned success (x0=1) on hardware. Later startup and full
+kernel boot remain unproven. This alone does not verify visible panel refresh.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
 Each test below had explicit user approval including restoration. This LK
@@ -78,9 +79,10 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request approval for prepared post-serial_init
-image `e9888fe6` below. Expect `pc=fffffe0007ad6164 esr=f2005357 fault=1`;
-the new x0 field records serial_init's return value (1 means success).
+**Next concrete action:** validate the checkpoint after PE_init_platform(TRUE),
+VA `0xfffffe0007ad62d8` (offset `0x649e50`). Host simulation currently exhausts
+its post-TTBR0 20M-instruction budget in fbcon_init's clearing loop; increase
+that bound and inspect the next result before proposing another hardware test.
 The shared relay restores bootstrap TTBR0 only on exception; the older
 per-slot relay cannot be used after identity-map teardown.
 
@@ -352,7 +354,7 @@ The entire arm_vm_init returned to arm_init. Automatic Recovery return and
 complete 64 MiB original boot_a restoration/hash verified; evidence includes
 `post-vm-brk-manifest.json` and restored readback.
 
-**Prepared, NOT flashed: console initialization checkpoint with return value**
+**Completed: console initialization checkpoint with return value**
 `shim/out/entryprobe-el1-post-serial-x0-brk.img`, 26,562,560 B, SHA256
 `e9888fe6991bfa4c3084bb60d3b57ffe5c4567c25e144fae26bf2518642b840d`.
 Payload `shim/out/matisse-xnu-post-serial-brk.payload` SHA256
@@ -374,6 +376,13 @@ MMIO remains modeled; a successful host display state is NOT proof of
 hardware panel refresh. Evidence: `post-serial-x0-brk-emulation.txt`.
 The older `post-serial-brk` image `dabd026d` has no x0 field and was never
 flashed; use the x0 image above. Full VM hardware milestone `c4c2014`.
+Return-value recorder commit `e24a92c`.
+**Hardware PASS (explicitly approved):** same-boot
+`post-serial-x0-brk-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007ad6164 x0=1`.
+serial_init returned success. Automatic Recovery return and complete original
+64 MiB boot_a hash verified after restoration. No user panel observation has
+been collected for this round; don't equate x0=1 with visible text.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
