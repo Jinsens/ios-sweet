@@ -1,16 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU TTBR0 teardown passed; arm_vm_init return next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): complete XNU arm_vm_init passed; console initialization next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`ttbr0-off-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`post-vm-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
 construction and the first switch to those tables inside arm_vm_init are
 hardware-proven, as are TTBR0 teardown, TLB invalidation and early console
-mark 10 using the relocated framebuffer. Later VM initialization and full
-kernel boot remain unproven.
+mark 10 using the relocated framebuffer, and the complete arm_vm_init return.
+Console initialization, later startup and full kernel boot remain unproven.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
 Each test below had explicit user approval including restoration. This LK
@@ -78,8 +78,9 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request approval for prepared arm_vm_init return
-checkpoint `9ac98004` below, at VA `0xfffffe0007ad6128` (offset `0x649ca0`).
+**Next concrete action:** validate a post-serial_init checkpoint at VA
+`0xfffffe0007ad6164` (offset `0x649cdc`), including MMIO/clock model coverage,
+allocation extent and diagnostic return, then request separate approval.
 The shared relay restores bootstrap TTBR0 only on exception; the older
 per-slot relay cannot be used after identity-map teardown.
 
@@ -329,7 +330,7 @@ executed. The shared relay restored bootstrap TTBR0 and returned to Recovery.
 Complete 64 MiB original boot_a hash verified after restoration; see
 `ttbr0-off-brk-manifest.json` and full restored readback.
 
-**Prepared, NOT flashed: complete arm_vm_init checkpoint**
+**Completed: complete arm_vm_init checkpoint**
 `shim/out/entryprobe-el1-post-vm-brk.img`, 26,562,560 B, SHA256
 `9ac98004aea8b30e9ab6a5a5d1360c66930d814d2ed2622154b438dbbb032b89`.
 Payload SHA256 `534508b7776fc84aba87edd866b5a5373684a390d82e64f5c02136c4557399a2`.
@@ -343,8 +344,13 @@ reaches the return, allocation end `0x102838000` is inside cleanup, bootstrap
 identity table contents still cover the cleanup aliases, current TTBR0 is
 empty and formal TTBR1 still maps the high relay RX. Restores original
 SCTLR/SP/SPSel/DTB and returns to Linux. Modeling limitations above still
-apply; no hardware result yet. No new tracked source change, no new CI.
-TTBR0 hardware result commit `7090a94`.
+apply. No new tracked source change, no new CI. TTBR0 result `7090a94`;
+post-VM preparation `0e9e385`.
+**Hardware PASS (explicitly approved):** same-boot `post-vm-brk-dmesg.txt`
+records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007ad6128`.
+The entire arm_vm_init returned to arm_init. Automatic Recovery return and
+complete 64 MiB original boot_a restoration/hash verified; evidence includes
+`post-vm-brk-manifest.json` and restored readback.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
