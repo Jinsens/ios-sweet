@@ -82,9 +82,9 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** investigate a checkpoint after vm_page_bootstrap,
-VA `0xfffffe0007abfab0` (offset `0x633628`), with a reviewed allocation and
-cache-clean bound. Do not use the bootstrap-table relay after
+**Next concrete action:** request approval for prepared post-vm_page_bootstrap
+image `e9b81b88` below, VA `0xfffffe0007abfab0` (offset `0x633628`).
+Do not use the bootstrap-table relay after
 vm_retire_boot_pages without separately proving those tables survive.
 The shared relay restores bootstrap TTBR0 only on exception; the older
 per-slot relay cannot be used after identity-map teardown.
@@ -437,6 +437,26 @@ records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007ad63a0`,
 x0 `fffffe0007177a68` (boot_args). CPU/timer/GIC context initialization,
 chosen-property checks and early_random ran. Automatic Recovery return and
 complete original 64 MiB boot_a restoration/hash verified.
+
+**Prepared, NOT flashed: kernel_bootstrap through vm_page_bootstrap**
+`shim/out/entryprobe-el1-post-vm-page-brk.img`, 26,562,560 B, SHA256
+`e9b81b88927d98d3b1eef0876679f661ffc610ee498cc9a481b38692c267f461`.
+Payload SHA256 `3d6f731bb3ad5e5fe2629ddc0489ba9ebe2f003ff988eda2246b47607ab9992d`.
+BRK offset `0x633628` at VA `0xfffffe0007abfab0` / PA `0x101abfab0`,
+after vm_page_bootstrap returns inside vm_mem_bootstrap; before zone/object
+bootstrap and vm_retire_boot_pages. Uses the existing shared relay/x0
+recorder with cleanup extended to `0x108000000` (128 MiB). Predicted
+partition SHA256 `02d97949e29ca0de8386f88a869c2cfbaf71311c1b3b519ee1bf3e1d8c9ebc2c`.
+
+Cross-compile and modeled execution pass (`post-vm-page-brk-emulation.txt`).
+vm_pages spans VA `0xfffffe000eb38000` to `0xfffffe000f9356d0`; sampled
+first/last mappings point to PA `0x102ac4000` and `0x1038c16cf` respectively,
+inside the cleanup range. The modeled managed-RAM window is limited to
+128 MiB; bootstrap identity aliases across that window and high vectors
+are checked before executing the fallback. DAIF stays masked, GIC model
+checks pass, and original boot registers are restored at Linux entry.
+This remains a modeled result, not hardware success. No new source changes
+or CI. CPU/GIC hardware milestone `cfb5e8c`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
