@@ -77,7 +77,7 @@ class BreakpointTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'padded'):
             high_vector_pa(source, -0x800)
 
-    def test_selective_vectors_require_a_branch_in_the_el1h_slot(self):
+    def test_selective_vectors_require_a_branch_in_every_sync_slot(self):
         source = bytearray(payload()) + bytearray(0xc00)
         struct.pack_into('<Q', source, 24, 0xfffffe0006001800)
         struct.pack_into('<4Q', source, 0x2a8,
@@ -86,12 +86,14 @@ class BreakpointTests(unittest.TestCase):
             struct.pack_into('<32I', source, 0x300 + slot * 128,
                              0x14000400, *([0xd503201f] * 31))
         self.assertEqual(high_vector_sync_va(source, -0x800), 0xfffffe0006001000)
-        for slot in (0, 4):
+        self.assertEqual(high_vector_sync_va(source, -0x800, el0=True),
+                         0xfffffe0006001000)
+        for slot in (0, 4, 8):
             with self.subTest(slot=slot):
                 tester = bytearray(source)
                 struct.pack_into('<I', tester, 0x300 + slot * 128, 0xd503201f)
                 with self.assertRaisesRegex(ValueError, 'synchronous slots'):
-                    high_vector_sync_va(tester, -0x800)
+                    high_vector_sync_va(tester, -0x800, el0=True)
 
     def test_bootstrap_clean_range_includes_adt_alignment_and_boot_args(self):
         self.assertEqual(bootstrap_clean_range(payload()), (0x100000000, 0x10000c000))

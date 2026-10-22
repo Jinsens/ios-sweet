@@ -56,6 +56,8 @@ class ProbeLayoutTests(unittest.TestCase):
         record, offsets = mkentryprobe.banner_record()
         self.assertLessEqual(len(record), 407)  # measured test kernel capacity
         self.assertTrue(record.endswith(b'\n\0'))
+        self.assertEqual(offsets['x16'], offsets['x0'] + 21)
+        self.assertEqual(offsets['spsr'], offsets['x16'] + 22)
         for name in mkentryprobe.FIELDS:
             at = offsets[name]
             self.assertEqual(record[at:at+16], b'0' * 16)

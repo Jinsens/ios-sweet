@@ -183,6 +183,15 @@ probe_record_fault:
 	b.eq	5f
 	mrs	x0, esr_el1
 	banner_field ENTRY_ESR
+#ifdef ENTRY_X16
+	/* The EL0 selective stub passes the interrupted x16 in x12. */
+	mov	x0, x12
+	banner_field ENTRY_X16
+#endif
+#ifdef ENTRY_SPSR
+	mrs	x0, spsr_el1
+	banner_field ENTRY_SPSR
+#endif
 	mrs	x0, far_el1
 	banner_field ENTRY_FAR
 	mrs	x0, elr_el1
@@ -477,13 +486,15 @@ probe_mmu_literals_end:
 probe_mmu_vector_end:
 
 #ifdef ENTRY_XNU_SELECTIVE
-	/* Selective mode keeps XNU's normal vectors intact. Only the EL1h
-	 * synchronous slot is redirected here: the inserted diagnostic BRK is
-	 * taken there, while every other exception, including IRQ/FIQ and EL0
-	 * page faults, reaches the original XNU handler unchanged.
+	/* Selective mode keeps XNU's normal vectors intact. The EL1t/EL1h
+	 * synchronous slots are redirected here for the inserted diagnostic
+	 * BRK; with ENTRY_EL0_SYSCALL the EL0 AArch64 synchronous slot is
+	 * redirected too, for the userspace syscall checkpoint. Every other
+	 * exception, including IRQ/FIQ and non-matching EL0 faults, reaches
+	 * the original XNU handler unchanged.
 	 * The stub runs with SP_EL1 (kernel stack); it saves the two scratch
-	 * registers it uses, checks ESR for BRK #0x5357, and forwards anything
-	 * else to the original slot target read at install time.
+	 * registers it uses, checks ESR and (for EL0) SPSR/x16, and forwards
+	 * anything else to the original slot target read at install time.
 	 * The diagnostic path branches to the relay copy in slot 12 (0x400
 	 * bytes after slot 4). Slots 12/13 are AArch32 EL0 vectors, unused by
 	 * the arm64 iOS userspace this probe targets. */
@@ -491,20 +502,35 @@ probe_mmu_vector_end:
 	.globl probe_sel_stub, probe_sel_stub_end, probe_sel_forward, probe_sel_relay_branch
 probe_sel_stub:
 	stp	x16, x17, [sp, #-16]!
-	mrs	x16, esr_el1
-	lsr	x17, x16, #26
-	cmp	x17, #0x3c
-	b.ne	1f
-	and	x16, x16, #0xffff
+	mrs	x17, esr_el1
+	lsr	x16, x17, #26
+#ifdef ENTRY_EL0_SYSCALL
+	cmp	x16, #0x15		/* SVC64 */
+	b.ne	3f
+	mrs	x16, spsr_el1
+	and	x16, x16, #0xf		/* only a real EL0t caller */
+	cbnz	x16, 2f
+	ldr	x16, [sp]		/* interrupted x16 = syscall number */
+	mov	w17, #ENTRY_EL0_SYSCALL
+	cmp	w16, w17
+	b.ne	2f
+	mov	x12, x16		/* recorder reads the number from x12 */
+	b	1f
+3:
+#endif
+	cmp	x16, #0x3c		/* BRK */
+	b.ne	2f
+	and	x16, x17, #0xffff
 	mov	w17, #0x5357
 	cmp	w16, w17
-	b.ne	1f
+	b.ne	2f
+1:
 	ldp	x16, x17, [sp], #16
 	mov	x13, #0
 	.globl probe_sel_relay_branch
 probe_sel_relay_branch:
 	b	.			/* patched to the slot-12 relay at install */
-1:
+2:
 	ldp	x16, x17, [sp], #16
 	.globl probe_sel_forward
 probe_sel_forward:

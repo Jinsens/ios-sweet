@@ -63,18 +63,19 @@ def high_vector_pa(payload, offset):
     return pa
 
 
-def high_vector_sync_va(payload, offset):
+def high_vector_sync_va(payload, offset, el0=False):
     """Validate the selective-vector precondition and return the table VA.
 
-    Selective mode redirects only the EL1h synchronous slot; it must start
-    with a branch to the original XNU handler, which the installer decodes
-    and preserves.
+    Selective mode redirects the EL1t and EL1h synchronous slots; it must
+    start with a branch to the original XNU handler, which the installer
+    decodes and preserves. With el0=True the EL0 AArch64 synchronous slot
+    is redirected as well, for the userspace syscall checkpoint.
     """
     at, va, _ = payload_location(payload, offset, 2048)
-    for slot in (0, 4):
+    for slot in (0, 4, 8) if el0 else (0, 4):
         insn, = struct.unpack_from('<I', payload, at + slot * 128)
         if insn & 0xfc000000 != 0x14000000:
-            raise ValueError('selective vectors require a branch in both synchronous slots')
+            raise ValueError('selective vectors require a branch in all synchronous slots')
     return va
 
 

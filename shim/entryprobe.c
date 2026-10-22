@@ -48,11 +48,11 @@ void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 #endif
 #if defined(ENTRY_XNU_HIGH_VECTOR_PA) && defined(ENTRY_XNU_SELECTIVE)
 	/* Keep every normal XNU vector. The EL1t and EL1h synchronous slots
-	 * both get a stub: XNU normally runs with SPSel=0 (EL1t), while some
-	 * paths use SP_EL1, and the diagnostic BRK must be caught either way.
-	 * All other exceptions forward to the original handlers. The relay
-	 * body is copied to slot 12 (AArch32 EL0 sync), unused by arm64
-	 * userspace. */
+	 * get a stub for the diagnostic BRK; with ENTRY_EL0_SYSCALL the EL0
+	 * AArch64 synchronous slot (8) gets the same stub for the userspace
+	 * syscall checkpoint. All other exceptions forward to the original
+	 * handlers. The relay body is copied to slot 12 (AArch32 EL0 sync),
+	 * unused by arm64 userspace. */
 	extern const uint32_t probe_sel_stub[], probe_sel_stub_end[];
 	extern const uint32_t probe_sel_forward[], probe_sel_relay_branch[];
 	extern const uint32_t probe_mmu_vector[], probe_mmu_identity[], probe_mmu_physical[];
@@ -64,7 +64,13 @@ void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 	uintptr_t fwd_off = (uintptr_t)probe_sel_forward - (uintptr_t)probe_sel_stub;
 	uintptr_t relay_off = (uintptr_t)probe_sel_relay_branch - (uintptr_t)probe_sel_stub;
 	unsigned stub_words = ((uintptr_t)probe_sel_stub_end - (uintptr_t)probe_sel_stub) / 4;
-	for (unsigned slot_index = 0; slot_index <= 4; slot_index += 4) {
+	static const unsigned sync_slots[] = { 0, 4, 8 };
+	unsigned sync_count = 2;
+#ifdef ENTRY_EL0_SYSCALL
+	sync_count = 3;
+#endif
+	for (unsigned si = 0; si < sync_count; si++) {
+		unsigned slot_index = sync_slots[si];
 		uintptr_t slot = hv + slot_index * 128;
 		uint64_t slot_va = ENTRY_XNU_HIGH_VECTOR_VA + slot_index * 128;
 		uint32_t insn = *(volatile uint32_t *)slot;

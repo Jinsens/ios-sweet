@@ -22,7 +22,8 @@ from xnu_breakpoint import early_vector_pa, high_vector_pa, high_vector_sync_va,
 
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
-          'fault', 'esr', 'far', 'pc', 'gicd', 'vtimer', 'fb', 'x0')
+          'fault', 'esr', 'far', 'pc', 'gicd', 'vtimer', 'fb', 'x0',
+          'x16', 'spsr')
 DISPLAY_RECORD_FIELDS = tuple('0123456789abcdefghijk')
 DISPLAY_LEVELS = ('display', 'display-kick', 'xnu')
 LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5,
@@ -135,7 +136,8 @@ def prepare(template, level=None):
 
 def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None,
           xnu_vector_offset=None, xnu_high_vector_offset=None, xnu_clean=False,
-          xnu_clean_limit=None, xnu_restore_ttbr0=None, xnu_selective=False):
+          xnu_clean_limit=None, xnu_restore_ttbr0=None, xnu_selective=False,
+          xnu_el0_syscall=None):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
@@ -170,7 +172,13 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
     if xnu_selective:
         if high_pa is None or clean_range is None or restore_ttbr0 is None:
             raise ValueError('selective vectors require high vectors, cache cleanup and TTBR0 restore')
-        high_va = high_vector_sync_va(payload, xnu_high_vector_offset)
+        high_va = high_vector_sync_va(payload, xnu_high_vector_offset,
+                                      el0=xnu_el0_syscall is not None)
+    if xnu_el0_syscall is not None:
+        if not xnu_selective:
+            raise ValueError('EL0 syscall trap requires selective vectors')
+        if not 0 <= xnu_el0_syscall <= 0xffff:
+            raise ValueError('EL0 syscall number must be 0..0xffff')
     payload_offset = None
     if payload is not None:
         if len(payload) < 0x2a8 or payload[:8] != b'SWEETXNU':
@@ -224,6 +232,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
         if xnu_selective:
             config += '#define ENTRY_XNU_SELECTIVE 1\n'
             config += f'#define ENTRY_XNU_HIGH_VECTOR_VA {high_va:#x}ULL\n'
+        if xnu_el0_syscall is not None:
+            config += f'#define ENTRY_EL0_SYSCALL {xnu_el0_syscall}\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         linker = '''ENTRY(_head)
 SECTIONS {
@@ -309,6 +319,7 @@ SECTIONS {
         'xnu_restore_ttbr0': restore_ttbr0,
         'xnu_selective': xnu_selective,
         'xnu_high_vector_va': high_va,
+        'xnu_el0_syscall': xnu_el0_syscall,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
@@ -335,7 +346,9 @@ def main():
     ap.add_argument('--xnu-restore-ttbr0', type=lambda s: int(s, 0),
                     help='diagnostic: restore this verified bootstrap TTBR0 root on exception; contents and TCR must remain compatible')
     ap.add_argument('--xnu-selective', action='store_true',
-                    help='diagnostic: intercept only the EL1h BRK in slot 4 and leave all normal XNU vectors intact')
+                    help='diagnostic: intercept the EL1 synchronous slots and leave all normal XNU vectors intact')
+    ap.add_argument('--el0-syscall', type=lambda s: int(s, 0),
+                    help='diagnostic: abort at the first EL0 AArch64 SVC with this syscall number')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
@@ -343,7 +356,7 @@ def main():
     try:
         build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload,
               a.xnu_vector_offset, a.xnu_high_vector_offset, a.xnu_clean, a.xnu_clean_limit,
-              a.xnu_restore_ttbr0, a.xnu_selective)
+              a.xnu_restore_ttbr0, a.xnu_selective, a.el0_syscall)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

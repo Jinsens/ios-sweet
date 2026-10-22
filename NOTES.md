@@ -1,43 +1,71 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> TEST IN FLIGHT 2026-10-23 04:50: 0085 screen test is ON boot_a - restore pending <<<
+## >>> ACTIVE 2026-10-23: 0085 result is static logo; boot_a restored; PID 1 EL0 probe prepared <<<
 
-**Do not hand off without restoring `boot_a`.** The device was rebooted into
-the 0085 test image at 04:49; ADB is gone and no fastboot device is present.
-After the screen result, hold Power + Volume Down to fastboot, flash
-`backup/boot_a-stock-trim.img`, boot Recovery and write
-`backup/recovery-20261021/boot_a-live-20261021.img`, then verify the full
-67,108,864-byte SHA256
-`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+**Current device (read-only adb this turn): Recovery, root, slot `_a`.** The
+0085 screen test is finished, not in flight. It stayed on the first logo with
+no shim or XNU text. `boot_a` was restored from the full 64 MiB backup and
+verified as the full-partition SHA256
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`; no
+`userdata` write. Each new `boot_a` write still needs explicit approval.
 
-Test image: `shim/out/shim-boot-0085.img`, 7,008,256 B, SHA256
-`1cbb26416841df190b7bbee0d4da76f837562649aa6bbd8202aba14b5f3decb6`, built from
-CI run 39850065490 (head `ced3cc5`, success) kernel
-`xnu/out/ci-39850065490/kernel.development.sweet` (17,222,752 B, SHA256
-`87c607e720090c03bc321029a8668797d6c658b4ac279f8304fdaa05b0eeaf43`), payload
-`shim/out/matisse-xnu-0085-ramdisk.payload` (16,622,352 B, SHA256
-`22bd074f3a9a75c8d01f181689bcdf5db60764bcbfe639a3cca1d7e6afe56379`), same ADT
-`shim/out/matisse.adt` (`14b536f6...`), same cmdline (`rd=md0 ...`) and
-`research/sweet-init` (`f5de3714...`), template `backup/boot_a-stock.img`
-(`7a6a462d...`). The write was verified: full partition readback SHA256
-`302f2012d9a7acfb3ec415072b8061c210ef12f9d2e004e225bd1bac5812c217` matched
-the predicted hash. Baseline before the write was `2931647a...`; battery 100 %,
-slot `_a`.
+**The logo and the BSD result are separate.** Diagnostic BRK records prove
+`bsd_init` ran through `vfs_mountroot` (x0=0) and reached `load_init_program`;
+mockfs/md0 was mounted. The panel showing LK's first logo says only that the
+command-mode DSI path is not pushing new frames, not that the kernel stopped.
+PID 1 execution is still unproven.
 
-**Bug found and fixed before this run.** Patch 0085's `#if defined(SWEET)` in
-`osfmk/console/video_console.c` was false: SWEET is defined only by
-`pexpert/arm64/board_config.h`, which that file did not include. CI would have
-built a no-op. The patch now includes `<arm64/sweet_matisse_dsi.h>`
-unconditionally (the header includes board_config.h and provides inline no-ops
-otherwise) and calls `sweet_display_refresh(0)` unconditionally. Local
-`tools/xnu-cc.py` compile emits an undefined `_sweet_display_refresh`, and the
-linked CI kernel tail-calls `_sweet_display_refresh` from `_vcputc_options`
-(`b 0xfffffe00074859f8`). Commit `ced3cc5`.
+**Watchdog fact check (device evidence, correcting the `WDT_AUTO_RESET`
+theory).** MediaTek does have a WDT here: the live DTB has
+`watchdog@1c007000` compatible `mediatek,mt6983-wdt`, `/sys/class/watchdog/watchdog0`
+exists, and Recovery dmesg says `mtk-wdt 1c007000.watchdog: Watchdog enabled
+(timeout=31 sec, nowayout=0)`; the current boot command line carries
+`aee_aed.pureason=Watchdog`. The WDT is real. However, current
+`tools/mkentryprobe.py` does not define `WDT_AUTO_RESET` or `XNU_DIAG`
+(confirmed by `llvm-nm`: no `shim_wdt_restore` in the diagnostic ELF), so the
+shim leaves the WDT disabled in these probe builds. A probe that misses will
+hang with no automatic Recovery return; recover with Power + Volume Down.
 
-Expected if the fix works: kernel console text on the 1440x3200 panel, then
-`load_init_program`, then `*** SWEET userspace: init running as PID 1 ***`
-and a heartbeat every 5 s. If the panel stays at the logo, the 0085 refresh
-path is still not effective; capture the last visible line before restoring.
+**Display constants audit.** For matisse the active values are correct:
+`shim/board.c` and `tools/mkadt.py` select `0xfcb3f000`, 1440x3200, stride
+5760, and the live FDT overrides them. `0x9c000000` / 1080x2400 are only the
+sweet/unknown-board fallbacks. Patch `0082` replaced the old early-console
+`0x9c000000` writes from `0010`/`0012` with Boot_Video arguments populated by
+`shim/loader.c`. Patches `0061`/`0046` still carry iPhone-X logical sizing for
+later userland (`1125x2436`, dot pitch 458); that does not explain the
+pre-userspace logo. No stale matisse framebuffer hardcode was found.
+
+**Next evidence: EL0 syscall checkpoints (host-built, NOT flashed).** The new
+selective vector also redirects slot 8 (AArch64 EL0 synchronous). It forwards
+ordinary syscalls unchanged and aborts to the proven Recovery relay at the
+first EL0 SVC whose x16 matches `--el0-syscall`. This directly proves whether
+`load_init_program` produced a running PID 1, and whether `open("/dev/console")`
+returned, without a display or UART.
+
+- `shim/out/entryprobe-el1-ramdisk-syscall-open.img`, 26,566,656 B, SHA256
+  `162320a626c3ddc0baf819bafa2ce72251aa580bbc1c232ea1a5efa5e315de30`.
+  `--el0-syscall 5`. Expected record: `esr=0000000056000080`,
+  `pc=00000000100000420`, `x0=000000001000004c0` (path pointer),
+  `x16=0000000000000005`, `spsr=0000000000000000`.
+- `shim/out/entryprobe-el1-ramdisk-syscall-write.img`, 26,566,656 B, SHA256
+  `23270c33bfedb861a2ffcb20fab639c80981d47d95dbb93aa29a282c4ea94f92`.
+  `--el0-syscall 4`. Expected record: `esr=0000000056000080`,
+  `pc=000000001000004a8`, `x0=0000000000000003` (console fd),
+  `x16=0000000000000004`, `spsr=0000000000000000`.
+- Both embed payload `shim/out/matisse-xnu-ramdisk-rtcfast.payload`, 16,622,400 B,
+  SHA256 `2ff27355d4c416516760243811ef6bec2bf71815dfbf18346060f36dd07d4a44`.
+  It is the hardware-passed RAM-disk kernel with the RTC and IOMedia 30 s waits
+  bypassed and the old `load_init_program` BRK removed (the only four words
+  differing from `matisse-xnu-ramdisk-init.payload` are the two waits, the
+  timeout branch and that BRK).
+- Build validation: banner record 384 B (cap 406), slot 8 original `b` kept,
+  stub 100 B (<128), embedded payload hash matched, key words checked
+  (`0x77ee118: d104c3ff`, `0x79ad070: d503201f`, `0x7a41e70: aa1f03e0`,
+  `0x7a41eb4: 14000007`, slot 8 `140003b3`). All 44 tools tests pass.
+- Suggested order: flash **open** first; a hit proves PID 1 executed. Then
+  flash **write**; a hit proves `open("/dev/console")` returned and the first
+  userspace write was issued. A miss on open means no EL0 execution (or a
+  dead vector), not merely a dark panel.
 
 ## >>> ACTIVE 2026-10-23 (Asia/Shanghai): BSD mounts md0; display refresh fix prepared <<<
 
