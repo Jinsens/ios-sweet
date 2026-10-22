@@ -73,9 +73,9 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** obtain separate approval for early-C test `98e8829d`
-below. Hardware has now passed the MMU-on checkpoint at `0x10148e530`.
-Next prove arm_init's initial C prologue, sweet_early_init and first marker.
+**Next concrete action:** obtain separate approval for pre-VM test `25d5d260`
+below. Hardware has passed early C at `0xfffffe0007ad58b0`. Next determine
+whether platform/CPU/timer/bootstrap startup reaches the arm_vm_init call.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -198,6 +198,26 @@ C prologue, sweet_early_init and first sweet_early_mark ran. Cache cleanup
 and automatic return to Recovery succeeded. Full 64 MiB original boot_a
 hash verified. MMU-on milestone `9161917`; bounded cleanup tooling `ccb1d03`.
 Next: stop before arm_vm_init while bootstrap identity mappings still exist.
+
+**Prepared, NOT flashed: pre-VM checkpoint**
+`shim/out/entryprobe-el1-pre-vm-brk.img`, 26562560 B, SHA256
+`25d5d260f4eb2f7ebb215062d81b8e97c5eabaebfa84aed9a17f1f015e0aef63`.
+Payload SHA256 `b7a0fe56181f8ae2104b2258c08f1bf7f6aedfcaf58e55dd3737cf7d17117a38`.
+BRK offset `0x649c9c` at VA `0xfffffe0007ad6124` / PA `0x101ad6124`
+replaces the call to arm_vm_init. Same bounded cache cleanup and low/high
+exception relays as the hardware-passed early-C test. No VM-map teardown
+or later device driver initialization executes. Static bootstrap storage
+remains inside the cleanup range.
+
+Host emulation reached this checkpoint and restored original SCTLR/SP/SPSel/
+DTB using Unicorn MAX (LSE atomics supported), modeled 16K translation,
+MMIO and exception entry. Default A72 model stops at LDADD; that is an
+emulator feature limitation, not evidence of a device failure. Log:
+`pre-vm-brk-max-emulation.txt`. Existing 33 host tests remain passing;
+no new source changes for this image. Predicted partition SHA256
+`f42873e5419cdc5a786c4f933f09d947775294c48333f11d042c800f9f90d43c`.
+Device remains restored in Recovery; await separate approval. Early-C
+hardware result committed as `ec4d84f`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
