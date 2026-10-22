@@ -1,12 +1,12 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU load-only control passed; entry breakpoint next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU entry BRK captured; pre-VBAR breakpoint next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
-sweet / Qualcomm target. XNU execution is still unproven.
+sweet / Qualcomm target. The diagnostic instruction at XNU entry is now hardware-proven; original early initialization remains unproven.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
 Each test below had explicit user approval including restoration. This LK
@@ -96,8 +96,25 @@ probe VBAR. Predicted written-partition SHA256
 `7268f4cea4d1c618b42f41c5cc49e79ebc3c00f384fd4036234aee8357f22d3e`.
 30 host tests pass. The first build attempt correctly rejected the restored
 live wrapper as a template (no original Linux banner); rebuilding from
-`backup/boot_a-stock.img` passed. Await separate approval for this test;
-no new device write has occurred. Device remains restored in Recovery.
+`backup/boot_a-stock.img` passed. **Hardware result (explicitly approved): PASS.** Same-boot Recovery banner:
+`stage=87 fault=5 esr=f2005357 far=0 pc=10148c488`. This is the exact inserted
+BRK at the XNU entry PA, proving the high-address branch/instruction fetch.
+The original entry branch was replaced for this diagnostic, so it does not
+prove original initialization completed. Device automatically returned to
+Recovery. Full boot_a SHA256 `2931647a...86b1` was verified after restoration.
+The first `adb exec-out dd` restoration readback ended early at 59,225,600 B
+without an error exit; on-device sha256sum matched, then a full tmp-file
+readback via adb pull verified all 67,108,864 bytes. Check lengths strictly.
+Evidence: `entry-brk-dmesg.txt`, `entry-brk-manifest.json`, `entry-brk-restored.img`.
+
+**Next image prepared, NOT flashed:** `entryprobe-el1-vbar-brk.img`,
+26562560 B, SHA256 `1291e310667744208e5328d72ca9c7c293e3ea2859dbddf86856725f57dd4660`.
+Breakpoint offset `0x1c7c` resolves to `0x10148e104`, the MSR VBAR_EL1
+instruction in start_first_cpu. The original entry branch, OSLAR/DAIF and
+boot_args-register preservation will execute before it. Only this one
+instruction differs in the inflated el1-xnu control. Predicted partition
+SHA256 `0275b58ed310012d43f647817b2a80933991eab5b500efa47b44be9f3f640f23`. Await this test's separate approval.
+Device remains restored in Recovery.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
