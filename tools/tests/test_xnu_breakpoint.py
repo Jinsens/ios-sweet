@@ -5,7 +5,8 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from xnu_breakpoint import insert_breakpoint, early_vector_pa, high_vector_pa, bootstrap_clean_range, bootstrap_ttbr0_pa
+from xnu_breakpoint import (insert_breakpoint, early_vector_pa, high_vector_pa, high_vector_sync_va,
+                           bootstrap_clean_range, bootstrap_ttbr0_pa)
 
 
 def payload():
@@ -75,6 +76,19 @@ class BreakpointTests(unittest.TestCase):
         struct.pack_into('<I', source, 0x300 + 15 * 128 + 120, 0)
         with self.assertRaisesRegex(ValueError, 'padded'):
             high_vector_pa(source, -0x800)
+
+    def test_selective_vectors_require_a_branch_in_the_el1h_slot(self):
+        source = bytearray(payload()) + bytearray(0xc00)
+        struct.pack_into('<Q', source, 24, 0xfffffe0006001800)
+        struct.pack_into('<4Q', source, 0x2a8,
+                         0xfffffe0006001000, 0x1000, 0x300, 0x800)
+        for slot in range(16):
+            struct.pack_into('<32I', source, 0x300 + slot * 128,
+                             0x14000400, *([0xd503201f] * 31))
+        self.assertEqual(high_vector_sync_va(source, -0x800), 0xfffffe0006001000)
+        struct.pack_into('<I', source, 0x300 + 4 * 128, 0xd503201f)
+        with self.assertRaisesRegex(ValueError, 'EL1h synchronous'):
+            high_vector_sync_va(source, -0x800)
 
     def test_bootstrap_clean_range_includes_adt_alignment_and_boot_args(self):
         self.assertEqual(bootstrap_clean_range(payload()), (0x100000000, 0x10000c000))

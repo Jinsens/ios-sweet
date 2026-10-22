@@ -46,7 +46,48 @@ void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 		v[4] = 0xd61f0200; /* br x16 */
 	}
 #endif
-#ifdef ENTRY_XNU_HIGH_VECTOR_PA
+#if defined(ENTRY_XNU_HIGH_VECTOR_PA) && defined(ENTRY_XNU_SELECTIVE)
+	/* Keep every normal XNU vector. Only the EL1h synchronous slot gets a
+	 * stub that handles our BRK and forwards all other exceptions to the
+	 * original handler. The relay body is copied to slot 12 (AArch32 EL0
+	 * sync), which arm64 userspace never uses. */
+	extern const uint32_t probe_sel_stub[], probe_sel_stub_end[];
+	extern const uint32_t probe_sel_forward[];
+	extern const uint32_t probe_mmu_vector[], probe_mmu_identity[], probe_mmu_physical[];
+	extern const uint32_t probe_mmu_recorder[], probe_mmu_literals_end[];
+	extern const unsigned char probe_vectors[];
+	uintptr_t hv = ENTRY_XNU_HIGH_VECTOR_PA;
+	uintptr_t slot4 = hv + 4 * 128;
+	uint32_t insn = *(volatile uint32_t *)slot4;
+	if ((insn & 0xfc000000) == 0x14000000) {
+		/* Decode the original B target in virtual-address space and patch
+		 * the stub's own B. A direct branch preserves every guest GPR on
+		 * the forward path; a br through x16 would corrupt the
+		 * interrupted context. */
+		int64_t off = ((int64_t)(insn & 0x03ffffff) << 38) >> 36;
+		uint64_t target = ENTRY_XNU_HIGH_VECTOR_VA + 4 * 128 + (uint64_t)off;
+		uintptr_t fwd_off = (uintptr_t)probe_sel_forward - (uintptr_t)probe_sel_stub;
+		uintptr_t fwd = slot4 + fwd_off;
+		uint64_t fwd_va = ENTRY_XNU_HIGH_VECTOR_VA + 4 * 128 + fwd_off;
+		int64_t delta = (int64_t)target - (int64_t)fwd_va;
+		if ((delta & 3) == 0 && delta >= -(1 << 27) && delta < (1 << 27)) {
+			unsigned words = ((uintptr_t)probe_sel_stub_end - (uintptr_t)probe_sel_stub) / 4;
+			for (unsigned i = 0; i < words; i++)
+				((volatile uint32_t *)slot4)[i] = probe_sel_stub[i];
+			*(volatile uint32_t *)fwd = 0x14000000u | (((uint32_t)(delta >> 2)) & 0x03ffffffu);
+		}
+	}
+	uintptr_t relay = hv + 12 * 128;
+	unsigned rwords = ((uintptr_t)probe_mmu_literals_end - (uintptr_t)probe_mmu_vector) / 4;
+	for (unsigned i = 0; i < rwords; i++)
+		((volatile uint32_t *)relay)[i] = probe_mmu_vector[i];
+	*(volatile uint64_t *)(relay +
+	    ((uintptr_t)probe_mmu_physical - (uintptr_t)probe_mmu_vector)) =
+	    relay + ((uintptr_t)probe_mmu_identity - (uintptr_t)probe_mmu_vector);
+	*(volatile uint64_t *)(relay +
+	    ((uintptr_t)probe_mmu_recorder - (uintptr_t)probe_mmu_vector)) =
+	    (uintptr_t)probe_vectors;
+#elif defined(ENTRY_XNU_HIGH_VECTOR_PA)
 	/* Shared-table mode restores the still-intact bootstrap TTBR0 before
 	 * switching to the physical alias. The per-slot mode requires TTBR0
 	 * to remain active. Configured cache cleanup precedes the recorder. */

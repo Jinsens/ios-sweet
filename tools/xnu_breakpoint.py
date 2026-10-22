@@ -63,6 +63,20 @@ def high_vector_pa(payload, offset):
     return pa
 
 
+def high_vector_sync_va(payload, offset):
+    """Validate the selective-vector precondition and return the table VA.
+
+    Selective mode redirects only the EL1h synchronous slot; it must start
+    with a branch to the original XNU handler, which the installer decodes
+    and preserves.
+    """
+    at, va, _ = payload_location(payload, offset, 2048)
+    insn, = struct.unpack_from('<I', payload, at + 4 * 128)
+    if insn & 0xfc000000 != 0x14000000:
+        raise ValueError('selective vectors require a branch in the EL1h synchronous slot')
+    return va
+
+
 def bootstrap_clean_range(payload, clean_limit=None):
     # Same layout as loader.c: kernel, ADT, then one 16K boot_args page.
     payload_location(payload)
