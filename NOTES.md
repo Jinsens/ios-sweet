@@ -1,17 +1,19 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU serial_init succeeds; later platform startup next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU PE_init_platform(TRUE) passed; machine_startup boundary next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`post-serial-x0-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`post-platform-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
 construction and the first switch to those tables inside arm_vm_init are
 hardware-proven, as are TTBR0 teardown, TLB invalidation and early console
 mark 10 using the relocated framebuffer, and the complete arm_vm_init return.
-Serial_init also returned success (x0=1) on hardware. Later startup and full
-kernel boot remain unproven. This alone does not verify visible panel refresh.
+Serial_init also returned success (x0=1) on hardware, followed by startup
+phase 4, console/printf setup, idle init and PE_init_platform(TRUE). Remaining
+CPU/interrupt setup, machine_startup and full kernel boot remain unproven.
+These checkpoints alone do not verify visible panel refresh.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
 Each test below had explicit user approval including restoration. This LK
@@ -79,8 +81,9 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request approval for post-PE_init_platform(TRUE)
-image `a89bd1c0` below, VA `0xfffffe0007ad62d8` (offset `0x649e50`).
+**Next concrete action:** validate the next checkpoint before machine_startup,
+VA `0xfffffe0007ad63a0` (offset `0x649f18`). Review additional MMIO and
+allocation extent in host simulation before requesting a new hardware test.
 The shared relay restores bootstrap TTBR0 only on exception; the older
 per-slot relay cannot be used after identity-map teardown.
 
@@ -382,7 +385,7 @@ serial_init returned success. Automatic Recovery return and complete original
 64 MiB boot_a hash verified after restoration. No user panel observation has
 been collected for this round; don't equate x0=1 with visible text.
 
-**Prepared, NOT flashed: later platform initialization checkpoint**
+**Completed: later platform initialization checkpoint**
 `shim/out/entryprobe-el1-post-platform-brk.img`, 26,562,560 B, SHA256
 `a89bd1c087c1a33311c4546db3b6044212c9400b46f401f47996a0a88d011ae1`.
 Payload SHA256 `41a9bc023a3f4170c800b1fe85c578316ad348c525c01a6e0356fc6408d0785c`.
@@ -398,6 +401,12 @@ framebuffer clear; increasing that bound to 180M reaches the expected BRK.
 Allocation end remains `0x102838000`; bootstrap table and high-vector checks
 still pass. x0 at this void-function checkpoint has no success/failure meaning.
 No new source change or CI run. Console hardware milestone `2ff0748`.
+Preparation commit `6d264bc`.
+**Hardware PASS (explicitly approved):** same-boot `post-platform-brk-dmesg.txt`
+records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007ad62d8`,
+with x0 `fffffe00080bbc00` (not a status value at this checkpoint).
+Original PE_init_platform(TRUE) returned. Automatic Recovery return and
+complete original 64 MiB boot_a restoration/hash verified.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
