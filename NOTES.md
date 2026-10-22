@@ -1,29 +1,74 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: BSD + md0 + PID 1 open/write/select all PASS; boot_a restored; display is the remaining frontier <<<
+## >>> PAUSED 2026-10-23: UFS bring-up parked; boot_a restore pending; BSD + PID 1 proven <<<
 
-**Current device (read-only adb + approved restore this turn): Recovery, root,
-slot `_a`.** The partition was initially the stock template
-`7a6a462d5e8858c6f7ecd77655363dd84964d44ea6e7c239e961632996a96e94`
-(`backup/boot_a-stock.img`), not the live backup; the first 64 KiB also matched
-the template. The live backup
-`backup/recovery-20261021/boot_a-live-20261021.img` was pushed, written with
-`dd ... conv=fsync`, and the full 67,108,864-byte readback now equals
-`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
-`boot_b` is a separate image
-(`8775a30a95a44ca5c8d83c38df4d77e2c4c8bad315ac54fb9d1dae60495d9cb7`). No
-`userdata` write. Each new `boot_a` write still needs explicit approval.
-
-**UFS probe boot FAILED/HUNG (2026-10-23).** `shim-boot-0085-ufs.img`
-(SHA256 `d4f3746c...`) was written to `boot_a`; the partition hash matched the
-prediction `1f41b3a7...`. `adb reboot recovery` left the panel on the first
-logo with no console output, and no adb or fastboot device appeared. The shim
-leaves the WDT off, so it will not self-recover. The UFS host takeover is the
-prime suspect, but the exact hang point is not yet known. Recovery is pending:
-user must enter fastboot manually, then flash `backup/boot_a-stock-trim.img`,
-boot Recovery, write back
+**Current device: HUNG at the first logo after the UFS entry-checkpoint boot.**
+`boot_a` currently contains
+`shim/out/entryprobe-el1-ufs-entry-brk.img` (partition hash
+`c1a2687a6b3d592f5929276f3b87b4decfa5f16b5c004c69b6985370c1a516f9`); no adb or
+fastboot is reachable. The shim leaves the WDT off, so it will not
+self-recover. **Required restore:** user holds Power + Volume Down to enter
+fastboot; then flash `backup/boot_a-stock-trim.img`, boot Recovery, write
 `backup/recovery-20261021/boot_a-live-20261021.img`, and verify the full
-64 MiB SHA256 `2931647a...`. Do not flash further tests until that restore.
+67,108,864-byte SHA256
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+A fastboot watcher was started to perform this automatically (flash trim ->
+Recovery -> write live backup -> verify). Do not flash further tests before the
+restore and hash check.
+
+**UFS bring-up FAILED and is parked (2026-10-23).** Two images were flashed:
+
+1. `shim/out/shim-boot-0085-ufs.img` (SHA256 `d4f3746c...`), a production-style
+   `rd=ufsroot0 serial=0` image with the new `/sweet-ufs` ADT node. The
+   partition hash matched `1f41b3a7...`, but `adb reboot recovery` left the
+   panel on the first logo with no ADB/fastboot. The shim leaves the WDT off,
+   so it did not self-recover.
+2. `shim/out/entryprobe-el1-ufs-entry-brk.img` (SHA256 `46d5487e...`), with a
+   BRK at `_sweet_ufs_rootdev` VA `0xfffffe00074e8090`. Partition hash matched
+   `c1a2687a...`, but it also hung at the first logo; the BRK did not hit.
+
+The UFS host takeover is therefore unproven. Because the entry BRK did not
+fire, the hang is either before `_sweet_ufs_rootdev` (earlier boot/ADT path) or
+the checkpoint image itself did not reach the relay; it is **not** evidence
+that `ufs_take_over_host()` is the failing function. No `userdata` write was
+made. The current `boot_a` is the second test image; restore it as described
+above before any further test. Next session should bisect earlier
+(`IOKitBSDInit`/`bsd_init` entry) and verify the UFS payload/ADT placement
+before assuming a controller bug.
+
+## Summary at pause (handoff for the next session)
+
+**Proven on hardware.** XNU reaches BSD initialization, mounts md0, executes
+`load_init_program`, and runs PID 1 in EL0. The open/write/select checkpoints
+all hit; PID 1 opens `/dev/console`, writes the banner, and enters the 5 s
+heartbeat loop. `serial=3` was routing the console to the UART; `serial=0`
+restores the video console, and the serial0 loop test displayed the normal
+scrolling boot text. The shim UFS code had three real bugs, now fixed: GPT
+fields were read big-endian, writes lacked the UPIU W flag, and the timeout
+used a fixed 19.2 MHz clock.
+
+**Not proven / parked.** XNU UFS host takeover on matisse. Both the
+production-style `rd=ufsroot0` image and the `_sweet_ufs_rootdev` BRK
+checkpoint hung at the first logo with no ADB/fastboot; the BRK did not hit.
+This is not proof that the UFS controller is broken: the hang may be earlier
+(ADT/payload/`IOKitBSDInit`) or the checkpoint image may not have reached the
+relay. `userdata` was not written. Production 0085 video-console output is also
+not confirmed; the serial0 evidence came from the 0084 entryprobe build.
+
+**Next session, in order.**
+1. Restore `boot_a` from `backup/recovery-20261021/boot_a-live-20261021.img`
+   and verify `2931647a...` before anything else.
+2. Bisect the UFS boot earlier: BRK at `IOKitBSDInit` entry and `bsd_init`
+   entry using the UFS ADT; compare with the same payload using the old ADT and
+   `rd=md0` to separate UFS from payload/ADT placement.
+3. Run a shim-only read-only UFS probe (CAP/VER/HCS/HCE/UTRL/GPT) with a safe
+   visible or persistent log; check CAP.64AS and DMA above 4 GiB before trusting
+   the XNU takeover.
+4. Only then retry `sweet_ufs.c`, read-only, and keep `ufsrw=0`; no `userdata`
+   write until the read path is proven.
+5. For display, flash the prepared 0085 serial0 loop image
+   (`87199095...`) to confirm `sweet_display_refresh`; if still dark, trace
+   `vcputc_options` -> DSI/TE.
 
 **The logo and the BSD result are separate.** Diagnostic BRK records prove
 `bsd_init` ran through `vfs_mountroot` (x0=0) and reached `load_init_program`;
@@ -102,25 +147,23 @@ Recovery baseline (read-only): `ufshcd-mtk 112b0000.ufshci`, Samsung
 KLUDG4UHGC-B0E1, three LUNs; LUN0 is `sdc`, 124,960,768 KiB; link is gear 4,
 2 lanes, FAST MODE. The live FDT UFS base is `0x112b0000`.
 
-UFS probe image prepared, NOT flashed: `shim/out/shim-boot-0085-ufs.img`,
-7,004,160 B, SHA256
-`d4f3746ce3cffe3f29f013da8b11224e49d09ce7b797a58aeef5c4804815c512`;
-payload 16,605,840 B SHA256
-`60f82519ca572b355c44986a81cd36f05cd7e70215fd9ecf2022a8294e02d77f`,
-ADT 4664 B SHA256 `1020d120...`, cmdline includes `rd=ufsroot0 ufsrw=0
-serial=0`. Predicted partition `1f41b3a7280582351b9724282ef4cb081077b6c8cb24b007407baa269aa34271`.
-Expected panel output: `SWEET UFS: "userdata" on LUN 0 ... read-only`.
-UFS entry checkpoint prepared, NOT flashed: `shim/out/entryprobe-el1-ufs-entry-brk.img`,
-26,562,560 B, SHA256 `46d5487ed1e675a8fd8d6ff2e3f6043ff2ca58f97e747a2d110132c519f03ee4`;
-payload `shim/out/matisse-xnu-0085-ufs-entry-brk.payload` SHA256
-`8632817047d1655a2194f5b877757ad9e256ccb859bec594e26137738583577f`;
-predicted partition `c1a2687a6b3d592f5929276f3b87b4decfa5f16b5c004c69b6985370c1a516f9`.
-BRK at `_sweet_ufs_rootdev` VA `0xfffffe00074e8090` (entry offset `0x5bc08`,
-replaces `sub sp,sp,#0x120`). A hit proves the kernel reached UFS initialization;
-a miss means the hang is earlier.
- Since
-userdata is still Android f2fs, the HFS root mount will then fail; that is
-expected. The UFS driver lines are the test.
+UFS test artifacts (both flashed and both hung at the logo; keep for
+inspection, do not re-flash without new evidence):
+
+- `shim/out/shim-boot-0085-ufs.img`, 7,004,160 B, SHA256
+  `d4f3746ce3cffe3f29f013da8b11224e49d09ce7b797a58aeef5c4804815c512`;
+  payload 16,605,840 B SHA256
+  `60f82519ca572b355c44986a81cd36f05cd7e70215fd9ecf2022a8294e02d77f`,
+  ADT 4664 B SHA256 `1020d120...`, cmdline `rd=ufsroot0 ufsrw=0 serial=0`.
+  Partition hash matched `1f41b3a7...`.
+- `shim/out/entryprobe-el1-ufs-entry-brk.img`, 26,562,560 B, SHA256
+  `46d5487ed1e675a8fd8d6ff2e3f6043ff2ca58f97e747a2d110132c519f03ee4`;
+  payload `shim/out/matisse-xnu-0085-ufs-entry-brk.payload` SHA256
+  `8632817047d1655a2194f5b877757ad9e256ccb859bec594e26137738583577f`.
+  BRK at `_sweet_ufs_rootdev` VA `0xfffffe00074e8090` (entry offset `0x5bc08`,
+  replaces `sub sp,sp,#0x120`); partition hash matched `c1a2687a...`.
+  The BRK did not hit. A working checkpoint would relay to Recovery and print
+  `pc=fffffe00074e8090`; no such record was produced.
 
 **Display constants audit.** For matisse the active values are correct:
 `shim/board.c` and `tools/mkadt.py` select `0xfcb3f000`, 1440x3200, stride
