@@ -1,5 +1,44 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> TEST IN FLIGHT 2026-10-23 04:50: 0085 screen test is ON boot_a - restore pending <<<
+
+**Do not hand off without restoring `boot_a`.** The device was rebooted into
+the 0085 test image at 04:49; ADB is gone and no fastboot device is present.
+After the screen result, hold Power + Volume Down to fastboot, flash
+`backup/boot_a-stock-trim.img`, boot Recovery and write
+`backup/recovery-20261021/boot_a-live-20261021.img`, then verify the full
+67,108,864-byte SHA256
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+
+Test image: `shim/out/shim-boot-0085.img`, 7,008,256 B, SHA256
+`1cbb26416841df190b7bbee0d4da76f837562649aa6bbd8202aba14b5f3decb6`, built from
+CI run 39850065490 (head `ced3cc5`, success) kernel
+`xnu/out/ci-39850065490/kernel.development.sweet` (17,222,752 B, SHA256
+`87c607e720090c03bc321029a8668797d6c658b4ac279f8304fdaa05b0eeaf43`), payload
+`shim/out/matisse-xnu-0085-ramdisk.payload` (16,622,352 B, SHA256
+`22bd074f3a9a75c8d01f181689bcdf5db60764bcbfe639a3cca1d7e6afe56379`), same ADT
+`shim/out/matisse.adt` (`14b536f6...`), same cmdline (`rd=md0 ...`) and
+`research/sweet-init` (`f5de3714...`), template `backup/boot_a-stock.img`
+(`7a6a462d...`). The write was verified: full partition readback SHA256
+`302f2012d9a7acfb3ec415072b8061c210ef12f9d2e004e225bd1bac5812c217` matched
+the predicted hash. Baseline before the write was `2931647a...`; battery 100 %,
+slot `_a`.
+
+**Bug found and fixed before this run.** Patch 0085's `#if defined(SWEET)` in
+`osfmk/console/video_console.c` was false: SWEET is defined only by
+`pexpert/arm64/board_config.h`, which that file did not include. CI would have
+built a no-op. The patch now includes `<arm64/sweet_matisse_dsi.h>`
+unconditionally (the header includes board_config.h and provides inline no-ops
+otherwise) and calls `sweet_display_refresh(0)` unconditionally. Local
+`tools/xnu-cc.py` compile emits an undefined `_sweet_display_refresh`, and the
+linked CI kernel tail-calls `_sweet_display_refresh` from `_vcputc_options`
+(`b 0xfffffe00074859f8`). Commit `ced3cc5`.
+
+Expected if the fix works: kernel console text on the 1440x3200 panel, then
+`load_init_program`, then `*** SWEET userspace: init running as PID 1 ***`
+and a heartbeat every 5 s. If the panel stays at the logo, the 0085 refresh
+path is still not effective; capture the last visible line before restoring.
+
 ## >>> ACTIVE 2026-10-23 (Asia/Shanghai): BSD mounts md0; display refresh fix prepared <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
