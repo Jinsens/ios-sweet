@@ -43,7 +43,9 @@ def find():
 
 
 def read_resp(inp, timeout=15000):
-    return bytes(inp.read(64, timeout=timeout))
+    # Read a full max-packet-sized buffer: a smaller buffer makes libusb
+    # reject the 512-byte packets this LK sends with -EOVERFLOW.
+    return bytes(inp.read(inp.wMaxPacketSize, timeout=timeout))
 
 
 def command(out, inp, cmd, data=None, sink=None):

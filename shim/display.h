@@ -5,3 +5,5 @@
 int display_probe(uint64_t dtb, uint64_t fb, uint32_t stride);
 void display_refresh(void);
 int display_active(void);
+uint32_t display_error(void);
+void display_force_refresh(void);

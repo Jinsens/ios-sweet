@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "board.h"
 #include "console.h"
+#include "diag.h"
 #include "display.h"
 #include "fdt.h"
 #include "mmu.h"
@@ -110,6 +111,45 @@ static uint64_t now(void)
 	isb();
 	return rsr("cntpct_el0");
 }
+
+/* MTK watchdog (mediatek,mt6983-wdt at 0x1c007000). LK arms it before the
+ * jump and XNU does not pet it during early boot. Disable it as the first C
+ * statement: the console clear and payload copy are slow with the MMU off.
+ * Register layout from the device's own mtk_wdt.ko: MODE bit0 enable and
+ * key 0x22000000 (movk w10,#0x2200,lsl#16 in mtk_wdt_stop); PING at +0x08
+ * takes 0x1971. The older mainline 0x33<<3 key does not work on MT6983. */
+static uint32_t wdt_mode_before, wdt_sta_before, wdt_mode_after;
+
+static void wdt_disable_raw(void)
+{
+	volatile uint32_t *w = (volatile uint32_t *)0x1c007000UL;
+
+	wdt_mode_before = w[0];
+	wdt_sta_before = w[3];
+	w[0] = (wdt_mode_before & ~1u) | 0x22000000u;
+	__asm__ volatile("dsb sy" ::: "memory");
+	wdt_mode_after = w[0];
+}
+
+static void wdt_report(void)
+{
+	con_hex2("WDT", "mode=", wdt_mode_before, "sta=", wdt_sta_before);
+	con_hex("WDT", wdt_mode_after);
+}
+
+#ifdef XNU_DIAG
+/* Diagnostic builds want the 31 s AP watchdog to reset the phone when XNU
+ * hangs, so the next shim boot can report the trace. Restore LK's mode and
+ * ping once; normal builds leave it off for the life of the system. */
+void shim_wdt_restore(void)
+{
+	volatile uint32_t *w = (volatile uint32_t *)0x1c007000UL;
+
+	w[0] = (wdt_mode_before & ~0x22000000u) | 0x22000000u;
+	w[2] = 0x1971;
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+#endif
 
 static void delay_ms(unsigned ms)
 {
@@ -333,6 +373,90 @@ static void test_gic(void)
 
 /* ---- main ---- */
 
+#ifdef DIAG_LOG
+static char *
+diag_hex(char *p, uint32_t v)
+{
+	static const char h[] = "0123456789abcdef";
+	for (int i = 28; i >= 0; i -= 4)
+		*p++ = h[(v >> i) & 15];
+	return p;
+}
+
+static char *
+diag_str(char *p, const char *s)
+{
+	while (*s)
+		*p++ = *s++;
+	return p;
+}
+
+/* Dump the display handoff state into the PL/LK log_store (read via
+ * /proc/pl_lk in a later recovery boot). Fixed MMIO addresses: this is the
+ * matisse-only diagnostic build, not the normal path. */
+static void
+diag_log(void)
+{
+	char b[512];
+	char *p = b;
+	uint32_t o0 = *(volatile uint32_t *)0x1400200cUL;
+	uint32_t o0a = *(volatile uint32_t *)0x14002f40UL;
+	uint32_t o2 = *(volatile uint32_t *)0x1400400cUL;
+	uint32_t o2a = *(volatile uint32_t *)0x14004f40UL;
+	uint32_t con = *(volatile uint32_t *)0x14017010UL;
+	uint32_t mod = *(volatile uint32_t *)0x14017014UL;
+	uint32_t sta = *(volatile uint32_t *)0x1401700cUL;
+	uint32_t st = *(volatile uint32_t *)0x14017000UL;
+	uint32_t ps = *(volatile uint32_t *)0x1401701cUL;
+	uint32_t sc = *(volatile uint32_t *)0x14017038UL;
+	uint32_t c0 = *(volatile uint32_t *)0x14000100UL;
+	uint32_t c1 = *(volatile uint32_t *)0x14000110UL;
+	uint32_t c2 = *(volatile uint32_t *)0x140001a0UL;
+
+	p = diag_str(p, "SWEETXNU-DIAG ");
+	p = diag_str(p, "o0="); p = diag_hex(p, o0); *p++ = '/';
+	p = diag_hex(p, o0a);
+	p = diag_str(p, " o2="); p = diag_hex(p, o2); *p++ = '/';
+	p = diag_hex(p, o2a);
+	p = diag_str(p, " dsi="); p = diag_hex(p, con); *p++ = '/';
+	p = diag_hex(p, mod); *p++ = '/'; p = diag_hex(p, st); *p++ = '/';
+	p = diag_hex(p, sta);
+	p = diag_str(p, " ps="); p = diag_hex(p, ps);
+	p = diag_str(p, " sc="); p = diag_hex(p, sc);
+	p = diag_str(p, " cg="); p = diag_hex(p, c0); *p++ = '/';
+	p = diag_hex(p, c1); *p++ = '/'; p = diag_hex(p, c2);
+	p = diag_str(p, " fb="); p = diag_hex(p, (uint32_t)brd.fb_base);
+	p = diag_str(p, " st="); p = diag_hex(p, brd.fb_stride);
+	*p++ = '\n';
+	logstore_write(b, (uint32_t)(p - b));
+}
+#endif
+
+/* Persistent one-byte progress marker for diagnosing a pre-serial hang.
+ * Writes a short line into the kernel ram_console buffer, which LK's
+ * `fastboot oem lkmsg` dumps after a warm reset. Kept far from the ring
+ * cursor so a partial kernel log cannot hide it. The address was never
+ * confirmed on matisse; opt in only when testing that channel. */
+#ifdef DIAG_MARK
+static void persist_mark(char tag)
+{
+	uintptr_t base = brd.ram_console ? (uintptr_t)brd.ram_console
+	    : 0x00d01100UL;
+	volatile char *p = (volatile char *)(base + 0x3ff00);
+	const char *s = "SWEETXNU-SHIM-";
+	while (*s)
+		*p++ = *s++;
+	*p++ = tag;
+	*p++ = '\n';
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+#else
+static inline void persist_mark(char tag)
+{
+	(void)tag;
+}
+#endif
+
 /*
  * Persist the console text so far. Called after every stage and from the
  * panic handler: the panel is often dark on MediaTek (LK turns the DSI link
@@ -418,6 +542,117 @@ void shim_main(uint64_t dtb)
 {
 	struct mmu_info mi;
 
+#ifdef RAW_RESET
+	/* Execution proof: if LK jumps into this image, reset immediately so
+	 * the boot cycle is visibly shorter than a watchdog timeout. */
+	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+	for (;;)
+		__asm__ volatile("wfe");
+#endif
+
+#ifdef RAW_PAINT
+	/* Last-resort execution + display proof: no FDT/console/board_probe.
+	 * Validate the OVL scan address (a gated block reads all ones), paint
+	 * green there and at the documented base, wait for TE, then push a
+	 * few frames. A missing TE or a bad address simply halts. */
+	{
+		/* Enable any gated display clock first: reading a gated OVL/DSI
+		 * block can hang the boot. CLR is status+8; SET would gate it. */
+		uint32_t g0 = *(volatile uint32_t *)0x14000100UL;
+		uint32_t g1 = *(volatile uint32_t *)0x14000110UL;
+		uint32_t g2 = *(volatile uint32_t *)0x140001a0UL;
+		if (g0 & 0x28000001UL)
+			*(volatile uint32_t *)0x14000108UL = g0 & 0x28000001UL;
+		if (g1 & 0x100UL)
+			*(volatile uint32_t *)0x14000118UL = g1 & 0x100UL;
+		if (g2 & 1UL)
+			*(volatile uint32_t *)0x140001a8UL = g2 & 1UL;
+		__asm__ volatile("dsb sy" ::: "memory");
+
+		/* Rebuild the cmd-mode buffer if LK left it off. */
+		uint32_t bc0 = *(volatile uint32_t *)0x14017400UL;
+		if ((bc0 & 1u) == 0) {
+			uint32_t bc1 = *(volatile uint32_t *)0x14017404UL;
+			*(volatile uint32_t *)0x14017404UL =
+			    (bc1 & 0xffff0000u) | 0xb1u;
+			*(volatile uint32_t *)0x14017410UL = 512000u;
+			*(volatile uint32_t *)0x14017170UL |= (1u << 10);
+			*(volatile uint32_t *)0x14017400UL = bc0 | 1u;
+		}
+		*(volatile uint32_t *)0x14017090UL = 0x3cu;
+
+		uint32_t scan = *(volatile uint32_t *)0x14004f40UL;
+		if (scan < 0x40000000UL || scan >= 0x100000000UL)
+			scan = 0xfcb3f000UL;
+		volatile uint32_t *targets[2] = {
+			(volatile uint32_t *)(uintptr_t)scan,
+			(volatile uint32_t *)0xfcb3f000UL
+		};
+		for (int t = 0; t < 2; t++) {
+			volatile uint32_t *fb = targets[t];
+			for (uint32_t y = 0; y < 64; y++)
+				for (uint32_t x = 0; x < 1440; x++)
+					fb[(uint64_t)y * 1440 + x] = 0xff00ff00u;
+		}
+		__asm__ volatile("dsb sy" ::: "memory");
+
+		*(volatile uint32_t *)0x14017010UL =
+		    (1u << 1) | (1u << 24) | (1u << 27);
+		*(volatile uint32_t *)0x14017100UL = 0x55;
+		*(volatile uint32_t *)0x14017104UL |= 1u;
+		/* Wait for a fresh TE pulse: cmd-mode START is ignored without
+		 * it. INTSTA is write-0-to-clear. */
+		*(volatile uint32_t *)0x1401700cUL = ~(1u << 2);
+		uint64_t frq;
+		__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+		uint64_t deadline;
+		__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(deadline));
+		deadline += frq / 30;	/* 33 ms */
+		while ((*(volatile uint32_t *)0x1401700cUL & (1u << 2)) == 0) {
+			uint64_t now;
+			__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(now));
+			if (now >= deadline)
+				break;
+		}
+		for (int i = 0; i < 4; i++) {
+			*(volatile uint32_t *)0x14001008UL = 0;
+			*(volatile uint32_t *)0x14001020UL = 0;
+			*(volatile uint32_t *)0x14001020UL = 1;
+			*(volatile uint32_t *)0x14017000UL = 1;
+			__asm__ volatile("dsb sy" ::: "memory");
+			uint64_t until;
+			__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(until));
+			until += frq / 50;	/* 20 ms between frames */
+			while (1) {
+				uint64_t now;
+				__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(now));
+				if (now >= until)
+					break;
+			}
+		}
+	}
+	for (;;)
+		__asm__ volatile("wfe");
+#endif
+
+	/* Do this before any 18 MB framebuffer clear or payload copy. */
+#ifndef WDT_NO_TOUCH
+	wdt_disable_raw();
+#endif
+	/* Find log_store and decide whether this boot reports the previous
+	 * test. Must happen before the loader copies segments again. */
+	diag_early(dtb);
+	diag_stage("S0 wdt", wdt_mode_before, wdt_mode_after);
+
+#ifdef WDT_HALT
+	/* Bisection build: prove the shim executes (WDT_NO_TOUCH) and/or the
+	 * watchdog write takes effect. No display push, no payload. */
+	for (;;)
+		__asm__ volatile("wfe");
+#endif
+
+	persist_mark('A');
+
 #ifdef BRINGUP_MARK
 #ifndef SHIM_STORAGE_LOG
 #error "BRINGUP_MARK writes partitions; explicitly enable SHIM_STORAGE_LOG"
@@ -448,6 +683,7 @@ void shim_main(uint64_t dtb)
 	logstore_mark("entry", dtb, rsr("cntfrq_el0"));
 #endif
 	stage = "board";
+	persist_mark('B');
 	if (!board_probe(dtb)) {
 		/* No usable tree: fall back to the compile-time defaults. */
 		brd.name = "unknown";
@@ -482,8 +718,35 @@ void shim_main(uint64_t dtb)
 	con_stride = brd.fb_stride;
 	con_bgr = brd.fb_bgr;
 	con_text_reset();
+	persist_mark('C');
 #ifdef SHIM_LOGSTORE_MARK
 	logstore_mark("con-init", (uint64_t)(uintptr_t)con_fb, brd.fb_stride);
+#endif
+#ifdef MINIMAL_PAINT
+	/* Display-path diagnostic: no payload is loaded, no 18 MB clear. Paint
+	 * a small green band, push exactly one command-mode frame, then halt
+	 * so the panel keeps the result until the watchdog. */
+	if (con_fb) {
+		for (uint32_t y = 0; y < 64 && y < con_h; y++) {
+			volatile uint32_t *line = con_fb + (uint64_t)y * (con_stride / 4);
+			for (uint32_t x = 0; x < con_w; x++)
+				line[x] = GREEN;
+		}
+		__asm__ volatile("dsb sy" ::: "memory");
+	}
+	persist_mark('D');
+#ifdef DIAG_LOG
+	diag_log();
+#endif
+	int pok = display_probe(dtb, brd.fb_base, brd.fb_stride);
+	persist_mark(pok ? 'E' : 'e');
+	con_str("SHIM", "MINIMAL PAINT");
+	con_hex2("DISP", "probe=", pok, "active=", display_active());
+	con_hex2("FB", "base=", (uint32_t)brd.fb_base, "stride=", brd.fb_stride);
+	display_refresh();
+	persist_mark('F');
+	for (;;)
+		__asm__ volatile("wfe");
 #endif
 
 	stage = "loader";
@@ -506,6 +769,8 @@ void shim_main(uint64_t dtb)
 	con_clear(RED);
 	log_flush();
 	con_str("SHIM", "sweet/matisse xnu loader");
+	con_str("DIAG", "wdt-off permissive-display");
+	wdt_report();
 	if (!con_fb)
 		con_str("FB", "no usable framebuffer: log only");
 	con_skip();
@@ -514,8 +779,23 @@ void shim_main(uint64_t dtb)
 	log_flush();
 	/* LK leaves the command-mode panel initialized; push what we drew so
 	 * the next visible change is XNU's console rather than a dark screen. */
-	display_probe(dtb, brd.fb_base, brd.fb_stride);
-	display_refresh();
+	int dprobe = display_probe(dtb, brd.fb_base, brd.fb_stride);
+	con_hex2("DISP", "probe=", dprobe, "err=", display_error());
+	if (dprobe)
+		display_refresh();
+	else
+		display_force_refresh();
+	if (diag_reporting()) {
+		diag_report();
+#ifdef WDT_AUTO_RESET
+		shim_wdt_restore();
+#endif
+		for (;;)
+			__asm__ volatile("wfe");
+	}
+	diag_stage("S1 board", brd.fb_base, brd.fb_stride);
+	diag_stage("S1 disp", (uint64_t)dprobe, display_error());
+	diag_prev_report();
 	mark(1, "console");
 #ifdef SHIM_LOGSTORE_MARK
 	logstore_mark("console", brd.fb_base, brd.fb_size);
@@ -523,9 +803,30 @@ void shim_main(uint64_t dtb)
 #endif
 	con_str("XNU", display_active() ? "loading payload" : "panel unavailable");
 	display_refresh();
+	/* Leave the loader screen visible before XNU takes the panel. */
+	delay_ms(1500);
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_skip();
+#ifdef XNU_DIAG
+	diag_stage("SERR", (uint64_t)(uintptr_t)why, 0);
+#endif
+	/* On matisse the code below probes sweet's Qualcomm UFS/GIC; touching
+	 * those registers can hang and hide the LOADER line. Keep the panel on
+	 * the loader error instead. */
+	if (brd.name && brd.name[0] == 'm') {
+		if (display_active())
+			display_refresh();
+		else
+			display_force_refresh();
+#ifdef XNU_DIAG
+#ifdef WDT_AUTO_RESET
+		shim_wdt_restore();
+#endif
+#endif
+		for (;;)
+			__asm__ volatile("wfe");
+	}
 #ifdef SHIM_LOGSTORE_MARK
 	logstore_mark("nopayload", (uint64_t)(uintptr_t)why, 0);
 #endif

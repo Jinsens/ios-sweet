@@ -221,6 +221,32 @@ int board_probe(uintptr_t dtb)
 		brd.fb_base = 0;
 		brd.fb_size = 0;
 	}
+
+	/* LK reserves several scanout frames and may be reading any of them.
+	 * Reading OVL0_2L here happens before display_probe() enables the
+	 * display clocks; a gated MTK display block can hang the bus on read.
+	 * Keep the /chosen framebuffer base by default and let display_probe()
+	 * re-check the live OVL address after the clocks are on. */
+#ifdef EARLY_OVL_SCAN
+	if (brd.fb_base && brd.name[0] == 'm') {
+		char path[160];
+		uint64_t base = 0, size = 0;
+		uint64_t frame = (uint64_t)brd.fb_stride * brd.fb_h;
+
+		if (fdt_find_compatible(dtb, "mediatek,disp_ovl0_2l", path,
+			sizeof(path)) &&
+		    fdt_reg_n(dtb, path, 0, &base, &size) && base &&
+		    size > 0xf44) {
+			uint64_t scan = *(volatile uint32_t *)(uintptr_t)
+			    (base + 0xf40);
+			if (scan >= 0x40000000ULL &&
+			    (scan & 3) == 0 && scan >= brd.fb_base &&
+			    scan + frame <= brd.fb_base + brd.fb_size) {
+				brd.fb_base = scan;
+			}
+		}
+	}
+#endif
 	return 1;
 }
 

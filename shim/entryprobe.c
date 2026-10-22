@@ -4,6 +4,9 @@
 #include "board.h"
 #include "logstore.h"
 #include "mmu.h"
+#if defined(ENTRY_XNU)
+#include "loader.h"
+#endif
 
 static void field(char *banner, unsigned offset, uint64_t value)
 {
@@ -31,7 +34,15 @@ void entryprobe_board(uint64_t dtb, char *banner)
 	field(banner, ENTRY_FB, brd.fb_base);
 	field(banner, ENTRY_STAGE, 2);
 #if ENTRY_LEVEL == 6
-#if defined(ENTRY_DISPLAY_KICK)
+#if defined(ENTRY_XNU)
+	/* Use the hardware-validated kick path to put a known image on the
+	 * panel, then load the XNU payload with the real shim loader instead
+	 * of returning to the stock Linux kernel. */
+	entryprobe_display_kick(dtb, banner);
+	loader_boot((uintptr_t)dtb);
+	for (;;)
+		__asm__ volatile("wfe");
+#elif defined(ENTRY_DISPLAY_KICK)
 	entryprobe_display_kick(dtb, banner);
 #else
 	entryprobe_display(dtb, banner);

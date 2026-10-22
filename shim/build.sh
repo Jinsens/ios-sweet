@@ -13,11 +13,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SRCS="start.S shim.c console.c display.c mmu.c fdt.c board.c loader.c ufs.c str.c logstore.c"
+SRCS="start.S shim.c console.c display.c diag.c mmu.c fdt.c board.c loader.c ufs.c str.c logstore.c"
 PAYLOAD=""
 TEMPLATE=""
 DTB=""
 HV=""
+RAW=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -25,6 +26,7 @@ while [ $# -gt 0 ]; do
 	--dtb) DTB=$2; shift 2 ;;
 	--v2) HV=2; shift ;;
 	--v4) HV=4; shift ;;
+	--raw) RAW=1; shift ;;
 	*) PAYLOAD=$1; shift ;;
 	esac
 done
@@ -48,6 +50,19 @@ EOF
         payload_bytes=$(${PYTHON:-python3} -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$PAYLOAD")
         EXTRA_CFLAGS="${EXTRA_CFLAGS:-} -DEMBEDDED_XNU_BYTES=$payload_bytes"
     fi
+fi
+
+# XNU_DIAG_KERNEL=<Mach-O next to the payload> adds the stage trace and the
+# sentinel addresses derived from that exact kernel and payload. Never guess
+# them: a stale address would write into unrelated DRAM.
+if [ -n "${XNU_DIAG_KERNEL:-}" ]; then
+    if [ -z "$PAYLOAD" ]; then
+        echo "error: XNU_DIAG_KERNEL set but no PAYLOAD" >&2
+        exit 1
+    fi
+    mkdir -p out
+    ${PYTHON:-python3} ../tools/diag_syms.py "$XNU_DIAG_KERNEL" "$PAYLOAD" > out/diag_syms.h
+    EXTRA_CFLAGS="${EXTRA_CFLAGS:-} -DXNU_DIAG -Iout"
 fi
 
 if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
@@ -127,7 +142,9 @@ fi
 # MediaTek LK inflates a gzip kernel (the stock boot.img is gzip too); Qualcomm
 # ABL takes the raw Image. Follow the template's shape when there is one.
 KERNEL=out/Image
-if [ -n "$TEMPLATE" ]; then
+if [ -n "$RAW" ]; then
+	echo "kernel: raw Image (--raw)" >&2
+elif [ -n "$TEMPLATE" ]; then
 	KERNEL=$(${PYTHON:-python3} - "$TEMPLATE" out/Image out/Image.gz <<'EOF'
 import gzip, struct, sys
 tpl, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]

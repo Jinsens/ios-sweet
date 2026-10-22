@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include "board.h"
 #include "console.h"
+#include "diag.h"
 #ifdef EMBEDDED_XNU_BYTES
 #include "display.h"
 #endif
@@ -113,6 +114,12 @@ static const struct payload *find_payload(uint64_t start, uint64_t end)
 }
 #endif
 
+#define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
+
+#ifdef XNU_DIAG
+void shim_wdt_restore(void);
+#endif
+
 typedef void (*xnu_entry_t)(uint64_t boot_args_pa);
 
 const char *loader_boot(uintptr_t dtb)
@@ -129,6 +136,7 @@ const char *loader_boot(uintptr_t dtb)
 	payload_bytes = EMBEDDED_XNU_BYTES;
 	embedded = 1;
 	con_str("PAYLOAD", "embedded in kernel Image");
+	diag_stage("S3 payload", (uint64_t)(uintptr_t)p, payload_bytes);
 #else
 	if (!fdt_initrd(dtb, &rd_start, &rd_end))
 		return "no initrd in /chosen";
@@ -151,6 +159,7 @@ const char *loader_boot(uintptr_t dtb)
 	}
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
+	diag_stage("S4 layout", p->virt_base, p->phys_base);
 	con_hex2("PHYS", "base=", (uint32_t)p->phys_base, "size=", (uint32_t)p->mem_size);
 	con_hex("VIRT", p->virt_base);
 	con_hex("ENTRY", p->entry_va);
@@ -167,6 +176,7 @@ const char *loader_boot(uintptr_t dtb)
 			zero64(dst + ((s->file_size + 7) & ~7UL), s->vmsize - ((s->file_size + 7) & ~7UL));
 	}
 	con_hex2("SEGS", "n=", p->nsegs, "end=", (uint32_t)(p->kernel_end + pa_of_va_base));
+	diag_stage("S5 copied", p->kernel_end + pa_of_va_base, p->nsegs);
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
@@ -194,10 +204,18 @@ const char *loader_boot(uintptr_t dtb)
 		ba->CommandLine[i] = p->cmdline[i];
 	ba->memSizeActual = p->mem_size;
 	con_hex2("BOOTARG", "pa=", (uint32_t)ba_pa, "top=", (uint32_t)top);
+	diag_stage("S6 bootarg", ba_pa, adt_pa);
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
 	con_hex("JUMP", entry_pa);
+	/* The bootloader must leave us at EL1 with the MMU and caches off;
+	 * these lines are the only same-boot evidence if XNU faults before its
+	 * own console exists. */
+	diag_stage("S7 jump", entry_pa, rsr("sctlr_el1"));
+	diag_stage("S7 EL", rsr("CurrentEL"), rsr("cntfrq_el0"));
+	diag_stage("S7 ID", rsr("midr_el1"), rsr("mpidr_el1"));
 	con_str("XNU", "jumping (fbcon clears screen)");
+	diag_arm_sentinels(p->virt_base, p->phys_base, p->mem_size);
 	/* Command-mode panels need an explicit push. Keep the handoff marker
 	 * visible briefly so a dark XNU frame is distinguishable from a loader
 	 * failure when inspecting the device without a serial console. */
@@ -213,6 +231,13 @@ const char *loader_boot(uintptr_t dtb)
 	}
 #endif
 
+	/* Diagnostic builds re-arm the 31 s AP watchdog so a hung XNU resets
+	 * the phone and the next shim boot can report the trace. */
+#ifdef XNU_DIAG
+#ifdef WDT_AUTO_RESET
+	shim_wdt_restore();
+#endif
+#endif
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
 	((xnu_entry_t)entry_pa)(ba_pa);
