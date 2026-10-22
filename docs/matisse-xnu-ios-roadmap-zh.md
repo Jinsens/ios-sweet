@@ -1,8 +1,8 @@
 # Redmi K50 Pro：XNU 实机进展与 iOS 启动路线
 
-更新：2026-10-22，完成本轮 `zone-object-brk` 实机测试后。
+更新：2026-10-23，完成本轮 `vm-return-brk` 实机测试后。
 
-**当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`，成功返回 `vm_page_bootstrap`、`zone_bootstrap` 和 `vm_object_bootstrap`。尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
+**当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`；`vm_mem_bootstrap` 已完整返回，包括 `vm_page_bootstrap`、`zone_bootstrap`、`vm_object_bootstrap`、`vm_map_init`、`kmem_init`（含 KMEM/ZALLOC 启动阶段和 `zone_init`）与 `vm_fault_init`。尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
 
 本轮设备自动返回 Recovery；原始 `boot_a` 的全部 67,108,864 字节已恢复并读回校验。本轮没有写入 `userdata`。详细逐次记录以 [NOTES.md](../NOTES.md) 顶部 ACTIVE 区为准，下面历史记录可能代表已经被后续证据替代的判断。
 
@@ -71,6 +71,7 @@
 | `machine_startup` 调用前 | `34efc91a` | `fffffe0007ad63a0` | CPU、计时器、GIC 上下文和 early_random 初始化 |
 | `vm_page_bootstrap` 返回 | `e9b81b88` | `fffffe0007abfab0` | 已进入 `kernel_bootstrap` → `vm_mem_bootstrap`，完成物理页管理初始化 |
 | `zone_bootstrap`、`vm_object_bootstrap` 返回 | `e4231b90` | `fffffe0007abfad0` | 在 `vm_mem_bootstrap` 内连续完成 zone 与 VM object 初始化 |
+| 完整 `vm_mem_bootstrap` 返回 | `99d68ed6` | `fffffe00073644d8` | `vm_map_init`、`kmem_init`、KMEM/ZALLOC 启动阶段、`vm_fault_init` 全部返回，`kernel_bootstrap` 继续执行 |
 
 `serial_init=1` 只证明函数返回成功；后期各轮没有收集用户的屏幕观察，不能宣称已经看到了 XNU 控制台。独立探针的 IRQ 测试曾成功处理 INTID 27，但当前 XNU 调度器启用中断后的持续运行还未验证。
 
@@ -93,10 +94,10 @@
 ```text
 已完成：arm_init → machine_startup → kernel_bootstrap
        → vm_mem_bootstrap → vm_page_bootstrap / zone_bootstrap /
-         vm_object_bootstrap 返回
+         vm_object_bootstrap / vm_map_init / kmem_init / vm_fault_init
+       → 完整 vm_mem_bootstrap 返回
 
-下一步：vm_map_init → kmem_init → vm_fault_init → 完整 vm_mem_bootstrap 返回
-       → 调度器 / Mach IPC / task / thread / clock
+下一步：恢复正常异常向量 → 调度器 / Mach IPC / task / thread / clock
        → kernel_bootstrap_thread → IOKit → 正常中断运行
        → bsd_init → md0 根文件系统 → exec 最小 /sbin/launchd
        → EL0 的 PID 1 输出心跳并持续存活
@@ -236,8 +237,8 @@ USB 日志能显著减少后续对屏幕和断点回传的依赖；可以在正�
 
 | 优先级 | 下一项 | 完成标志 |
 | --- | --- | --- |
-| 1 | zone/object 及完整 VM bootstrap，逐段复核回传环境 | 到达完整 `vm_mem_bootstrap` 返回 |
-| 2 | 正常异常向量、调度器、计时器/IRQ、内核线程 | 线程与定时中断持续运行 |
+| 1 | zone/object 及完整 VM bootstrap（已完成） | 实机到达完整 `vm_mem_bootstrap` 返回 |
+| 2 | 正常异常向量、调度器、计时器/IRQ、内核线程（当前优先级最高） | 线程与定时中断持续运行 |
 | 3 | RAM disk 最小用户态 | PID 1 多次心跳，系统调用可重复 |
 | 4 | 稳定屏幕日志或 MTU3 最小 USB 日志 | 能连续观察真实内核故障，不依赖仅显示 logo |
 | 5 | MTK UFS 只读、受控写入与根镜像 | 块数据校验、文件系统验证通过 |
@@ -265,13 +266,13 @@ USB 日志能显著减少后续对屏幕和断点回传的依赖；可以在正�
 kernel: xnu/out/ci-39640336293/kernel.development.sweet
 SHA256: bc308789486ee96b380ce374bc7fe4c1894f4a115da9662b4cb0cf9a016b543c
 
-本轮镜像: shim/out/entryprobe-el1-zone-object-brk.img
+本轮镜像: shim/out/entryprobe-el1-vm-return-brk.img
 大小: 26,562,560 bytes
-SHA256: e4231b9071f0a559c72a8d4961acfe895e2a91eb2ebae525647be1704018695a
+SHA256: 99d68ed6d5c870070a116e223b7ba29bd76b1e619c34e444f05146c92b1106fa
 
 同次启动记录:
-stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007abfad0
-x0=fffffe0007b482a0（与主机模型预测一致；不是成功/失败返回码）
+stage=87 fault=1 esr=f2005357 far=0 pc=fffffe00073644d8
+x0=fffffe00080bbbc0（与主机模型预测一致；不是成功/失败返回码）
 
 已验证的完整恢复备份:
 backup/recovery-20261021/boot_a-live-20261021.img
@@ -280,16 +281,16 @@ SHA256: 2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1
 
 证据目录（gitignored）:
 research/matisse/20261022-xnu-resume/
-  zone-object-brk-manifest.json
-  zone-object-brk-dmesg.txt
-  zone-object-brk-restored.img
-  zone-object-brk-emulation.txt
+  vm-return-brk-manifest.json
+  vm-return-brk-dmesg.txt
+  vm-return-brk-restored.img
+  vm-return-brk-emulation.txt
   touch-driver-binding.txt
   vm-retire-boot-pages-disassembly.txt
 ```
 
-关键提交：`f1b6d14` 为 TTBR0 恢复回传；`e24a92c` 为 x0 记录；`cfb5e8c` 为 CPU/GIC 实测记录；`490c41f` 为物理页初始化通过和完整恢复记录；`1e233f4` 为 zone/object 检查点准备。
+关键提交：`f1b6d14` 为 TTBR0 恢复回传；`e24a92c` 为 x0 记录；`cfb5e8c` 为 CPU/GIC 实测记录；`490c41f` 为物理页初始化通过和完整恢复记录；`1e233f4` 为 zone/object 检查点准备；`3d638e1` 为完整 VM bootstrap 返回检查点准备。
 
-本轮结束时没有尚未恢复的测试。zone/object 实机断点已通过并完整恢复；完整 `vm_mem_bootstrap` 返回检查点已在主机模型中端到端通过（镜像 `99d68ed6`，未实机）。下一步需单独授权该实机测试，而不是直接刷 iOS 根镜像。
+本轮结束时没有尚未恢复的测试。完整 `vm_mem_bootstrap` 返回已在实机通过并完整恢复；主机模型同时确认真实写入物理地址最高 `0x1039e3fff`，128 MiB 清理范围足够，bootstrap 恒等映射在该范围内完整，而 `0x22e000000` 已不再映射，不能无证据扩大清理范围。
 
-已准备但未实机的下一检查点：`shim/out/entryprobe-el1-vm-return-brk.img`，26,562,560 bytes，SHA256 `99d68ed6d5c870070a116e223b7ba29bd76b1e619c34e444f05146c92b1106fa`，断点 `0xfffffe00073644d8`（`vm_mem_bootstrap` 返回后）。主机模型确认真实写入物理地址最高 `0x1039e3fff`，仍在 128 MiB 清理范围内；bootstrap 恒等映射在该范围内完整，`0x22e000000` 已不再映射，不能无证据扩大清理范围。
+下一步不能直接带着当前诊断向量进入调度器：必须先把正常 XNU IRQ、SVC 和缺页异常入口恢复或做成只拦截指定 BRK 的选择性机制，并确认 DAIF 开放后中断持续投递。不要直接刷 iOS 根镜像。
