@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU entry BRK captured; pre-VBAR breakpoint next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU reaches pre-VBAR; early-vector relay next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
@@ -107,14 +107,18 @@ without an error exit; on-device sha256sum matched, then a full tmp-file
 readback via adb pull verified all 67,108,864 bytes. Check lengths strictly.
 Evidence: `entry-brk-dmesg.txt`, `entry-brk-manifest.json`, `entry-brk-restored.img`.
 
-**Next image prepared, NOT flashed:** `entryprobe-el1-vbar-brk.img`,
+**Completed second breakpoint test:** `entryprobe-el1-vbar-brk.img`,
 26562560 B, SHA256 `1291e310667744208e5328d72ca9c7c293e3ea2859dbddf86856725f57dd4660`.
+**Hardware PASS (explicitly approved):** same-boot `vbar-brk-dmesg.txt`
+records `stage=87 fault=5 esr=f2005357 far=0 pc=10148e104`. The original
+entry branch and first six start_first_cpu instructions executed. Automatic
+Recovery return and full 64 MiB restore SHA256 `2931647a...86b1` confirmed.
+
 Breakpoint offset `0x1c7c` resolves to `0x10148e104`, the MSR VBAR_EL1
 instruction in start_first_cpu. The original entry branch, OSLAR/DAIF and
 boot_args-register preservation will execute before it. Only this one
 instruction differs in the inflated el1-xnu control. Predicted partition
-SHA256 `0275b58ed310012d43f647817b2a80933991eab5b500efa47b44be9f3f640f23`. Await this test's separate approval.
-Device remains restored in Recovery.
+SHA256 `0275b58ed310012d43f647817b2a80933991eab5b500efa47b44be9f3f640f23`. Test completed; device remains restored in Recovery.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
