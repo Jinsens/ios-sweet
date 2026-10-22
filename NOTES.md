@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU MMU-on checkpoint passed; early C checkpoint next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU early C checkpoint passed; pre-VM checkpoint next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
@@ -171,7 +171,7 @@ The high-vector relay returned automatically to Recovery. Complete original
 restored image. Next: a bounded early-C checkpoint with explicit cache
 clean/invalidate before leaving XNU's bootstrap identity mapping.
 
-**Prepared, NOT flashed: bounded early-C checkpoint**
+**Completed: bounded early-C checkpoint**
 `shim/out/entryprobe-el1-early-c-brk.img`, 26562560 B, SHA256
 `98e8829d84edeabf476c0c837cfefe1a132d993e6baee39082e3bf54eaa835ff`.
 Payload SHA256 `37ba85594c75f1ec7b4260a6ce20a4bfc56d44ee0385cfdbab6510cf3acdba6e`.
@@ -192,7 +192,12 @@ and original SCTLR/SP/SPSel/DTB were restored at Linux entry. Emulation does
 not model cache coherency or real hardware timing. Evidence:
 `early-c-brk-emulation.txt`. Predicted partition SHA256
 `370a7bc51f1cb74fce3d0b966851664927707668eb8ce06d83a7882ff25a398e`. Device remains restored in Recovery;
-no write of this new image yet. MMU-on milestone committed as `9161917`.
+**Hardware PASS (explicitly approved):** `early-c-brk-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007ad58b0`. arm_init's
+C prologue, sweet_early_init and first sweet_early_mark ran. Cache cleanup
+and automatic return to Recovery succeeded. Full 64 MiB original boot_a
+hash verified. MMU-on milestone `9161917`; bounded cleanup tooling `ccb1d03`.
+Next: stop before arm_vm_init while bootstrap identity mappings still exist.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
