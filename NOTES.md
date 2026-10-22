@@ -96,6 +96,20 @@ leave a test image in `boot_a`.
 test suite from `PE_lockdown_iokit`/`kperf_init_early`. A RAM-disk root is
 still absent from the payload.
 
+**Prepared, host-verified, NOT flashed: XNUPOST-skip diagnostic.**
+`shim/out/entryprobe-el1-bsd-init-skiptest-brk.img`, 26,562,560 B, SHA256
+`ce02efbf38a55aac1186e7b653e53505836cc4a4e29d0271fec1456c5283021a`;
+payload SHA256 `29beb4b8bfd0508764101d9b5b4628a3ae6c33bfb34912edf9dfa7477969e10e`
+(`research/.../skip-xnupost-build.py`). It NOPs `bl kernel_list_tests`
+(`0x7aafb54`), `bl kernel_do_post` (`0x7aafb58`) and the `cbnz w0` panic
+branch (`0x7aafb5c`), then inserts BRK at the `bl bsd_init` site
+(`0x7aafbe0`). Only those 16 payload bytes differ from the debug payload.
+This is diagnostic only: it tells whether the XNUPOST suite is the reason
+the unmodified `bsd_init` checkpoint loops. If this image reaches
+`pc=fffffe0007aafbe0`, the remaining path is `bsd_init` itself; if it loops,
+the failure is in `PE_lockdown_iokit`, `vm_set_restrictions`,
+`kperf_init_early`, or the return after them.
+
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
 `ff8e21bfdd891cb86ccf6de2ec85fb82ab148e8877e598e74b8728059b80b02a`;
