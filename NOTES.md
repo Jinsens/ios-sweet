@@ -97,6 +97,17 @@ leave a test image in `boot_a`.
 
 **Docs:** `docs/matisse-xnu-ios-roadmap-zh.md` updated on 2026-10-23 with the scheduler, timer-IRQ, lockdown, kperf and `bsd_init` results.
 
+**ACTIVE: diagnostic watchdog artifact found (2026-10-23).**
+`mkentryprobe.py` compiles the shim with `WDT_AUTO_RESET`, which re-arms the
+MT6983 31 s AP watchdog so a hung XNU resets. Every "infinite reboot" after a
+BRK checkpoint or no-BRK diagnostic image is therefore partly an artifact. The
+production `shim/build.sh` path calls `wdt_disable_raw()` at shim entry and
+leaves the watchdog off. Built production image `shim/out/shim-boot.img`
+(7,008,256 B, SHA256 `fa6607a8ee617fa3da8e816180e43f8ac867465d986556face0ba56533b3686c`)
+from the original RAM-disk payload and flashed it; predicted partition
+`e08af82b...` matched. This boot, not the diagnostic images, is the real test
+of the 30 s RTC + 30 s IOMedia waits and the minimal init.
+
 **ACTIVE: bsd_init bisection found two 30 s waits (2026-10-23).**
 Checkpoints after `kauth_init`, `kmem_suballoc`, `bsd_bufferinit`, and
 (once the waits were patched) `vfsinit`, `IOKitBSDInit`, `vfs_mountroot`
