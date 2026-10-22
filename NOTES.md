@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU early C checkpoint passed; pre-VM checkpoint next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU pre-VM checkpoint passed; final-table construction next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
@@ -199,7 +199,7 @@ and automatic return to Recovery succeeded. Full 64 MiB original boot_a
 hash verified. MMU-on milestone `9161917`; bounded cleanup tooling `ccb1d03`.
 Next: stop before arm_vm_init while bootstrap identity mappings still exist.
 
-**Prepared, NOT flashed: pre-VM checkpoint**
+**Completed: pre-VM checkpoint**
 `shim/out/entryprobe-el1-pre-vm-brk.img`, 26562560 B, SHA256
 `25d5d260f4eb2f7ebb215062d81b8e97c5eabaebfa84aed9a17f1f015e0aef63`.
 Payload SHA256 `b7a0fe56181f8ae2104b2258c08f1bf7f6aedfcaf58e55dd3737cf7d17117a38`.
@@ -216,8 +216,13 @@ emulator feature limitation, not evidence of a device failure. Log:
 `pre-vm-brk-max-emulation.txt`. Existing 33 host tests remain passing;
 no new source changes for this image. Predicted partition SHA256
 `f42873e5419cdc5a786c4f933f09d947775294c48333f11d042c800f9f90d43c`.
-Device remains restored in Recovery; await separate approval. Early-C
-hardware result committed as `ec4d84f`.
+**Hardware PASS (explicitly approved):** same-boot `pre-vm-brk-dmesg.txt`
+records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007ad6124`.
+Platform setup, CPU topology, bootstrap thread, CPU/timer initialization and
+early startup reached arm_vm_init. Automatic Recovery return and full
+64 MiB original boot_a hash verified. Early-C result commit `ec4d84f`.
+Next: stop just before the first TTBR1 switch inside arm_vm_init; expand
+cache cleanup to cover newly allocated page tables.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
