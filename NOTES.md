@@ -88,6 +88,22 @@ leave a test image in `boot_a`.
 and then reach `spllo()`/`initialize_screen`; timer IRQ delivery under the
 normal XNU vectors is still unproven.
 
+**Prepared, host-verified, NOT flashed: first post-`spllo` checkpoint.**
+`shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
+`ff8e21bfdd891cb86ccf6de2ec85fb82ab148e8877e598e74b8728059b80b02a`;
+payload SHA256 `c9622ac8894e638f1f269189a7ddee8adf30cf83f9d5619116110de1bb2ecc55`.
+BRK at entry offset `0x623564`, payload offset `0xaabddc`, VA
+`0xfffffe0007aaf9ec` / PA `0x101aaf9ec`, immediately after
+`bl initialize_screen`, i.e. after `spllo()` enabled interrupts and
+`initialize_screen(NULL, kPEAcquireScreen)` returned; it replaces
+`bl vm_commpage_init` (`0x97e63a74`). Same dual-slot selective vectors,
+128 MiB cleanup range and TTBR0 restore as the passed images; 37 tools tests
+pass. Reaching this BRK would prove `kernel_startup_initialize_upto(16)`,
+`PE_init_iokit`, `spllo()` and `initialize_screen` returned. It does **not**
+by itself prove a timer IRQ was delivered: the scheduler tick interval is
+125 ms (`SCHED_TICK_SHIFT=3`), while the code between `spllo()` and this
+checkpoint may be shorter. A separate tick probe is still needed.
+
 **Completed: bootstrap-thread checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
 vectors, 26,562,560 B, SHA256
