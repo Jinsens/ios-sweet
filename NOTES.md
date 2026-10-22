@@ -1,12 +1,14 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU pre-VM checkpoint passed; final-table construction next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU final-table construction passed; TTBR1 switch next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`final-tables-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
-sweet / Qualcomm target. The diagnostic instruction at XNU entry is now hardware-proven; original early initialization remains unproven.
+sweet / Qualcomm target. XNU's original initialization through formal page-table
+construction inside arm_vm_init is hardware-proven. The first switch to those
+tables, later VM initialization and full kernel boot remain unproven.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
 Each test below had explicit user approval including restoration. This LK
@@ -48,7 +50,8 @@ alone previously left one 4 KiB block of test data beyond the prefix; always
 follow it with a full Recovery write and complete readback hash. Recovery
 /tmp is cleared each reboot: re-push the backup before each restoration.
 Use `dd ... && sync` and accept adb state `recovery` as online. Recovery dd
-can append statistics to stdout: take exactly the first 67,108,864 bytes.
+can append statistics to stdout or silently truncate streaming output: use an
+on-device temporary readback file plus adb pull and verify its exact length.
 
 **Build and implementation:** latest successful kernel CI remains
 `Jinsens/ios-sweet` run **39640336293**, commit `dd9752e`; no new CI run.
@@ -73,9 +76,11 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** obtain separate approval for final-table test
-`340b9628` below. Hardware has passed all pre-VM initialization. Next isolate
-arm_vm_init's table construction before switching TTBR1 to those tables.
+**Next concrete action:** prepare a checkpoint at VA `0xfffffe0007483ddc`,
+immediately after the first set_mmu_ttb_alternate call. Verify the formal
+TTBR1 mapping of the relay and remaining bootstrap TTBR0 identity mapping
+before requesting approval for a new image. Existing fallback cannot be
+used after set_mmu_ttb clears TTBR0 at `0xfffffe0007483df8`.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -224,7 +229,7 @@ early startup reached arm_vm_init. Automatic Recovery return and full
 Next: stop just before the first TTBR1 switch inside arm_vm_init; expand
 cache cleanup to cover newly allocated page tables.
 
-**Prepared, NOT flashed: final-table construction checkpoint**
+**Completed: final-table construction checkpoint**
 `shim/out/entryprobe-el1-final-tables-brk.img`, 26562560 B, SHA256
 `340b962813b4bc3cd6cf699525c5003b7643087becc3915dba0390e42de5ec52`.
 Payload SHA256 `9ccf10dd33d42a9d79588de2374b8bcbbff759f56e757d2ce5345ea4813f62fc`.
@@ -242,10 +247,16 @@ operations executes through this checkpoint and returns to Linux with
 original SCTLR/SP/SPSel/DTB. Allocation and final table pointers are recorded
 in `final-tables-brk-emulation.txt`; alloc end is within the 64 MiB cleanup.
 CPU-mode AT cannot handle this model's missing 16K support, so AT/PAR is
-explicitly modeled; hardware result is still unknown. Predicted partition
+explicitly modeled. Predicted partition
 SHA256 `23320b4789d653d980e8c1d5320333cff4ca94da62ed4ab61f8f224e24b0c218`.
-Device remains restored in Recovery, no new write yet. Pre-VM hardware
-milestone committed as `21fecbe`.
+**Hardware PASS (explicitly approved):** same-boot `final-tables-brk-dmesg.txt`
+records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007483dd8`.
+arm_vm_init built the formal tables and reached its first TTBR1 switch.
+The ESR is the inserted BRK, not an unexpected kernel exception. Automatic
+Recovery return and the complete 64 MiB original boot_a hash were verified
+(`final-tables-brk-manifest.json` and `final-tables-brk-restored.img`).
+Pre-VM milestone commit `21fecbe`; bounded cleanup tooling `cb96eaa`.
+No new kernel CI run; the tested kernel remains run `39640336293` / `dd9752e`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
