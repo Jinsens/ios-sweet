@@ -24,6 +24,45 @@ diagnostic vectors are hardware-proven. Remaining scheduler startup,
 interrupt delivery, BSD/userspace and full kernel boot remain unproven.
 These checkpoints alone do not verify visible panel refresh.
 
+**Prepared, host-verified, NOT flashed (no authorization yet): scheduler
+startup checkpoints.** Two further images use the same dual-slot selective
+vectors, same 128 MiB cleanup range `[0x100000000, 0x108000000)`, same
+bootstrap TTBR0 restore `0x10117c000`, same debug payload base
+(`b6eafe9a...`) and stock template (`7a6a462d...`) as the hardware-passed
+thread image. No source or CI change; the kernel is still CI `39640336293`.
+
+| checkpoint | image (26,562,560 B) | payload | BRK VA / PA |
+| --- | --- | --- | --- |
+| `sched_startup` return | `shim/out/entryprobe-el1-sched-startup-brk.img` SHA256 `c1859ef9626ff2a66689c0b63d25aa10e23645e987db1c851435a43f0c5bf5b9` | `shim/out/matisse-xnu-sched-startup-brk.payload` SHA256 `196c4de70325c597e6c80089dcc45048eb30a72f6f0488f27e34f33b4ed14a72` | `0xfffffe0007aaf7d4` / `0x101aaf7d4` |
+| `thread_daemon_init` return | `shim/out/entryprobe-el1-thread-daemon-brk.img` SHA256 `f16c296dd10705f0434c29c0cc0e6460411730d1be1a0899a88809c9aea4f4e8` | `shim/out/matisse-xnu-thread-daemon-brk.payload` SHA256 `d41aec2a63d98734a89d1a5935de37e568f0d3b5cd6a6b18d363199f432f30f7` | `0xfffffe0007aaf80c` / `0x101aaf80c` |
+
+- `sched_startup`: entry offset `0x62334c`, payload offset `0xaabbc4`,
+  replaces `ldrb w8,[x21,#0x20c]` (`0x394832a8`). This checkpoint covers
+  `idle_thread_create` and the first real `thread_block` round trip inside
+  `sched_startup` (`sched_init_thread` blocks, bootstrap resumes).
+- `thread_daemon_init`: entry offset `0x623384`, payload offset `0xaabbfc`,
+  replaces `mov w0,#0xe` (`0x528001c0`), immediately before
+  `kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL)`.
+- Build recipe was validated by reproducing the hardware-passed thread image
+  byte-for-byte: template `backup/boot_a-stock.img`, `--xnu-vector-offset
+  0xb78`, `--xnu-high-vector-offset=-0x4488`, `--xnu-clean
+  --xnu-clean-limit 0x108000000`, `--xnu-restore-ttbr0 0x10117c000`,
+  `--xnu-selective`, NDK 28.2.13676358, output SHA256 `154449c1...`. Each new
+  payload differs from the base by exactly the one BRK word. All 37 tools
+  tests pass.
+- Expected same-boot record: `stage=87 fault=1 esr=f2005357 far=0
+  pc=<checkpoint VA>`; the inserted BRK is the only expected fault. The stale
+  `entryprobe-el1-sched-init-brk.img` / payload `e7c026b4...` remains
+  slot-4-only and must not be used.
+
+Recovery baseline re-read this turn: `boot_a` is 67,108,864 B with SHA256
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`, device
+is root ADB in Recovery with slot `_a`. Testing needs explicit approval for
+the `boot_a` write. After the BRK record, write back the full original and
+verify the hash; on failure, restore the trimmed stock prefix via fastboot,
+boot Recovery, then write the full backup. Never leave a test image in
+`boot_a`.
+
 **Completed: bootstrap-thread checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
 vectors, 26,562,560 B, SHA256
