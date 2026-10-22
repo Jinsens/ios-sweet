@@ -1,13 +1,18 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: 0085 result is static logo; boot_a restored; PID 1 EL0 probe prepared <<<
+## >>> ACTIVE 2026-10-23: 0085 result is static logo; boot_a is NOT the live backup; PID 1 EL0 probe prepared <<<
 
-**Current device (read-only adb this turn): Recovery, root, slot `_a`.** The
-0085 screen test is finished, not in flight. It stayed on the first logo with
-no shim or XNU text. `boot_a` was restored from the full 64 MiB backup and
-verified as the full-partition SHA256
-`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`; no
-`userdata` write. Each new `boot_a` write still needs explicit approval.
+**Current device (read-only adb this turn): Recovery, root, slot `_a`.**
+`sha256sum /dev/block/by-name/boot_a` returns
+`7a6a462d5e8858c6f7ecd77655363dd84964d44ea6e7c239e961632996a96e94`, i.e. the
+stock template `backup/boot_a-stock.img`, **not** the live backup
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1` from
+`backup/recovery-20261021/boot_a-live-20261021.img`. The first 64 KiB also
+matches the stock template. `boot_b` is a third image
+(`8775a30a95a44ca5c8d83c38df4d77e2c4c8bad315ac54fb9d1dae60495d9cb7`). The
+previously reported 2931647a restore is therefore not present on the device;
+do **not** flash a test image until `boot_a` is rewritten from the live backup.
+No `userdata` write. Each new `boot_a` write still needs explicit approval.
 
 **The logo and the BSD result are separate.** Diagnostic BRK records prove
 `bsd_init` ran through `vfs_mountroot` (x0=0) and reached `load_init_program`;
