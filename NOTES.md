@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU reaches kernel_bootstrap_thread on hardware; selective vectors pass <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): BSD mounts md0; display refresh fix prepared <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`thread-brk-v2-restored.img`) matches original SHA256
@@ -33,9 +33,23 @@ is `kperf_init_early()` -> `ml_wait_max_cpus()`. Returning 1 from that barrier
 on the single-CPU topology let kperf, the full CONFIG_XNUPOST suite and
 `PE_lockdown_iokit` pass; execution reached the `bl bsd_init` site. The
 permanent CI kernel with that fix was then hardware-validated end-to-end and
-reached the `bl bsd_init` site with XNUPOST and kperf untouched. BSD/userspace
-and full kernel boot remain unproven. These checkpoints alone do not verify visible panel
-refresh.
+reached the `bl bsd_init` site with XNUPOST and kperf untouched. Later RAM-disk
+diagnostics executed `bsd_init`: `vfs_mountroot` returned success (`x0=0`),
+`bsd_utaskbootstrap` ran, and execution reached `load_init_program`. Thus BSD
+initialization and mounting the mockfs/md0 root are proven on hardware.
+Successful PID 1 execution and full kernel boot remain unproven; the
+production screen stayed dark. The display path has now been traced to two
+gaps: `sweet_display_init()` treated transient DSI `TE_RDY` as a hard
+readiness gate, and the command-mode refresh hook covered `pe_serial.c` but
+not XNU's graphical `video_console.c`. New patch
+`xnu/patches/0085-matisse-video-console-refresh.patch` removes that gate and
+refreshes after graphical console output. It applies to the CI XNU source and
+both affected files pass local ARM64 Mach-O object compilation (0 failures)
+using the recorded DEVELOPMENT/SWEET flags. All 44 tools tests pass. CI and
+hardware validation are still pending; the screen fix is not yet proven.
+Device state is last verified as
+Recovery with the full original `boot_a` restored and hash
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 
 **Completed: `sched_startup` return (hardware PASS).**
 `shim/out/entryprobe-el1-sched-startup-brk.img`, 26,562,560 B, SHA256

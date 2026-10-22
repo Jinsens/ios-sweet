@@ -1,0 +1,56 @@
+diff --git a/osfmk/arm64/sweet_matisse_dsi.c b/osfmk/arm64/sweet_matisse_dsi.c
+--- a/osfmk/arm64/sweet_matisse_dsi.c
++++ b/osfmk/arm64/sweet_matisse_dsi.c
+@@ -96,8 +96,8 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
+ 	DTEntry entry;
+ 	uint64_t const *reg;
+ 	uint32_t size;
+-	uint32_t ctl, mode, ps, size_con, vact, buf, gates0, gates1, gates2;
+-	uint32_t ovl_en, ovl_addr, ovl_pitch, intsta;
++	uint32_t ctl, mode, ps, size_con, vact, buf, gates0, gates1, gates2;
++	uint32_t ovl_en, ovl_addr, ovl_pitch;
+ 
+ 	disp_ready = 0;
+ 	if (SecureDTFindEntry("name", "sweet-display", &entry) != kSuccess) {
+@@ -125,6 +125,5 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
+ 	ovl_addr = disp_read(OVL_L0_ADDR);
+ 	ovl_pitch = disp_read(OVL_L0_PITCH);
+-	intsta = disp_read(DSI_INTSTA);
+ 
+ 	if ((gates0 & (GATE0_MUTEX | GATE0_DSC0 | GATE0_DSI0)) ||
+ 	    (gates1 & GATE1_OVL0_2L) || (gates2 & GATE2_DSI_CLK)) {
+@@ -162,10 +162,9 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
+ 	if ((ovl_en & 1u) == 0 || ovl_addr != (uint32_t)fb_phys ||
+ 	    ovl_pitch != stride) {
+ 		return;
+ 	}
+-	if ((intsta & DSI_INT_TE_RDY) == 0) {
+-		return;		/* panel not sending TE: leave it alone */
+-	}
++	/* TE_RDY is an edge-like status, not stable panel readiness. The refresh
++	 * path waits for it with a bound and still triggers if a pulse is missed. */
+ 
+ 	disp_con_ctrl = ctl | DSI_EN | DSI_CM_WAIT_DATA_LINE_EN |
+ 	    DSI_CM_WAIT_FIFO_FULL_EN;
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -81,6 +81,10 @@
+ #include <console/video_console.h>
+ #include <console/serial_protos.h>
+ 
++#if defined(SWEET)
++#include <arm64/sweet_matisse_dsi.h>
++#endif
++
+ #include <kern/kern_types.h>
+ #include <kern/kalloc.h>
+ #include <kern/debug.h>
+@@ -1240,3 +1244,6 @@ vcputc_options(char c, __unused bool poll)
+ #endif /* SCHED_HYGIENE_DEBUG */
+ 		VCPUTC_LOCK_UNLOCK();
++#if defined(SWEET)
++		sweet_display_refresh(0);
++#endif
+ 	}
+ }
