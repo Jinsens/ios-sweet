@@ -32,8 +32,9 @@ diagnostic still looped, and a payload test confirmed the post-lockdown hang
 is `kperf_init_early()` -> `ml_wait_max_cpus()`. Returning 1 from that barrier
 on the single-CPU topology let kperf, the full CONFIG_XNUPOST suite and
 `PE_lockdown_iokit` pass; execution reached the `bl bsd_init` site. The
-permanent source/CI fix is still pending. BSD/userspace and full kernel boot
-remain unproven. These checkpoints alone do not verify visible panel
+permanent CI kernel with that fix was then hardware-validated end-to-end and
+reached the `bl bsd_init` site with XNUPOST and kperf untouched. BSD/userspace
+and full kernel boot remain unproven. These checkpoints alone do not verify visible panel
 refresh.
 
 **Completed: `sched_startup` return (hardware PASS).**
@@ -94,10 +95,9 @@ back the full original and verify the hash; on failure, restore the trimmed
 stock prefix via fastboot, boot Recovery, then write the full backup. Never
 leave a test image in `boot_a`.
 
-**Next:** land the permanent `ml_wait_max_cpus()` single-CPU fix as a new
-`xnu/patches` entry, build it through GitHub Actions, and re-derive the probe
-offsets for the new kernel. After that, `bsd_init` and the RAM-disk root are
-the remaining gates; the current payload has no `RAMDisk` node or root arg.
+**Next:** execute `bsd_init` itself. The current payload still has no
+`RAMDisk` node and no root-device boot argument, so the next work is a
+RAM-disk root and a checkpoint after `bsd_init`/`load_init_program`.
 
 **Failed: XNUPOST-skip diagnostic (hardware, infinite reboot).**
 `shim/out/entryprobe-el1-bsd-init-skiptest-brk.img`, 26,562,560 B, SHA256
@@ -163,17 +163,23 @@ succeeded). New kernel
 payload `shim/out/matisse-xnu-ci39828405447.payload` SHA256
 `e39237a808568658c363b8d10fbac9916b4093c2f8b0992cebfbc870c13f887c`.
 
-**Prepared, host-verified, NOT flashed: permanent-fix validation.**
+**Completed: permanent-fix validation (hardware PASS).**
 `shim/out/entryprobe-el1-bsd-init-0084-brk.img`, 26,562,560 B, SHA256
 `1cd72d232491a871296d611720a8ac55774f4c743a286131841b2dff1da93599`;
 payload SHA256 `d634f707bc0aecccd438fa312d0f69254706a7cb2b04ddba6ac886183835b425`.
 The new kernel's `_kernel_bootstrap_thread` is at `0xfffffe0007aaf754`; the
 BRK is at VA `0xfffffe0007aafc00` / PA `0x101aafc00` (entry offset
-`0x623778`), replacing `bl bsd_init` (`0x97f2f912`). XNUPOST and kperf are
+`0x623778`), replacing `bl bsd_init` (`0x97f2f912`). XNUPOST and kperf were
 untouched. Same vector/cleanup/TTBR0 parameters as before: the early and high
-vector tables and `bootstrap_pagetables` did not move. A return at
-`pc=fffffe0007aafc00` would hardware-validate patch 0084 through the real
-XNUPOST suite and kperf. 44 tools tests pass.
+vector tables and `bootstrap_pagetables` did not move.
+
+Same-boot `ci0084-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aafc00`, x0 `0`.
+Predicted written-partition SHA256 `65c410be...` matched the full readback;
+the complete original was restored and verified as `2931647a...`. Patch 0084
+is hardware-validated end-to-end: the real CONFIG_XNUPOST suite and
+`kperf_init_early()` returned and execution reached `bl bsd_init`. 44 tools
+tests pass.
 
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
