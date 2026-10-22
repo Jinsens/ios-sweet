@@ -1,15 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU formal TTBR1 switch passed; TTBR0 teardown next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU TTBR0 teardown passed; arm_vm_init return next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`ttbr1-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`ttbr0-off-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
 construction and the first switch to those tables inside arm_vm_init are
-hardware-proven. TTBR0 teardown, later VM initialization and full kernel boot
-remain unproven.
+hardware-proven, as are TTBR0 teardown, TLB invalidation and early console
+mark 10 using the relocated framebuffer. Later VM initialization and full
+kernel boot remain unproven.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
 Each test below had explicit user approval including restoration. This LK
@@ -77,10 +78,11 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request approval for prepared TTBR0-teardown test
-`c73eb57f` below. Expected `pc=fffffe0007483e18 esr=f2005357 fault=1`.
-The optional new shared relay restores bootstrap TTBR0 only on exception;
-the older per-slot relay cannot be used after identity-map teardown.
+**Next concrete action:** prepare and validate a checkpoint after arm_vm_init
+returns, at VA `0xfffffe0007ad6128` (entry offset `0x649ca0`). Check allocation
+extent and bootstrap table preservation before requesting a hardware test.
+The shared relay restores bootstrap TTBR0 only on exception; the older
+per-slot relay cannot be used after identity-map teardown.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -289,7 +291,7 @@ The original set_mmu_ttb_alternate executed and returned with the formal
 TTBR1 installed. Automatic Recovery return and complete original 64 MiB
 boot_a restoration/hash were verified (`ttbr1-brk-manifest.json`).
 
-**Prepared, NOT flashed: TTBR0 teardown + relocated early-console checkpoint**
+**Completed: TTBR0 teardown + relocated early-console checkpoint**
 `shim/out/entryprobe-el1-ttbr0-off-brk.img`, 26,562,560 B, SHA256
 `c73eb57fafc6efe21aba965f54b28e3442f23aa64cf0cd8e26de8c36714c2bba`.
 Payload SHA256 `d4449cd59bcad9cb5988cb46c91ecde3870a51b1d80624c4208f9ee9a1ca1170`.
@@ -317,9 +319,16 @@ BRK with empty TTBR0 `0x1024d8000`, formal TTBR1 `0x1024dc000`, and alloc end
 `0x1024fc000`; all 16 high-vector entries restore SCTLR/SP/SPSel/DTB and
 return to Linux. Logs: `ttbr0-off-brk-emulation.txt` and
 `ttbr0-all-vectors-emulation.txt`. Translation/AT/MMIO/exception entry remain
-modeled and cache coherence is not modeled: hardware result is unknown.
+modeled and cache coherence is not modeled.
 Rebuilding the previous TTBR1 image without the new option reproduces
 `e9fbcb81` byte-for-byte. No kernel CI run; TTBR1 hardware milestone `8a257b2`.
+Shared-relay implementation commit `f1b6d14`.
+**Hardware PASS (explicitly approved):** same-boot `ttbr0-off-brk-dmesg.txt`
+records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007483e18`.
+Original TTBR0 teardown, TLB flush and relocated early-console mark 10
+executed. The shared relay restored bootstrap TTBR0 and returned to Recovery.
+Complete 64 MiB original boot_a hash verified after restoration; see
+`ttbr0-off-brk-manifest.json` and full restored readback.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
