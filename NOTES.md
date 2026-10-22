@@ -76,11 +76,10 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** prepare a checkpoint at VA `0xfffffe0007483ddc`,
-immediately after the first set_mmu_ttb_alternate call. Verify the formal
-TTBR1 mapping of the relay and remaining bootstrap TTBR0 identity mapping
-before requesting approval for a new image. Existing fallback cannot be
-used after set_mmu_ttb clears TTBR0 at `0xfffffe0007483df8`.
+**Next concrete action:** request separate approval for prepared TTBR1-switch
+image `e9fbcb81` below, then run the approved probe/restoration script once.
+Expected `pc=fffffe0007483ddc esr=f2005357 fault=1`. Existing fallback cannot
+be used after set_mmu_ttb clears TTBR0 at `0xfffffe0007483df8`.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -257,6 +256,31 @@ Recovery return and the complete 64 MiB original boot_a hash were verified
 (`final-tables-brk-manifest.json` and `final-tables-brk-restored.img`).
 Pre-VM milestone commit `21fecbe`; bounded cleanup tooling `cb96eaa`.
 No new kernel CI run; the tested kernel remains run `39640336293` / `dd9752e`.
+
+**Prepared, NOT flashed: first formal TTBR1 switch checkpoint**
+`shim/out/entryprobe-el1-ttbr1-brk.img`, 26,562,560 B, SHA256
+`e9fbcb8119f7a0ca1153306dab5bb0d015b15c34f1f803ada5df3bf0ae072cf2`.
+Payload `shim/out/matisse-xnu-ttbr1-brk.payload` SHA256
+`66fae84c6e5d019989189ae9657a7a25106d5188939a81c03194a5b01fc0a873`.
+BRK entry offset `-0x86ac` at VA `0xfffffe0007483ddc` / PA `0x101483ddc`
+replaces BL ml_enable_monitor, immediately after set_mmu_ttb_alternate
+returns. Same 64 MiB cache cleanup and low/high vector relays as the last
+hardware-passed image. Predicted full written-partition SHA256
+`2aab2ebd0f3d4fb94242bcc3f6b3179107695d2569d76b9fd0f1dfc133e0d595`.
+
+Image cross-compile succeeded. Host modeled execution passed
+(`emulate-ttbr1.py`, `ttbr1-brk-emulation.txt` in the ignored evidence folder).
+The explicit 16K walker now handles L3 pages and privileged permissions;
+after the actual TTBR1 MSR it flushes modeled translations before continuing.
+New TTBR1 `0x1024dc000` maps the checkpoint and high vectors RX at their
+expected PAs; unchanged TTBR0 `0x10117c000` retains executable identity
+mapping for the relay and readable identity aliases across the cleanup
+range. The BRK, cleanup and Linux return all execute; original SCTLR/SP/
+SPSel/DTB are restored. Unicorn's fixed stop address itself triggered an
+unmapped-address lookup on a TLB flush; using a Linux-entry execution hook
+avoids that host-only issue. MMIO, translation, AT/PAR and exception entry
+remain modeled, so this is NOT a hardware result. No tracked source changes
+or new kernel CI were needed. Final-table hardware result commit `780b9c5`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
