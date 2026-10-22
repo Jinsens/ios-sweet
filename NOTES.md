@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: PID 1 EL0 open+write checkpoints PASS; boot_a restored live backup <<<
+## >>> ACTIVE 2026-10-23: BSD + md0 + PID 1 open/write/select all PASS; boot_a restored; display is the remaining frontier <<<
 
 **Current device (read-only adb + approved restore this turn): Recovery, root,
 slot `_a`.** The partition was initially the stock template
@@ -18,18 +18,43 @@ the template. The live backup
 `bsd_init` ran through `vfs_mountroot` (x0=0) and reached `load_init_program`;
 mockfs/md0 was mounted. The panel showing LK's first logo says only that the
 command-mode DSI path is not pushing new frames, not that the kernel stopped.
-**PID 1 execution is now hardware-proven.** The EL0 open checkpoint hit, with
+**PID 1 is alive and looping.** The EL0 open checkpoint hit, with
 `stage=87 esr=0000000056000080 pc=0000000100000420 x0=00000001000004c0
-x16=0000000000000005 spsr=0000000000000000` in the Recovery dmesg: an EL0t
-AArch64 `open` syscall carrying the `/dev/console` path pointer from
-`tools/sweet-init.S`. The write checkpoint then hit at the same boot path with
-`pc=00000001000004a8 x0=0000000000000000 x16=0000000000000004 spsr=0`:
-`open` returned fd 0 (not 3), the `b.cs hang` path was not taken, and the first
-`write` to the console was issued. Evidence:
-`research/matisse/20261023-pid1/open-dmesg.txt` and `write-dmesg.txt`.
+x16=0000000000000005 spsr=0000000000000000`: an EL0t AArch64 `open` carrying
+the `/dev/console` path pointer from `tools/sweet-init.S`. The write checkpoint
+then hit with `pc=00000001000004a8 x0=0000000000000000
+x16=0000000000000004 spsr=0`: `open` returned fd 0, the failure branch was not
+taken, and the first console `write` was issued. The select checkpoint then
+hit with `pc=0000000100000488 x0=0 x16=000000000000005d spsr=0`: the hello,
+getpid and alive writes returned and init entered its 5 s heartbeat loop.
+Evidence: `research/matisse/20261023-pid1/{open,write,select}-dmesg.txt`.
 The correct test trigger was `adb reboot recovery`, not `adb reboot`; the
 normal-mode run ended with `ro.boot.bootreason=Watchdog` and produced no
 readable record.
+
+**Console routing root cause found: `serial=3`.** XNU `arm_init.c` calls
+`serial_init()`, then parses `serial=3` (SERIALMODE_OUTPUT|SERIALMODE_INPUT).
+Because the UART enumerated successfully, it sets `serial_console_enabled` and
+calls `switch_to_serial_console()`, setting `cons_ops_index` to
+`SERIAL_CONS_OPS`. `get_cons_ops_index()` is a single-console selector, so
+kernel `kprintf` and `/dev/console` writes go to the UART and never reach
+`vcputc_options()`; patch 0085's `sweet_display_refresh(0)` is inside
+`vcputc_options`, so it never runs. This is independent of the DSI gate.
+
+Tested with `serial=0` (VC_CONS_OPS remains the default) and a diagnostic init
+that BRKs after three heartbeat `select` returns:
+`shim/out/entryprobe-el1-ramdisk-loop-serial0.img`, 26,566,656 B, SHA256
+`ad7aea74942bdc2d9643458657b952ce534b5ac71127bb0e923cee4f1986ca3e`;
+partition hash `41d6f1cf...` matched. The BRK hit with
+`esr=00000000f2005357 pc=0000000100000498 spsr=0000000060000000` (EL0t), so
+three heartbeats executed and the relay returned to Recovery in 46 s. Payload:
+`shim/out/matisse-xnu-ramdisk-loop-serial0.payload`, 16,622,400 B, SHA256
+`8e3cf39c8d0a3bdff43d1e67f1d0e610ce438485f8142e49fe21aec02ac01759`
+(rtcfast kernel patches preserved, init replaced with the loop-BRK variant,
+`serial=3` -> `serial=0`). Evidence: `loop-serial0-dmesg.txt`. **Panel
+observation is the pending half of this test**: if the serial0 build drew
+`*** SWEET userspace...` and heartbeats, `serial=3` is confirmed as the console
+root cause; if not, the remaining gap is video console/DSI refresh.
 
 **Watchdog fact check (device evidence, correcting the `WDT_AUTO_RESET`
 theory).** MediaTek does have a WDT here: the live DTB has
@@ -51,7 +76,7 @@ sweet/unknown-board fallbacks. Patch `0082` replaced the old early-console
 later userland (`1125x2436`, dot pitch 458); that does not explain the
 pre-userspace logo. No stale matisse framebuffer hardcode was found.
 
-**EL0 syscall checkpoints (open PASS, write pending).** The new selective
+**EL0 syscall checkpoints (open/write/select PASS).** The new selective
 vector also redirects slot 8 (AArch64 EL0 synchronous). It forwards ordinary
 syscalls unchanged and aborts to the proven Recovery relay at the first EL0
 SVC whose x16 matches `--el0-syscall`. This directly proves whether
@@ -73,15 +98,16 @@ SVC whose x16 matches `--el0-syscall`. This directly proves whether
   `esr=0000000056000080`, `pc=00000001000004a8`,
   `x0=0000000000000000` (fd returned by open), `x16=0000000000000004`,
   `spsr=0000000000000000`. This proves open returned and the first write was
-  issued; it does not yet prove the write returned.
-- Prepared but not flashed:
-  `shim/out/entryprobe-el1-ramdisk-syscall-select.img`, 26,566,656 B, SHA256
-  `8233800cac3f98b15eaedbf2dac996657954b26d00536bfc2d578e428dc0fbd7`;
-  predicted partition
-  `1185a03a7d0d1a9acee02e232499afbb98ecb48e52d39a53fe54c77274cf1930`;
-  `--el0-syscall 93`. Expected record: `esr=0000000056000080`,
-  `pc=0000000100000488`, `x0=0`, `x16=000000000000005d`, `spsr=0`.
-- Both PASS images embed payload `shim/out/matisse-xnu-ramdisk-rtcfast.payload`, 16,622,400 B,
+  issued.
+- **PASS:** `shim/out/entryprobe-el1-ramdisk-syscall-select.img`, 26,566,656 B,
+  SHA256 `8233800cac3f98b15eaedbf2dac996657954b26d00536bfc2d578e428dc0fbd7`;
+  raw-write partition hash
+  `1185a03a7d0d1a9acee02e232499afbb98ecb48e52d39a53fe54c77274cf1930`
+  matched the on-device readback. `--el0-syscall 93` hit:
+  `esr=0000000056000080`, `pc=0000000100000488`, `x0=0`,
+  `x16=000000000000005d`, `spsr=0`. The console writes returned and init
+  entered the 5 s `select` heartbeat loop.
+- All three PASS images embed payload `shim/out/matisse-xnu-ramdisk-rtcfast.payload`, 16,622,400 B,
   SHA256 `2ff27355d4c416516760243811ef6bec2bf71815dfbf18346060f36dd07d4a44`.
   It is the hardware-passed RAM-disk kernel with the RTC and IOMedia 30 s waits
   bypassed and the old `load_init_program` BRK removed (the only four words
@@ -91,12 +117,13 @@ SVC whose x16 matches `--el0-syscall`. This directly proves whether
   stub 100 B (<128), embedded payload hash matched, key words checked
   (`0x77ee118: d104c3ff`, `0x79ad070: d503201f`, `0x7a41e70: aa1f03e0`,
   `0x7a41eb4: 14000007`, slot 8 `140003b3`). All 44 tools tests pass.
-- Next: trap `getpid` (20) or `select` (93) from the same EL0 path. A hit
-  proves the console `write` returned and the init reached the PID print or the
-  5 s heartbeat loop; a miss means the console write blocked. Trigger probes
-  with `adb reboot recovery`; a plain `adb reboot` booted normal mode, ended
-  with `ro.boot.bootreason=Watchdog`, and produced no readable record. Restore
-  `boot_a` from the live backup after every test.
+- Next frontier is display, not PID 1. `serial=3` was routing all console output
+  to the UART; the serial0 loop build proved three heartbeats (BRK record)
+  after removing it. If the panel showed the text, make `serial=0` the
+  production cmdline; if it stayed at the logo, trace `vcputc_options` ->
+  `sweet_display_refresh` and the DSI/TE push. Trigger probes with
+  `adb reboot recovery`; restore `boot_a` from the live backup after every
+  test.
 
 ## >>> ACTIVE 2026-10-23 (Asia/Shanghai): BSD mounts md0; display refresh fix prepared <<<
 
