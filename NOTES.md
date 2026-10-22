@@ -73,52 +73,52 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** prepare a copy of the debug payload with its
-first XNU entry instruction replaced by BRK. Run the validated EL1 loader
-probe against it only after separate test approval. Before XNU replaces
-VBAR, the probe should capture ESR/ELR and return to stock Linux in the same
-boot; ELR `0x10148c488` would establish execution at the high physical entry.
-If successful, advance diagnostic checkpoints through the earliest assembly.
-The MT6983 command-mode panel needs explicit refresh, so DRAM-only early
-framebuffer writes cannot be inferred from the visible logo.
+**Next concrete action:** request separate approval for the prepared early-vector
+relay test below. The two completed BRK tests prove entry fetch and execution
+through the first six start_first_cpu instructions. Next isolate boot_args
+loads, stack setup and page-table preparation before MMU configuration.
 
-**Entry BRK image prepared, NOT flashed:**
-`shim/out/entryprobe-el1-entry-brk.img`, 26,562,560 B, SHA256
-`386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
-`tools/xnu_breakpoint.py` creates a separate payload copy, changes only
-entry's instruction `0x14000719` to `BRK #0x5357` (`0xd42a6ae0`), and checks
-segment/address bounds. Payload SHA256
-`f062b4c6e70783168afe74826006cb2988b773d6f68002a79f0a08e3eb366b97`.
-Cross-build and byte comparison prove the inflated loader, bundled Linux
-and ramdisk match the previous el1-xnu image except that one instruction.
-Expected ELR `0x10148c488`, ESR `0xf2005357`; fallback uses the installed
-probe VBAR. Predicted written-partition SHA256
-`7268f4cea4d1c618b42f41c5cc49e79ebc3c00f384fd4036234aee8357f22d3e`.
-30 host tests pass. The first build attempt correctly rejected the restored
-live wrapper as a template (no original Linux banner); rebuilding from
-`backup/boot_a-stock.img` passed. **Hardware result (explicitly approved): PASS.** Same-boot Recovery banner:
-`stage=87 fault=5 esr=f2005357 far=0 pc=10148c488`. This is the exact inserted
-BRK at the XNU entry PA, proving the high-address branch/instruction fetch.
-The original entry branch was replaced for this diagnostic, so it does not
-prove original initialization completed. Device automatically returned to
-Recovery. Full boot_a SHA256 `2931647a...86b1` was verified after restoration.
-The first `adb exec-out dd` restoration readback ended early at 59,225,600 B
-without an error exit; on-device sha256sum matched, then a full tmp-file
-readback via adb pull verified all 67,108,864 bytes. Check lengths strictly.
-Evidence: `entry-brk-dmesg.txt`, `entry-brk-manifest.json`, `entry-brk-restored.img`.
+**Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
+SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
+Same-boot Recovery captured `stage=87 fault=5 esr=f2005357 far=0 pc=10148c488`.
+It returned automatically; full 64 MiB restoration verified. The first
+exec-out readback silently truncated at 59,225,600 B; a full on-device tmp
+read plus adb pull completed and matched the original hash. Always validate
+length; use tmp readback + pull if streaming is truncated.
 
-**Completed second breakpoint test:** `entryprobe-el1-vbar-brk.img`,
-26562560 B, SHA256 `1291e310667744208e5328d72ca9c7c293e3ea2859dbddf86856725f57dd4660`.
-**Hardware PASS (explicitly approved):** same-boot `vbar-brk-dmesg.txt`
-records `stage=87 fault=5 esr=f2005357 far=0 pc=10148e104`. The original
-entry branch and first six start_first_cpu instructions executed. Automatic
-Recovery return and full 64 MiB restore SHA256 `2931647a...86b1` confirmed.
+**Completed pre-VBAR test:** `entryprobe-el1-vbar-brk.img`, 26,562,560 B,
+SHA256 `1291e310667744208e5328d72ca9c7c293e3ea2859dbddf86856725f57dd4660`.
+Same-boot Recovery captured `stage=87 fault=5 esr=f2005357 far=0 pc=10148e104`.
+The original entry branch and first six start_first_cpu instructions ran.
+Automatic Recovery return and complete original boot_a hash verified.
+Commits: `6c9772e` (bounded breakpoint tooling), `1c7dc60` (entry result),
+`286923e` (pre-VBAR result). Exact manifests/logs/readbacks are in the evidence
+directory above. Neither test proves the remaining original initialization.
 
-Breakpoint offset `0x1c7c` resolves to `0x10148e104`, the MSR VBAR_EL1
-instruction in start_first_cpu. The original entry branch, OSLAR/DAIF and
-boot_args-register preservation will execute before it. Only this one
-instruction differs in the inflated el1-xnu control. Predicted partition
-SHA256 `0275b58ed310012d43f647817b2a80933991eab5b500efa47b44be9f3f640f23`. Test completed; device remains restored in Recovery.
+**Prepared, NOT flashed: early-vector relay + page-table checkpoint**
+`shim/out/entryprobe-el1-tables-brk.img`, 26562560 B, SHA256
+`276ffdd70208c8190f46614b6f09893fb3e9d822ec09ed81f1d8b2f5dfcead4d`.
+Payload SHA256 `69f1676576e11b2f5bcac36c49a255c4a5b7fa6d63442c360fe9ee657eca4c06`.
+One payload BRK replaces common_start's first instruction at `0x10148e444`
+(entry offset `0x1fbc`), after bootstrap/video page tables are prepared and
+before TCR/TTBR/MMU configuration. `--xnu-vector-offset 0xb78` validates the
+16 early spin-vector slots at `0x10148d000` and enables the loader to replace
+each slot with a 64-bit register-indirect branch to the corresponding probe
+vector. XNU's original VBAR write remains intact. Diagnostic use is limited
+to MMU-off checkpoints; the probe prefix is not in XNU's page tables.
+The stackless exception recorder now restores the initial SPSel before SP,
+because XNU switches to SP_EL0 with an unmapped KVA before this checkpoint.
+Expected ESR `0xf2005357`, PC `0x10148e444`, fault slot **1** (EL1t sync).
+An earlier real exception will instead record its own ESR/PC.
+
+31 host tests pass. Full image executed in Unicorn with modeled display/
+clock and manually modeled BRK exception entry: actual loader, XNU code up
+to common_start, generated vector trampolines and probe fallback ran; original
+SP, SPSel and DTB argument restored at stock Linux entry. This is host-only
+evidence, NOT hardware success. Log `tables-brk-emulation.txt`.
+Predicted written-partition SHA256 `a5c00b3edbc254030c4d962bd6b9ccfb830aea6d1fff7ed443703680091f8ce0`.
+Device remains in Recovery with original full boot_a verified. Await this
+new test's explicit approval before any write.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,

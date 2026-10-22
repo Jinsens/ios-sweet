@@ -5,7 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from xnu_breakpoint import insert_breakpoint
+from xnu_breakpoint import insert_breakpoint, early_vector_pa
 
 
 def payload():
@@ -43,6 +43,20 @@ class BreakpointTests(unittest.TestCase):
             struct.pack_into('<I' if field == 12 else '<Q', source, field, value)
             with self.subTest(field=field), self.assertRaises(ValueError):
                 insert_breakpoint(source)
+
+    def test_vector_table_must_be_file_backed_aligned_and_spin_only(self):
+        source = bytearray(payload()) + bytearray(0xc00)
+        struct.pack_into('<Q', source, 24, 0xfffffe0006001000)
+        struct.pack_into('<4Q', source, 0x2a8,
+                         0xfffffe0006001000, 0x1000, 0x300, 0x800)
+        for slot in range(16):
+            struct.pack_into('<I', source, 0x300 + slot * 128, 0x14000000)
+        self.assertEqual(early_vector_pa(source, 0), 0x100001000)
+        with self.assertRaises(ValueError):
+            early_vector_pa(source, 4)
+        struct.pack_into('<I', source, 0x300 + 15 * 128, 0xd503201f)
+        with self.assertRaisesRegex(ValueError, 'B .'):
+            early_vector_pa(source, 0)
 
 
 if __name__ == '__main__':

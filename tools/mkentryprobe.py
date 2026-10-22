@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 
 import mkbootimg
+from xnu_breakpoint import early_vector_pa
 
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
@@ -132,13 +133,19 @@ def prepare(template, level=None):
     return header, image, template[rd_off:rd_off + rs], start, offsets, original_banner
 
 
-def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None):
+def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None,
+          xnu_vector_offset=None):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
     payload = Path(payload_path).read_bytes() if payload_path else None
     if (level in ('el1-xnu', 'el1-load')) != (payload is not None):
         raise ValueError('el1-xnu/el1-load require --payload; other levels do not accept it')
+    vector_pa = None
+    if xnu_vector_offset is not None:
+        if level != 'el1-xnu':
+            raise ValueError('early-vector relay requires el1-xnu')
+        vector_pa = early_vector_pa(payload, xnu_vector_offset)
     payload_offset = None
     if payload is not None:
         if len(payload) < 0x2a8 or payload[:8] != b'SWEETXNU':
@@ -178,6 +185,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
             config += '#define ENTRY_EL1_DISPLAY 1\n'
         if level in ('el1-xnu', 'el1-load'):
             config += '#define ENTRY_LOADER_PROBE 1\n'
+        if vector_pa is not None:
+            config += f'#define ENTRY_XNU_VECTOR_PA {vector_pa:#x}ULL\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         linker = '''ENTRY(_head)
 SECTIONS {
@@ -249,6 +258,7 @@ SECTIONS {
         'stock_entry_offset': PREFIX_SIZE, 'banner_offset_in_stock_image': banner_at,
         'payload_offset': payload_offset,
         'payload_sha256': hashlib.sha256(payload).hexdigest() if payload else None,
+        'xnu_vector_pa': vector_pa,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
@@ -264,12 +274,15 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--level', choices=LEVELS, default='entry')
     ap.add_argument('--payload', help='embedded SWEETXNU payload for el1-xnu/el1-load')
+    ap.add_argument('--xnu-vector-offset', type=lambda s: int(s, 0),
+                    help='diagnostic: relay early XNU vectors at this entry-relative offset; MMU-off only')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
     a = ap.parse_args()
     try:
-        build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload)
+        build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload,
+              a.xnu_vector_offset)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

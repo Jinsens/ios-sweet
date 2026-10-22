@@ -40,6 +40,8 @@ probe_start:
 	stp	x2, x3, [x9, #16]
 	mov	x10, sp
 	str	x10, [x9, #32]
+	mrs	x10, spsel
+	str	x10, [x9, #128]
 	mrs	x10, CurrentEL
 	str	x10, [x9, #40]
 	cmp	x10, #8
@@ -284,6 +286,16 @@ probe_finish_el2:
 	msr	vbar_el2, x11
 9:
 	isb
+	/* XNU early startup can select SP_EL0 and put an unmapped kernel VA
+	 * in either stack register. Our recorder is stackless; restore the
+	 * original selection before restoring the original stack pointer. */
+	ldr	x10, [x9, #128]
+	tbz	x10, #0, 12f
+	msr	spsel, #1
+	b	13f
+12:
+	msr	spsel, #0
+13:
 	ldr	x10, [x9, #32]
 	mov	sp, x10
 probe_stock:
@@ -352,6 +364,7 @@ irq_return:
 #endif
 .endm
 	.balign 2048
+	.globl probe_vectors
 probe_vectors:
 	probe_vector 0
 	probe_vector 1
@@ -373,7 +386,7 @@ probe_vectors:
 	.data
 	.balign 16
 probe_saved:
-	.zero 128
+	.zero 144
 	.bss
 	.balign 16
 	.space 0x8000

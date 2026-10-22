@@ -30,6 +30,22 @@ void diag_stage(const char *name, uint64_t a, uint64_t b)
 void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 {
 	(void)virt; (void)phys; (void)size;
+#ifdef ENTRY_XNU_VECTOR_PA
+	/* Diagnostic only, before MMU enable: keep XNU's VBAR write, but
+	 * redirect each early spin vector to the same slot of our recorder.
+	 * No stack is needed; XNU's SP may already hold an unmapped KVA. */
+	extern const unsigned char probe_vectors[];
+	volatile uint32_t *vectors = (volatile uint32_t *)ENTRY_XNU_VECTOR_PA;
+	for (unsigned slot = 0; slot < 16; slot++) {
+		uint64_t target = (uintptr_t)probe_vectors + slot * 128;
+		volatile uint32_t *v = vectors + slot * 32;
+		v[0] = 0xd2800010 | ((target & 0xffff) << 5); /* movz x16 */
+		v[1] = 0xf2a00010 | (((target >> 16) & 0xffff) << 5);
+		v[2] = 0xf2c00010 | (((target >> 32) & 0xffff) << 5);
+		v[3] = 0xf2e00010 | (((target >> 48) & 0xffff) << 5);
+		v[4] = 0xd61f0200; /* br x16 */
+	}
+#endif
 }
 #endif
 #if defined(ENTRY_XNU)

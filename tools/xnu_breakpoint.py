@@ -11,7 +11,8 @@ from pathlib import Path
 import struct
 
 
-def insert_breakpoint(payload, offset=0):
+def payload_location(payload, offset=0, length=4):
+    requested_length = length
     if len(payload) < 0x2a8 or payload[:8] != b'SWEETXNU':
         raise ValueError('invalid SWEETXNU payload')
     version, count = struct.unpack_from('<II', payload, 8)
@@ -27,11 +28,28 @@ def insert_breakpoint(payload, offset=0):
         va, size, source, length = struct.unpack_from('<4Q', payload, 0x2a8 + i * 32)
         if source < 0x2a8 + count * 32 or source > len(payload) or length > len(payload) - source or length > size:
             raise ValueError('invalid payload segment bounds')
-        if va <= target and target + 4 <= va + length:
+        if va <= target and target + requested_length <= va + length:
             matches.append(source + target - va)
     if len(matches) != 1:
         raise ValueError('breakpoint must resolve to exactly one file-backed segment')
-    at = matches[0]
+    return matches[0], target, target - virt + phys
+
+
+def early_vector_pa(payload, offset):
+    at, _, pa = payload_location(payload, offset, 2048)
+    if pa & 2047:
+        raise ValueError('early vector table must be 2048-byte aligned')
+    if any(struct.unpack_from('<I', payload, at + slot * 128)[0] != 0x14000000
+           for slot in range(16)):
+        raise ValueError('expected early exception slots to begin with B .')
+    phys, size = struct.unpack_from('<QQ', payload, 56)
+    if pa < phys or pa + 2048 > phys + size:
+        raise ValueError('early vector table outside declared physical memory')
+    return pa
+
+
+def insert_breakpoint(payload, offset=0):
+    at, target, pa = payload_location(payload, offset)
     original, = struct.unpack_from('<I', payload, at)
     instruction = 0xd4200000 | (0x5357 << 5)  # BRK #0x5357
     if original == instruction:
@@ -40,7 +58,7 @@ def insert_breakpoint(payload, offset=0):
     struct.pack_into('<I', result, at, instruction)
     return bytes(result), {
         'entry_offset': offset, 'target_va': hex(target),
-        'target_pa': hex(target - virt + phys), 'payload_offset': at,
+        'target_pa': hex(pa), 'payload_offset': at,
         'original_instruction': hex(original), 'instruction': hex(instruction),
         'expected_esr': '0xf2005357',
         'source_sha256': hashlib.sha256(payload).hexdigest(),
