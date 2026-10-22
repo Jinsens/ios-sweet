@@ -27,8 +27,10 @@ reached `spllo()` with interrupts enabled and returned from
 500 ms CNTVCT busy-wait with interrupts enabled advanced `sched_tick` by 3:
 timer-interrupt delivery and scheduler maintenance are proven. A direct jump
 to the `bl bsd_init` call failed into an infinite reboot loop; `boot_a` was
-fully restored. BSD/userspace and full kernel boot remain unproven. These
-checkpoints alone do not verify visible panel refresh.
+fully restored. The post-lockdown checkpoint then passed, so the failure is
+after lockdown (CONFIG_XNUPOST tests or later). BSD/userspace and full kernel
+boot remain unproven. These checkpoints alone do not verify visible panel
+refresh.
 
 **Completed: `sched_startup` return (hardware PASS).**
 `shim/out/entryprobe-el1-sched-startup-brk.img`, 26,562,560 B, SHA256
@@ -88,10 +90,11 @@ back the full original and verify the hash; on failure, restore the trimmed
 stock prefix via fastboot, boot Recovery, then write the full backup. Never
 leave a test image in `boot_a`.
 
-**Next:** run the prepared post-lockdown checkpoint (`f68a28a8`) to isolate
-whether the diagnostic relay still returns after `machine_lockdown`; only
-then attempt the XNUPOST/lockdown path again. A RAM-disk root is still absent
-from the payload.
+**Next:** bypass the CONFIG_XNUPOST calls in a diagnostic payload (NOP
+`kernel_list_tests`, `kernel_do_post` and the failure branch at
+`0xfffffe0007aafb54..0x7aafb5c`, then break at `bl bsd_init`) to separate the
+test suite from `PE_lockdown_iokit`/`kperf_init_early`. A RAM-disk root is
+still absent from the payload.
 
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
@@ -157,27 +160,34 @@ reported a USB status failure, but Recovery came up in 27 s. The complete
 67,108,864-byte original was then written and read back as
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 
-The cause is not isolated. It could be a CONFIG_XNUPOST test panic, a
-`PE_lockdown_iokit`/lockdown failure, or the diagnostic return path failing
-after `machine_lockdown`. The image stopped at the `bl bsd_init` call, so
-`bsd_init` itself never ran.
+The cause was narrowed by the next test: the post-lockdown checkpoint
+passed, so lockdown and the diagnostic relay are not the failure. The
+remaining candidates are the CONFIG_XNUPOST tests (`kernel_list_tests` /
+`kernel_do_post`), `PE_lockdown_iokit`, `vm_set_restrictions`,
+`kperf_init_early`, or the final return from the `bl bsd_init` site.
 
-**Prepared, host-verified, NOT flashed: post-lockdown checkpoint.**
+**Completed: post-lockdown checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-lockdown-brk.img`, 26,562,560 B, SHA256
 `f68a28a8f3c6c564e0b89ea540ef59828175ab20f311996a80a4c51c5e6b074a`;
 payload SHA256 `c5b99715dc5886e327d2d1ef9cefa3d8db2550c901b4ce3949a5b66c0014a93e`.
 BRK at entry offset `0x6236cc`, payload offset `0xaabf44`, VA
 `0xfffffe0007aafb54` / PA `0x101aafb54`, immediately after
-`bl machine_lockdown`, before `bl kernel_list_tests`; it replaces
-`bl kernel_list_tests` (`0x97e41107`). This isolates lockdown and the relay
-from the CONFIG_XNUPOST tests and everything after them.
+`bl machine_lockdown`, before `bl kernel_list_tests`; it replaced
+`bl kernel_list_tests` (`0x97e41107`).
+
+Same-boot `lockdown-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aafb54`, x0
+`fffffe00072e0000`. `OSKextRemoveKextBootstrap` and `machine_lockdown`
+returned, and the selective vector relay, 128 MiB cache cleanup and bootstrap
+TTBR0 restore still work after the ROX lockdown. Written-partition SHA256
+`d0537227...` matched the readback; the full original was restored and
+verified as `2931647a...`.
 
 Memory review: `bootstrap_pagetables` (VA `0xfffffe000717c000`, PA
 `0x10117c000`, the TTBR0 restore page) is in `__DATA_CONST`;
 `arm_vm_prot_finalize()` frees `__BOOTDATA` at VA `0xfffffe0008080000`
 (PA `0x102080000`), not this page. The vector stubs are in `__TEXT_EXEC`
-and stay executable after the ROX lockdown. A successful lockdown-return
-checkpoint is still needed before trusting any later return.
+and stay executable after the ROX lockdown. This is now hardware-proven.
 
 **Completed: bootstrap-thread checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
