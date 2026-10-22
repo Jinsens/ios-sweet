@@ -138,6 +138,30 @@ back and verified as `2931647a...`. Tool `tools/xnu_tickprobe.py`; 44 tools
 tests pass. The image uses the same dual-slot selective vectors, 128 MiB
 cleanup range and TTBR0 restore.
 
+**Prepared, host-verified, NOT flashed: lockdown and `bsd_init` checkpoints.**
+Both use the same dual-slot selective vectors, 128 MiB cleanup range and
+TTBR0 restore; 44 tools tests pass.
+
+| checkpoint | image (26,562,560 B) | payload | BRK VA / PA |
+| --- | --- | --- | --- |
+| after `machine_lockdown` | `shim/out/entryprobe-el1-lockdown-brk.img` SHA256 `f68a28a8f3c6c564e0b89ea540ef59828175ab20f311996a80a4c51c5e6b074a` | `matisse-xnu-lockdown-brk.payload` SHA256 `c5b99715dc5886e327d2d1ef9cefa3d8db2550c901b4ce3949a5b66c0014a93e` | `0xfffffe0007aafb54` / `0x101aafb54` |
+| `bsd_init` call | `shim/out/entryprobe-el1-bsd-init-brk.img` SHA256 `7a5b60b59c21fa4d69b4b0f1f6a13e0ea230c7e10ec2eecb8f94bd9136badee0` | `matisse-xnu-bsd-init-brk.payload` SHA256 `cc0ec30801e7a79b61624144cca19e9c2a5be74a9ef8db1bf690114c97daf1f6` | `0xfffffe0007aafbe0` / `0x101aafbe0` |
+
+- Post-lockdown: entry offset `0x6236cc`, replaces `bl kernel_list_tests`
+  (`0x97e41107`) immediately after `bl machine_lockdown`, before the
+  CONFIG_XNUPOST tests.
+- `bsd_init`: entry offset `0x623758`, replaces the `bl bsd_init`
+  (`0x97f2f912`) at the end of `kernel_bootstrap_thread`, before `bsd_init`
+  executes.
+- Memory review: `bootstrap_pagetables` (VA `0xfffffe000717c000`, PA
+  `0x10117c000`, the TTBR0 restore page) is in `__DATA_CONST`;
+  `arm_vm_prot_finalize()` frees `__BOOTDATA` at VA `0xfffffe0008080000`
+  (PA `0x102080000`), not this page. The vector stubs are in `__TEXT_EXEC`
+  and stay executable after the ROX lockdown. This makes a later return
+  plausible, but it has not been hardware-proven. Reaching the `bsd_init`
+  call would also prove the XNUPOST tests, `PE_lockdown_iokit`,
+  `vm_set_restrictions` and `kperf_init_early` returned.
+
 **Completed: bootstrap-thread checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
 vectors, 26,562,560 B, SHA256
