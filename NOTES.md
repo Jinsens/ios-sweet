@@ -154,9 +154,26 @@ immediately when `machine_info.max_cpus <= 1`; the sole CPU is already
 executing and the IOKit CPU driver may never publish the flag (SweetCPU
 matches `qcom,kryo470`, matisse uses `arm,cortex-a510`). Local single-file
 compile with `tools/xnu-cc.py` passes (0 of 1 failed on the ci-39158169212
-tree). Committed as `b616374` and pushed to `Jinsens/ios-sweet` main; CI run
-`39826038020` was queued to build the new kernel. The diagnostic image above
-is not the permanent fix.
+tree). Committed as `b616374`, pushed to `Jinsens/ios-sweet`, and built by CI
+run `39828405447` (the first dispatch on `main`, run `39826038020`, was
+cancelled before any step; the retry on `codex/matisse-xnu-screen-log`
+succeeded). New kernel
+`xnu/out/ci-39828405447/kernel.development.sweet` SHA256
+`28190f5b4c274b4d5c1501f08b776873c5a9190ec67b74021bd4f42b795267f2`;
+payload `shim/out/matisse-xnu-ci39828405447.payload` SHA256
+`e39237a808568658c363b8d10fbac9916b4093c2f8b0992cebfbc870c13f887c`.
+
+**Prepared, host-verified, NOT flashed: permanent-fix validation.**
+`shim/out/entryprobe-el1-bsd-init-0084-brk.img`, 26,562,560 B, SHA256
+`1cd72d232491a871296d611720a8ac55774f4c743a286131841b2dff1da93599`;
+payload SHA256 `d634f707bc0aecccd438fa312d0f69254706a7cb2b04ddba6ac886183835b425`.
+The new kernel's `_kernel_bootstrap_thread` is at `0xfffffe0007aaf754`; the
+BRK is at VA `0xfffffe0007aafc00` / PA `0x101aafc00` (entry offset
+`0x623778`), replacing `bl bsd_init` (`0x97f2f912`). XNUPOST and kperf are
+untouched. Same vector/cleanup/TTBR0 parameters as before: the early and high
+vector tables and `bootstrap_pagetables` did not move. A return at
+`pc=fffffe0007aafc00` would hardware-validate patch 0084 through the real
+XNUPOST suite and kperf. 44 tools tests pass.
 
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
