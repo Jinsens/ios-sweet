@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: 0085 result is static logo; boot_a restored live backup (verified); PID 1 EL0 probe prepared <<<
+## >>> ACTIVE 2026-10-23: PID 1 EL0 open checkpoint PASS; boot_a restored live backup; write checkpoint prepared <<<
 
 **Current device (read-only adb + approved restore this turn): Recovery, root,
 slot `_a`.** The partition was initially the stock template
@@ -18,7 +18,14 @@ the template. The live backup
 `bsd_init` ran through `vfs_mountroot` (x0=0) and reached `load_init_program`;
 mockfs/md0 was mounted. The panel showing LK's first logo says only that the
 command-mode DSI path is not pushing new frames, not that the kernel stopped.
-PID 1 execution is still unproven.
+**PID 1 execution is now hardware-proven.** The EL0 open checkpoint hit, with
+`stage=87 esr=0000000056000080 pc=0000000100000420 x0=00000001000004c0
+x16=0000000000000005 spsr=0000000000000000` in the Recovery dmesg: an EL0t
+AArch64 `open` syscall carrying the `/dev/console` path pointer from
+`tools/sweet-init.S`. Evidence: `research/matisse/20261023-pid1/open-dmesg.txt`.
+The correct test trigger was `adb reboot recovery`, not `adb reboot`; the
+normal-mode run ended with `ro.boot.bootreason=Watchdog` and produced no
+readable record.
 
 **Watchdog fact check (device evidence, correcting the `WDT_AUTO_RESET`
 theory).** MediaTek does have a WDT here: the live DTB has
@@ -40,20 +47,20 @@ sweet/unknown-board fallbacks. Patch `0082` replaced the old early-console
 later userland (`1125x2436`, dot pitch 458); that does not explain the
 pre-userspace logo. No stale matisse framebuffer hardcode was found.
 
-**Next evidence: EL0 syscall checkpoints (host-built, NOT flashed).** The new
-selective vector also redirects slot 8 (AArch64 EL0 synchronous). It forwards
-ordinary syscalls unchanged and aborts to the proven Recovery relay at the
-first EL0 SVC whose x16 matches `--el0-syscall`. This directly proves whether
-`load_init_program` produced a running PID 1, and whether `open("/dev/console")`
-returned, without a display or UART.
+**EL0 syscall checkpoints (open PASS, write pending).** The new selective
+vector also redirects slot 8 (AArch64 EL0 synchronous). It forwards ordinary
+syscalls unchanged and aborts to the proven Recovery relay at the first EL0
+SVC whose x16 matches `--el0-syscall`. This directly proves whether
+`load_init_program` produced a running PID 1, and whether
+`open("/dev/console")` returned, without a display or UART.
 
-- `shim/out/entryprobe-el1-ramdisk-syscall-open.img`, 26,566,656 B, SHA256
-  `162320a626c3ddc0baf819bafa2ce72251aa580bbc1c232ea1a5efa5e315de30`;
-  predicted 64 MiB partition after a raw write over the restored live backup:
-  `3bdf4811b03bb461ad6f644808a55facfe70f38c3f7f2b095b51ebb0626991ac`.
-  `--el0-syscall 5`. Expected record: `esr=0000000056000080`,
-  `pc=00000000100000420`, `x0=000000001000004c0` (path pointer),
-  `x16=0000000000000005`, `spsr=0000000000000000`.
+- **PASS:** `shim/out/entryprobe-el1-ramdisk-syscall-open.img`, 26,566,656 B,
+  SHA256 `162320a626c3ddc0baf819bafa2ce72251aa580bbc1c232ea1a5efa5e315de30`;
+  raw-write partition hash `3bdf4811b03bb461ad6f644808a55facfe70f38c3f7f2b095b51ebb0626991ac`
+  matched the on-device readback. `--el0-syscall 5` hit:
+  `esr=0000000056000080`, `pc=0000000100000420`,
+  `x0=00000001000004c0` (path pointer), `x16=0000000000000005`,
+  `spsr=0000000000000000`. The relay returned to Recovery in about 20 s.
 - `shim/out/entryprobe-el1-ramdisk-syscall-write.img`, 26,566,656 B, SHA256
   `23270c33bfedb861a2ffcb20fab639c80981d47d95dbb93aa29a282c4ea94f92`;
   predicted partition `fa931660ff74fd3420754735095e23411e2de754eb578bd8d7040dc47d318a8c`.
@@ -70,10 +77,11 @@ returned, without a display or UART.
   stub 100 B (<128), embedded payload hash matched, key words checked
   (`0x77ee118: d104c3ff`, `0x79ad070: d503201f`, `0x7a41e70: aa1f03e0`,
   `0x7a41eb4: 14000007`, slot 8 `140003b3`). All 44 tools tests pass.
-- Suggested order: flash **open** first; a hit proves PID 1 executed. Then
-  flash **write**; a hit proves `open("/dev/console")` returned and the first
-  userspace write was issued. A miss on open means no EL0 execution (or a
-  dead vector), not merely a dark panel.
+- Next: flash **write**; a hit proves `open("/dev/console")` returned and the
+  first `write` was issued. A miss now means open blocked/failed, not that PID 1
+  never ran. Trigger probes with `adb reboot recovery`; a plain `adb reboot`
+  booted normal mode, ended with `ro.boot.bootreason=Watchdog`, and produced no
+  readable record. Restore `boot_a` from the live backup after every test.
 
 ## >>> ACTIVE 2026-10-23 (Asia/Shanghai): BSD mounts md0; display refresh fix prepared <<<
 
