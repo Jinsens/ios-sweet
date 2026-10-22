@@ -422,4 +422,4 @@ research/matisse/20261023-sched-startup/
 
 关键提交：`5f3ba55` 选择性诊断向量；`42d6582` EL1t/EL1h 双槽修正；`8ddef0a`、`90c4084` 调度器检查点与通过记录；`3235c74` thread_daemon；`4a930d1` spllo；`d90dcf8` 定时 IRQ；`eaed2c0` lockdown；`8c353e9`、`a798c4c` XNUPOST/kperf 隔离；`6287cb8` 单 CPU max_cpus 实机通过；`b616374` 永久补丁 0084；`5321eae` 最终交接。
 
-截至本次文档更新，生产测试镜像仍在 `boot_a`，设备静止、等待手动 fastboot 恢复；恢复后应写回完整 67,108,864 字节并校验 `2931647a…`。本轮未写 `userdata`。RAM disk 最小根和 `bsd_init`/`load_init_program` 检查点已准备好（见上一节），但尚未刷入。下一步是在获得当次确认后刷入无断点的 `entryprobe-el1-ramdisk-init.img`，观察面板上的 `load_init_program`、PID 1 与 5 秒心跳；失败时依次改用两个检查点定位。先拿 EL0 PID 1，再谈 Apple launchd 与桌面。不要直接刷 iOS 根镜像。
+本轮结束时设备在 Recovery（root ADB，slot `_a`），`boot_a` 已从完整备份写回并校验 `2931647a…`，没有残留测试镜像；未写 `userdata`。下一步是取得 XNU msgbuf 或串口证据，确认 `load_init_program` 之后 PID 1 的实际执行状态。RAM disk 最小根和 `bsd_init`/`load_init_program` 检查点已准备好（见上一节），但尚未刷入。下一步是在获得当次确认后刷入无断点的 `entryprobe-el1-ramdisk-init.img`，观察面板上的 `load_init_program`、PID 1 与 5 秒心跳；失败时依次改用两个检查点定位。先拿 EL0 PID 1，再谈 Apple launchd 与桌面。不要直接刷 iOS 根镜像。

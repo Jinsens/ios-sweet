@@ -109,6 +109,7 @@ mockfs/md0 is mounted. What remains unproven is PID 1 execution/console: the
 framebuffer console shows nothing, and the init's first action
 `open("/dev/console")` may block or the console may be headless. Next evidence
 path should be the XNU msgbuf/serial, not more blind framebuffer boots.
+Final state after this run: `boot_a` was restored from the full 64 MiB backup and verified as `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`; device is in Recovery, slot `_a`. No `userdata` write.
 
 **ACTIVE: diagnostic watchdog artifact found (2026-10-23).**
 `mkentryprobe.py` compiles the shim with `WDT_AUTO_RESET`, which re-arms the
