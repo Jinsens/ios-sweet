@@ -78,6 +78,34 @@ def bootstrap_clean_range(payload, clean_limit=None):
     return phys, end
 
 
+def bootstrap_ttbr0_pa(payload, pa):
+    """Validate storage for a caller-verified bootstrap TTBR0 root.
+
+    The address must come from the actual kernel's bootstrap table symbol
+    and observed TTBR0, not from this structural check. Its contents must
+    still be intact at the requested checkpoint.
+    """
+    payload_location(payload)  # Validate every segment's source bounds.
+    virt, = struct.unpack_from('<Q', payload, 16)
+    phys, size = struct.unpack_from('<QQ', payload, 56)
+    if pa & 0x3fff or not phys <= pa < pa + 0x4000 <= phys + size:
+        raise ValueError('bootstrap TTBR0 must be a 16K-aligned page in managed RAM')
+    target = virt + pa - phys
+    count, = struct.unpack_from('<I', payload, 12)
+    matches = []
+    for i in range(count):
+        va, span, source, length = struct.unpack_from('<4Q', payload, 0x2a8 + i * 32)
+        if target < va + span and va < target + 0x4000:
+            if not (va <= target and target + 0x4000 <= va + span):
+                raise ValueError('bootstrap TTBR0 must fit a single kernel segment')
+            offset = target - va
+            backed = max(0, min(0x4000, length - offset))
+            matches.append(payload[source + offset:source + offset + backed])
+    if len(matches) != 1 or any(matches[0]):
+        raise ValueError('bootstrap TTBR0 must resolve to one initially zero kernel page')
+    return pa
+
+
 def insert_breakpoint(payload, offset=0):
     at, target, pa = payload_location(payload, offset)
     original, = struct.unpack_from('<I', payload, at)

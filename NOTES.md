@@ -77,10 +77,10 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** extend and validate diagnostic fallback to restore
-the bootstrap identity TTBR0 only on exception, before preparing a checkpoint
-after set_mmu_ttb clears TTBR0 at `0xfffffe0007483df8`. The current relay must
-not be reused beyond this boundary. A new hardware test needs new approval.
+**Next concrete action:** request approval for prepared TTBR0-teardown test
+`c73eb57f` below. Expected `pc=fffffe0007483e18 esr=f2005357 fault=1`.
+The optional new shared relay restores bootstrap TTBR0 only on exception;
+the older per-slot relay cannot be used after identity-map teardown.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -288,6 +288,38 @@ records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007483ddc`.
 The original set_mmu_ttb_alternate executed and returned with the formal
 TTBR1 installed. Automatic Recovery return and complete original 64 MiB
 boot_a restoration/hash were verified (`ttbr1-brk-manifest.json`).
+
+**Prepared, NOT flashed: TTBR0 teardown + relocated early-console checkpoint**
+`shim/out/entryprobe-el1-ttbr0-off-brk.img`, 26,562,560 B, SHA256
+`c73eb57fafc6efe21aba965f54b28e3442f23aa64cf0cd8e26de8c36714c2bba`.
+Payload SHA256 `d4449cd59bcad9cb5988cb46c91ecde3870a51b1d80624c4208f9ee9a1ca1170`.
+BRK entry offset `-0x8670` = VA `0xfffffe0007483e18` / PA `0x101483e18`,
+after the original TTBR0 replacement, TLB invalidation and early mark 10;
+before kva_active becomes true. Predicted full partition SHA256
+`98a72e930421759bb74002e166e5e1c887f88cb017c7e9ba9ab794a428f86d11`.
+
+New `--xnu-restore-ttbr0 0x10117c000` is derived from the kernel's
+bootstrap_pagetables symbol and modeled actual TTBR0. The builder checks
+alignment, segment bounds, initially zero storage and cache-clean coverage.
+It does not prove runtime table contents: those are checked by the host
+walker at this checkpoint. The shared 2 KiB high vector template retains
+all 16 slot entries, holds common code in slot 0 (end +0x7c) and literals
+behind slot 1's branch (end +0xb0). Linker assertions enforce boundaries.
+On exception it restores that TTBR0, invalidates TLBs, branches to an
+identity alias, cleans `[0x100000000,0x104000000)`, disables MMU/caches and
+returns to the slot-specific probe recorder. Normal XNU execution retains
+its original TTBR0 teardown. This is only validated while bootstrap tables,
+high vector mappings and compatible TCR survive, and allocations stay in
+the cleanup range; do not assume this supports arbitrary later checkpoints.
+
+36 host tests pass. New image cross-compiles. Modeled execution reaches the
+BRK with empty TTBR0 `0x1024d8000`, formal TTBR1 `0x1024dc000`, and alloc end
+`0x1024fc000`; all 16 high-vector entries restore SCTLR/SP/SPSel/DTB and
+return to Linux. Logs: `ttbr0-off-brk-emulation.txt` and
+`ttbr0-all-vectors-emulation.txt`. Translation/AT/MMIO/exception entry remain
+modeled and cache coherence is not modeled: hardware result is unknown.
+Rebuilding the previous TTBR1 image without the new option reproduces
+`e9fbcb81` byte-for-byte. No kernel CI run; TTBR1 hardware milestone `8a257b2`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,

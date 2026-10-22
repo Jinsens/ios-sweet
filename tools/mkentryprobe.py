@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 import mkbootimg
-from xnu_breakpoint import early_vector_pa, high_vector_pa, bootstrap_clean_range
+from xnu_breakpoint import early_vector_pa, high_vector_pa, bootstrap_clean_range, bootstrap_ttbr0_pa
 
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
@@ -135,7 +135,7 @@ def prepare(template, level=None):
 
 def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None,
           xnu_vector_offset=None, xnu_high_vector_offset=None, xnu_clean=False,
-          xnu_clean_limit=None):
+          xnu_clean_limit=None, xnu_restore_ttbr0=None):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
@@ -159,6 +159,13 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
         clean_range = bootstrap_clean_range(payload, xnu_clean_limit)
     elif xnu_clean_limit is not None:
         raise ValueError('cache-clean limit requires --xnu-clean')
+    restore_ttbr0 = None
+    if xnu_restore_ttbr0 is not None:
+        if clean_range is None:
+            raise ValueError('TTBR0 restoration requires high vectors and cache cleanup')
+        restore_ttbr0 = bootstrap_ttbr0_pa(payload, xnu_restore_ttbr0)
+        if not clean_range[0] <= restore_ttbr0 < restore_ttbr0 + 0x4000 <= clean_range[1]:
+            raise ValueError('bootstrap TTBR0 page must be inside cache-clean range')
     payload_offset = None
     if payload is not None:
         if len(payload) < 0x2a8 or payload[:8] != b'SWEETXNU':
@@ -205,6 +212,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
         if clean_range is not None:
             config += f'#define ENTRY_XNU_CLEAN_START {clean_range[0]:#x}\n'
             config += f'#define ENTRY_XNU_CLEAN_END {clean_range[1]:#x}\n'
+        if restore_ttbr0 is not None:
+            config += f'#define ENTRY_XNU_RESTORE_TTBR0 {restore_ttbr0:#x}\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         linker = '''ENTRY(_head)
 SECTIONS {
@@ -222,7 +231,11 @@ SECTIONS {
 '''
         if payload_offset is not None:
             linker = linker.replace('_end = .;', f'_end = {payload_offset};')
-        if high_pa is not None:
+        if restore_ttbr0 is not None:
+            linker += '\nASSERT(probe_mmu_code_end - probe_mmu_vector <= 128, "shared relay overlaps vector 1")\n'
+            linker += 'ASSERT(probe_mmu_literals_end - probe_mmu_vector <= 256, "shared literals overlap vector 2")\n'
+            linker += 'ASSERT(probe_mmu_vector_end - probe_mmu_vector == 2048, "shared vector table size")\n'
+        elif high_pa is not None:
             linker += '\nASSERT(probe_mmu_vector_end - probe_mmu_vector <= 128, "MMU relay exceeds vector slot")\n'
         (tmp / 'probe.ld').write_text(linker)
         sources = ['entryprobe.S']
@@ -281,6 +294,7 @@ SECTIONS {
         'xnu_vector_pa': vector_pa,
         'xnu_high_vector_pa': high_pa,
         'xnu_clean_range': clean_range,
+        'xnu_restore_ttbr0': restore_ttbr0,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
@@ -304,13 +318,16 @@ def main():
                     help='clean kernel/ADT/boot_args caches before returning from early C; bootstrap map required')
     ap.add_argument('--xnu-clean-limit', type=lambda s: int(s, 0),
                     help='diagnostic: extend cleanup to this page-aligned physical end to cover early VM allocations')
+    ap.add_argument('--xnu-restore-ttbr0', type=lambda s: int(s, 0),
+                    help='diagnostic: restore this verified bootstrap TTBR0 root on exception; contents and TCR must remain compatible')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
     a = ap.parse_args()
     try:
         build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload,
-              a.xnu_vector_offset, a.xnu_high_vector_offset, a.xnu_clean, a.xnu_clean_limit)
+              a.xnu_vector_offset, a.xnu_high_vector_offset, a.xnu_clean, a.xnu_clean_limit,
+              a.xnu_restore_ttbr0)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

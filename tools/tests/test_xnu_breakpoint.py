@@ -5,7 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from xnu_breakpoint import insert_breakpoint, early_vector_pa, high_vector_pa, bootstrap_clean_range
+from xnu_breakpoint import insert_breakpoint, early_vector_pa, high_vector_pa, bootstrap_clean_range, bootstrap_ttbr0_pa
 
 
 def payload():
@@ -86,6 +86,35 @@ class BreakpointTests(unittest.TestCase):
         struct.pack_into('<Q', source, 64, 0x8000)
         with self.assertRaisesRegex(ValueError, 'range'):
             bootstrap_clean_range(source)
+
+    def test_bootstrap_ttbr0_accepts_zero_fill_and_rejects_invalid_storage(self):
+        source = bytearray(payload())
+        struct.pack_into('<I', source, 12, 2)
+        struct.pack_into('<4Q', source, 0x2c8,
+                         0xfffffe0006004000, 0x4000, len(source), 0)
+        self.assertEqual(bootstrap_ttbr0_pa(source, 0x100004000), 0x100004000)
+        for pa in (0x100004004, 0x100000000, 0x110000000, -0x4000):
+            with self.subTest(pa=pa), self.assertRaises(ValueError):
+                bootstrap_ttbr0_pa(source, pa)
+        # A partial overlap with another segment cannot be a safe root page.
+        struct.pack_into('<4Q', source, 0x2a8,
+                         0xfffffe0006001000, 0x4000, 0x300, 0x20)
+        with self.assertRaisesRegex(ValueError, 'single kernel segment'):
+            bootstrap_ttbr0_pa(source, 0x100004000)
+
+    def test_bootstrap_ttbr0_rejects_initialized_data_and_partial_pages(self):
+        source = bytearray(payload()) + bytearray(0x4000)
+        struct.pack_into('<I', source, 12, 2)
+        struct.pack_into('<4Q', source, 0x2c8,
+                         0xfffffe0006004000, 0x4000, 0x400, 0x4000)
+        self.assertEqual(bootstrap_ttbr0_pa(source, 0x100004000), 0x100004000)
+        source[0x43ff] = 1
+        with self.assertRaisesRegex(ValueError, 'initially zero'):
+            bootstrap_ttbr0_pa(source, 0x100004000)
+        struct.pack_into('<4Q', source, 0x2c8,
+                         0xfffffe0006004000, 0x3fff, 0x400, 0)
+        with self.assertRaisesRegex(ValueError, 'single kernel segment'):
+            bootstrap_ttbr0_pa(source, 0x100004000)
 
 
 if __name__ == '__main__':

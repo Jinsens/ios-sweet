@@ -47,13 +47,22 @@ void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 	}
 #endif
 #ifdef ENTRY_XNU_HIGH_VECTOR_PA
-	/* For bootstrap checkpoints before identity-map teardown. Early C
-	 * writes require ENTRY_XNU_CLEAN_START/END. The copied assembly
-	 * uses local literals, switches to its physical alias, disables
-	 * translation/caches and branches to our stackless recorder. */
+	/* Shared-table mode restores the still-intact bootstrap TTBR0 before
+	 * switching to the physical alias. The per-slot mode requires TTBR0
+	 * to remain active. Configured cache cleanup precedes the recorder. */
 	extern const uint32_t probe_mmu_vector[], probe_mmu_vector_end[];
 	extern const uint32_t probe_mmu_identity[], probe_mmu_physical[], probe_mmu_recorder[];
 	unsigned words = ((uintptr_t)probe_mmu_vector_end - (uintptr_t)probe_mmu_vector) / 4;
+#ifdef ENTRY_XNU_RESTORE_TTBR0
+	uintptr_t dst = ENTRY_XNU_HIGH_VECTOR_PA;
+	volatile uint32_t *v = (volatile uint32_t *)dst;
+	for (unsigned i = 0; i < words; i++)
+		v[i] = probe_mmu_vector[i];
+	*(volatile uint64_t *)(dst + (uintptr_t)probe_mmu_physical - (uintptr_t)probe_mmu_vector) =
+	    dst + (uintptr_t)probe_mmu_identity - (uintptr_t)probe_mmu_vector;
+	*(volatile uint64_t *)(dst + (uintptr_t)probe_mmu_recorder - (uintptr_t)probe_mmu_vector) =
+	    (uintptr_t)probe_vectors;
+#else
 	for (unsigned slot = 0; slot < 16; slot++) {
 		uintptr_t dst = ENTRY_XNU_HIGH_VECTOR_PA + slot * 128;
 		volatile uint32_t *v = (volatile uint32_t *)dst;
@@ -64,6 +73,7 @@ void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 		*(volatile uint64_t *)(dst + (uintptr_t)probe_mmu_recorder - (uintptr_t)probe_mmu_vector) =
 		    (uintptr_t)probe_vectors + slot * 128;
 	}
+#endif
 #endif
 }
 #endif

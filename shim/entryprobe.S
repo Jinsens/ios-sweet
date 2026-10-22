@@ -384,13 +384,28 @@ probe_vectors:
 	probe_vector 15
 
 #ifdef ENTRY_XNU_HIGH_VECTOR_PA
-	/* Copied verbatim into each XNU high vector slot. All references are
-	 * local PC-relative literals, valid at both physical and virtual aliases.
-	 * Later early-C checkpoints require the bounded cache-clean option. */
+	/* Local literals work at both aliases. The optional shared table first
+	 * restores a verified bootstrap TTBR0 on exception; the original kernel
+	 * still executes its own TTBR0 teardown before the checkpoint. */
+#ifdef ENTRY_XNU_RESTORE_TTBR0
+	.balign 2048
+#else
 	.balign 8
+#endif
 	.globl probe_mmu_vector, probe_mmu_vector_end, probe_mmu_identity
 	.globl probe_mmu_physical, probe_mmu_recorder
 probe_mmu_vector:
+#ifdef ENTRY_XNU_RESTORE_TTBR0
+	mov	x13, #0
+	b	probe_mmu_common
+probe_mmu_common:
+	ldr	x16, probe_mmu_bootstrap_ttbr0
+	msr	ttbr0_el1, x16
+	isb
+	tlbi	vmalle1
+	dsb	sy
+	isb
+#endif
 	ldr	x16, probe_mmu_physical
 	br	x16
 probe_mmu_identity:
@@ -419,7 +434,19 @@ probe_mmu_identity:
 	msr	sctlr_el1, x16
 	isb
 	ldr	x16, probe_mmu_recorder
+#ifdef ENTRY_XNU_RESTORE_TTBR0
+	add	x16, x16, x13, lsl #7
+#endif
 	br	x16
+#ifdef ENTRY_XNU_RESTORE_TTBR0
+	.globl probe_mmu_code_end, probe_mmu_literals_end
+probe_mmu_code_end:
+	/* Slot 0 holds code; slot 1 holds literals behind its entry branch.
+	 * Every slot keeps its own entry and forwards the slot number in x13. */
+	.balign 128
+	mov	x13, #1
+	b	probe_mmu_common
+#endif
 	.balign 8
 probe_mmu_physical:
 	.quad 0
@@ -430,6 +457,17 @@ probe_mmu_clean_start:
 	.quad ENTRY_XNU_CLEAN_START
 probe_mmu_clean_end:
 	.quad ENTRY_XNU_CLEAN_END
+#endif
+#ifdef ENTRY_XNU_RESTORE_TTBR0
+probe_mmu_bootstrap_ttbr0:
+	.quad ENTRY_XNU_RESTORE_TTBR0
+probe_mmu_literals_end:
+	.irp slot, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+	.balign 128
+	mov	x13, #\slot
+	b	probe_mmu_common
+	.endr
+	.balign 128
 #endif
 probe_mmu_vector_end:
 #endif
