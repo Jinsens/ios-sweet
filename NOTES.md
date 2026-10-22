@@ -143,6 +143,21 @@ after the earlier probe hung; that probe likely wrote past the 64 KiB buffer
 at `+0x3ff00`. A retry must stay inside the `off_lk + sz_lk` region and use
 `/proc/pl_lk` (same Linux boot) or a measured fastboot dump.
 
+**Process correction (observed):** sending `fastboot oem reboot-recovery`
+while a test image is still in `boot_a` does **not** enter recovery; the
+phone ends up at the logo with no USB and no fastboot. The required order is:
+Power+VolumeDown to fastboot, flash
+`shim/out/boot_a-live-restore-trim.img`, then `oem reboot-recovery`. The
+expdb `SWLG` block, if the UFS write succeeded, survives that reset; RAM
+log_store and sentinels do not.
+
+**Fastboot-only expdb read:** this LK also registers `oem expdb` and contains
+`read_expdb`/`deflateInit2` strings. Try
+`tools/fbraw.py oem expdb OUT.bin` in fastboot before restoring; it may
+return a compressed expdb image (decompress with zlib) and would avoid the
+recovery boot entirely.
+
+
 
 
 ## >>> SESSION 2026-10-22 - device recheck before next XNU attempt <<<
