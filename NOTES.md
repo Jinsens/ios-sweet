@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU MMU configuration passed; MMU-on checkpoint next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU MMU-on checkpoint passed; early C checkpoint next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
@@ -139,7 +139,7 @@ TCR/TTBR/MAIR and TLB/cache operations executed. Automatic return and full
 `d99e68b1110f8b421ecd8bf88a0f6ff0de8872962381de66d391761f22b4ce00`.
 Device remains in restored Recovery; no new write yet.
 
-**Prepared, NOT flashed: immediate MMU-on checkpoint**
+**Completed: immediate MMU-on checkpoint**
 `shim/out/entryprobe-el1-mmu-on-brk.img`, 26562560 B, SHA256
 `7937d19c9ef74c5c7c9557098596902c054010b4553d6a7a6e2f9d152fc15f16`.
 Payload SHA256 `38ac4bda2a6a711c45adc09ecd97488313415c14efddb0cfbac68aef463aaa9e`.
@@ -163,7 +163,13 @@ host model evidence only, not a real CPU transition. Logs:
 `mmu-on-brk-emulation.txt`, `mmu-on-brk-modeled-emulation.txt`.
 The earlier independent hardware MMU probe did verify 16K support.
 Predicted partition SHA256 `557bdf81d00c77f5d81ee683de2989a4257cce30cccfe329193ae3a66fc8ae56`.
-Device is still restored in Recovery; await this test's separate approval.
+**Hardware PASS (explicitly approved):** same-boot Recovery captured
+`stage=87 fault=1 esr=f2005357 far=0 pc=10148e530`. XNU's real high VBAR
+and SCTLR writes executed, then CPACR/TPIDR and boot_args VA conversion.
+The high-vector relay returned automatically to Recovery. Complete original
+64 MiB boot_a hash verified. Evidence: `mmu-on-brk-dmesg.txt`, manifest and
+restored image. Next: a bounded early-C checkpoint with explicit cache
+clean/invalidate before leaving XNU's bootstrap identity mapping.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
