@@ -69,8 +69,7 @@ levels plus el1-xnu/el1-load cross-compile. XNU video mapping checks pass
 files; do not report it as passing.
 
 Commits: `712b44f` (display-control/restoration handoff), `031d329` (EL1
-probe, hardware-tested display refresh, initial timer fix). Completed
-load-only and four-cell timer work is being committed next. Pre-existing
+probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` records the load-only control and four-cell timer work. Pre-existing
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
@@ -82,6 +81,23 @@ boot; ELR `0x10148c488` would establish execution at the high physical entry.
 If successful, advance diagnostic checkpoints through the earliest assembly.
 The MT6983 command-mode panel needs explicit refresh, so DRAM-only early
 framebuffer writes cannot be inferred from the visible logo.
+
+**Entry BRK image prepared, NOT flashed:**
+`shim/out/entryprobe-el1-entry-brk.img`, 26,562,560 B, SHA256
+`386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
+`tools/xnu_breakpoint.py` creates a separate payload copy, changes only
+entry's instruction `0x14000719` to `BRK #0x5357` (`0xd42a6ae0`), and checks
+segment/address bounds. Payload SHA256
+`f062b4c6e70783168afe74826006cb2988b773d6f68002a79f0a08e3eb366b97`.
+Cross-build and byte comparison prove the inflated loader, bundled Linux
+and ramdisk match the previous el1-xnu image except that one instruction.
+Expected ELR `0x10148c488`, ESR `0xf2005357`; fallback uses the installed
+probe VBAR. Predicted written-partition SHA256
+`7268f4cea4d1c618b42f41c5cc49e79ebc3c00f384fd4036234aee8357f22d3e`.
+30 host tests pass. The first build attempt correctly rejected the restored
+live wrapper as a template (no original Linux banner); rebuilding from
+`backup/boot_a-stock.img` passed. Await separate approval for this test;
+no new device write has occurred. Device remains restored in Recovery.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
