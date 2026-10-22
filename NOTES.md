@@ -28,9 +28,12 @@ reached `spllo()` with interrupts enabled and returned from
 timer-interrupt delivery and scheduler maintenance are proven. A direct jump
 to the `bl bsd_init` call failed into an infinite reboot loop; `boot_a` was
 fully restored. The post-lockdown checkpoint then passed; the XNUPOST-skip
-diagnostic still looped, narrowing the suspect to
-`kperf_init_early()`/`ml_wait_max_cpus()` or the remaining pre-`bsd_init`
-calls. BSD/userspace and full kernel boot remain unproven. These checkpoints alone do not verify visible panel
+diagnostic still looped, and a payload test confirmed the post-lockdown hang
+is `kperf_init_early()` -> `ml_wait_max_cpus()`. Returning 1 from that barrier
+on the single-CPU topology let kperf, the full CONFIG_XNUPOST suite and
+`PE_lockdown_iokit` pass; execution reached the `bl bsd_init` site. The
+permanent source/CI fix is still pending. BSD/userspace and full kernel boot
+remain unproven. These checkpoints alone do not verify visible panel
 refresh.
 
 **Completed: `sched_startup` return (hardware PASS).**
@@ -91,9 +94,10 @@ back the full original and verify the hash; on failure, restore the trimmed
 stock prefix via fastboot, boot Recovery, then write the full backup. Never
 leave a test image in `boot_a`.
 
-**Next:** flash the prepared NOP-kperf diagnostic (`14bef24d`). If it reaches
-`bl bsd_init`, fix the `kperf_init_early()`/`ml_wait_max_cpus()` barrier for
-the `cpus=1` topology. A RAM-disk root is still absent from the payload.
+**Next:** land the permanent `ml_wait_max_cpus()` single-CPU fix as a new
+`xnu/patches` entry, build it through GitHub Actions, and re-derive the probe
+offsets for the new kernel. After that, `bsd_init` and the RAM-disk root are
+the remaining gates; the current payload has no `RAMDisk` node or root arg.
 
 **Failed: XNUPOST-skip diagnostic (hardware, infinite reboot).**
 `shim/out/entryprobe-el1-bsd-init-skiptest-brk.img`, 26,562,560 B, SHA256
@@ -128,16 +132,28 @@ matches only `qcom,kryo470`; the CPU driver never instantiates, so the setter
 is never called and the barrier sleeps forever. `machine_info.max_cpus` is 1
 because the matisse ADT has a single CPU node.
 
-**Prepared, host-verified, NOT flashed: payload max_cpus fix.**
+**Completed: payload max_cpus fix (hardware PASS; pre-bsd path cleared).**
 `shim/out/entryprobe-el1-bsd-init-maxcpu-fix.img`, 26,562,560 B, SHA256
 `8783158b9d5ba83e5154b6817da60175020778d7743a14f1f85837d2ff066ee2`;
 payload SHA256 `6d45243bc5fd475ff434df217b7516eee33a4a0f8b6596655d61d4cae6956f1a`.
-It replaces the first two instructions of `ml_wait_max_cpus()` (VA
-`0xfffffe000748fe28`) with `mov w0,#1; ret`, keeps CONFIG_XNUPOST and kperf
-enabled, and breaks at `bl bsd_init` (`0x7aafbe0`). It tests whether returning
-the correct single-CPU maximum is sufficient to pass kperf and the XNUPOST
-suite. This is a diagnostic payload, not the permanent source fix. Only 12
-payload bytes differ from the debug payload.
+It replaced the first two instructions of `ml_wait_max_cpus()` (VA
+`0xfffffe000748fe28`) with `mov w0,#1; ret`, kept CONFIG_XNUPOST and kperf
+enabled, and broke at `bl bsd_init` (`0x7aafbe0`). Only 12 payload bytes
+differed from the debug payload.
+
+Same-boot `maxcpu-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aafbe0`, x0 `0`. The
+single-CPU `ml_wait_max_cpus` return let `kperf_init_early()` and the full
+CONFIG_XNUPOST suite pass; `PE_lockdown_iokit` and `vm_set_restrictions` also
+returned. Written-partition SHA256 `ad487813...` matched the readback; the
+full original was restored and verified as `2931647a...`.
+
+Permanent source fix (pending): `ml_wait_max_cpus()` in
+`osfmk/arm/machine_routines_common.c` must return immediately when
+`machine_info.max_cpus <= 1`, because the sole CPU is already executing and
+the IOKit CPU driver may never publish the flag (SweetCPU matches
+`qcom,kryo470`, matisse uses `arm,cortex-a510`). This needs a new patch and
+CI kernel; the diagnostic image above is not the permanent fix.
 
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
