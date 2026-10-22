@@ -95,6 +95,8 @@ back the full original and verify the hash; on failure, restore the trimmed
 stock prefix via fastboot, boot Recovery, then write the full backup. Never
 leave a test image in `boot_a`.
 
+**Docs:** `docs/matisse-xnu-ios-roadmap-zh.md` updated on 2026-10-23 with the scheduler, timer-IRQ, lockdown, kperf and `bsd_init` results.
+
 **Next:** execute `bsd_init` itself. The current payload still has no
 `RAMDisk` node and no root-device boot argument, so the next work is a
 RAM-disk root and a checkpoint after `bsd_init`/`load_init_program`.

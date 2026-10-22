@@ -1,10 +1,10 @@
 # Redmi K50 Pro：XNU 实机进展与 iOS 启动路线
 
-更新：2026-10-23，完成双槽选择性诊断向量与 bootstrap-thread 实机验证后。
+更新：2026-10-23，完成调度器启动、定时 IRQ、lockdown 与单 CPU kperf 修复，并到达 `bl bsd_init` 调用点。
 
-**当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`；`vm_mem_bootstrap` 已完整返回，包括 `vm_page_bootstrap`、`zone_bootstrap`、`vm_object_bootstrap`、`vm_map_init`、`kmem_init`（含 KMEM/ZALLOC 启动阶段和 `zone_init`）与 `vm_fault_init`。`sched_init`、task/thread 初始化与 `load_context` 也已实机运行，**bootstrap thread 已在 `kernel_bootstrap_thread` 内执行**；双槽选择性诊断向量已在实机验证。尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
+**当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`；`vm_mem_bootstrap` 已完整返回，包括 `vm_page_bootstrap`、`zone_bootstrap`、`vm_object_bootstrap`、`vm_map_init`、`kmem_init`（含 KMEM/ZALLOC 启动阶段和 `zone_init`）与 `vm_fault_init`。`sched_init`、task/thread 初始化与 `load_context` 也已实机运行。此后 `idle_thread_create`、`sched_startup`（含首次真正的 `thread_block` 往返）、`thread_daemon_init`、`spllo`、`initialize_screen`、`machine_lockdown`、`PE_lockdown_iokit`、`vm_set_restrictions`、完整 CONFIG_XNUPOST 测试套件与 `kperf_init_early` 均已实机返回；执行已到达 `kernel_bootstrap_thread` 末尾的 `bl bsd_init` 调用点。500 ms CNTVCT 等待期间 `sched_tick` 增加 3，证明定时中断和调度维护线程在正常 XNU 向量下持续运行。`bsd_init` 本身尚未执行，尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
 
-本轮包含一次失败与两次通过：slot-4-only 的首次 bootstrap-thread 尝试未返回，用户手动进入 fastboot，用 20,873,216 字节的 trimmed 原厂前缀恢复；定位到 XNU 使用 EL1t/slot 0 后改为双槽 stub，vm-return 与 bootstrap-thread 两次测试均自动返回 Recovery，完整 67,108,864 字节 `boot_a` 已写回并校验。本轮没有写入 `userdata`。详细逐次记录以 [NOTES.md](../NOTES.md) 顶部 ACTIVE 区为准，下面历史记录可能代表已经被后续证据替代的判断。
+本轮经历两次无限重启和多轮自动返回：`bsd_init` 大跳与 XNUPOST-skip 诊断都未返回，均由用户手动进入 fastboot、写 20,873,216 字节 trimmed 原厂前缀、进 Recovery 后写回完整 64 MiB 并校验；定位到根因是单 CPU 拓扑下 `kperf_init_early()` 的 `ml_wait_max_cpus()` 永久等待，而 matisse 的 `arm,cortex-a510` CPU 节点不匹配只声明 `qcom,kryo470` 的 SweetCPU 驱动。临时 payload 跳过 kperf 后到达 `bl bsd_init`；随后用 `ml_wait_max_cpus()` 单 CPU 早返回的正式补丁经 CI 重建内核，并在实机端到端验证通过。完整 67,108,864 字节 `boot_a` 已恢复并校验。本轮没有写入 `userdata`。详细逐次记录以 [NOTES.md](../NOTES.md) 顶部 ACTIVE 区为准，下面历史记录可能代表已经被后续证据替代的判断。
 
 ## 1. 项目是什么，哪些成果可以复用
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 手机 | Redmi Note 10 Pro | Redmi K50 Pro |
 | SoC | Qualcomm SM7150 | MediaTek MT6983 / Dimensity 9000 |
-| 既有记录 | README、历史 NOTES 记录了 iOS 桌面和触摸成果 | 本次实测到 XNU bootstrap thread 执行 |
+| 既有记录 | README、历史 NOTES 记录了 iOS 桌面和触摸成果 | 本次实测到调度器、定时 IRQ、lockdown 与 `bl bsd_init` 调用点 |
 | 临时启动 | 原设备支持 `fastboot boot` | 本 LK 没有可用的 `fastboot boot` |
 | 显示 | 1080×2400，连续扫描路径 | 1440×3200，DSC 命令模式，需要主动刷新 |
 | 触摸 | Goodix，经 Qualcomm GENI I²C | ST FTS 路线，经 MTK SPI6，见第 6 节 |
@@ -32,6 +32,7 @@
 | `shim/loader.c`、`tools/mkpayload.py` | 装载 XNU Mach-O、生成 boot_args、放置 ADT 和可选 RAM disk |
 | `tools/mkadt.py` | 构造 XNU 使用的 Apple Device Tree；提供 matisse 配置 |
 | `tools/mkentryprobe.py` | 同次启动诊断包装器、断点与异常回传 |
+| `tools/xnu_tickprobe.py` | 定时 IRQ/`sched_tick` 证明探针 |
 | `xnu/patches/` | 内核、文件系统、平台服务和驱动补丁 |
 | `.github/workflows/xnu.yml` | GitHub Actions 内核构建 |
 | `tools/sweet-init.S`、`tools/mkinit.py` | 最小静态 ARM64 用户态 PID 1 |
@@ -47,7 +48,7 @@
 4. **打通显示对照。** 由于面板是命令模式，只改显存不会自动更新。受控刷新测试中，用户看到了 `DISPLAY KICK` 与移动绿条，也看到了 EL1 测试文字。这证明在当前 LK 遗留状态下可以刷新面板。
 5. **建立同次启动证据。** 自定义代码运行后，把阶段或异常写入所携带的原 Linux banner，再转入 Recovery，从 `dmesg` 读取 `SWEET-ENTRY`。这避免依赖未经证明能跨重启保留的 DRAM 日志。
 6. **确认加载路径。** 只加载、不跳 XNU 的镜像成功完成段复制、ADT 和 boot_args 准备并返回。完整 shim 与无断点直接跳转曾只显示 logo，部分需要手动 fastboot 恢复；logo 本身不说明停在哪。
-7. **逐步推进真实 XNU。** 在实际内核指令流插入受控 BRK，从入口一路推进至当前的 bootstrap thread 执行。每轮真机测试后恢复并验证整个分区。
+7. **逐步推进真实 XNU。** 在实际内核指令流插入受控 BRK，从入口一路推进至当前的 `bl bsd_init` 调用点。每轮真机测试后恢复并验证整个分区。
 
 ### 2.2 XNU 断点证据
 
@@ -74,8 +75,24 @@
 | 完整 `vm_mem_bootstrap` 返回 | `99d68ed6` | `fffffe00073644d8` | `vm_map_init`、`kmem_init`、KMEM/ZALLOC 启动阶段、`vm_fault_init` 全部返回，`kernel_bootstrap` 继续执行 |
 | 双槽选择性向量验证 | `81652ccf` | `fffffe00073644d8` | 只拦截 EL1t/EL1h 同步槽的 `BRK #0x5357`，诊断回传与完整恢复通过 |
 | bootstrap thread 执行 | `154449c1` | `fffffe0007aaf74c` | `kernel_thread_create`、`load_context` 后，`kernel_bootstrap_thread` 运行到 `current_processor` 返回 |
+| `sched_startup` 返回 | `c1859ef9` | `fffffe0007aaf7d4` | `idle_thread_create` 与首次真正 `thread_block` 往返（`sched_init_thread` 阻塞、bootstrap 恢复） |
+| `thread_daemon_init` 返回 | `f16c296d` | `fffffe0007aaf80c` | 线程生命周期与 daemon 初始化 |
+| `spllo`、`initialize_screen` 返回 | `ff8e21bf` | `fffffe0007aaf9ec` | 中断开启、`initialize_screen`、`PE_init_iokit` 等返回 |
+| 定时 IRQ 与维护线程 | `80c8f80f` | `fffffe000748d744` | 500 ms CNTVCT 等待内 `sched_tick` 增加 3（x0=3），正常 IRQ 路径与调度维护线程持续运行 |
+| `machine_lockdown` 返回 | `f68a28a8` | `fffffe0007aafb54` | `OSKextRemoveKextBootstrap` 与 lockdown 后，选择性向量、缓存清理和 bootstrap TTBR0 回传仍有效 |
+| 正式 CI 内核 0084 + `bsd_init` 调用点 | `1cd72d23` | `fffffe0007aafc00` | 全新 CI 内核（补丁 0084），XNUPOST 与 kperf 未跳过，执行到达 `bl bsd_init` |
 
-`serial_init=1` 只证明函数返回成功；后期各轮没有收集用户的屏幕观察，不能宣称已经看到了 XNU 控制台。独立探针的 IRQ 测试曾成功处理 INTID 27，但当前 XNU 调度器启用中断后的持续运行还未验证。
+同轮诊断与失败记录：
+
+| 检查点 | 镜像 SHA256 前缀 | 结果 |
+| --- | --- | --- |
+| `bsd_init` 大跳 | `7a5b60b5` | 未返回，无限重启；用户手动 fastboot 恢复 |
+| XNUPOST-skip | `ce02efbf` | 仍未返回；排除 XNUPOST 为唯一根因 |
+| NOP-kperf | `14bef24d` | 返回，`pc=fffffe0007aafbe0`；锁定 kperf 为阻塞点 |
+| payload max_cpus 修复 | `8783158b` | 返回，`pc=fffffe0007aafbe0`；证明单 CPU 早返回即可通过 kperf 与 XNUPOST |
+| 正式 CI 内核 0084 | `1cd72d23` | 返回，`pc=fffffe0007aafc00`；永久补丁端到端验证通过 |
+
+`serial_init=1` 只证明函数返回成功；后期各轮没有收集用户的屏幕观察，不能宣称已经看到了 XNU 控制台。定时中断现在已有实机证据：`sched_tick` 在 500 ms 等待中增加 3，且这些 tick 发生在 XNU 自己的 IRQ 槽上。
 
 ### 2.3 为推进断点补齐的诊断能力
 
@@ -85,14 +102,20 @@
 - XNU 清空 TTBR0 后，仅在异常回传时恢复 bootstrap TTBR0，保持原始初始化流程照常执行。
 - 单独记录 x0，以区别函数“返回了”和“返回成功”。
 - **选择性诊断向量（已实机验证）**：XNU 以 SPSel=0（EL1t）执行，内核 BRK 走同步槽 slot 0，而不是 slot 4；因此 stub 同时安装在 slot 0 和 slot 4。stub 检查 `ESR_EL1` 是否为 `BRK #0x5357`，是则进入诊断回传，否则通过安装时打补丁的直接 `B` 转交该槽的原始 XNU 处理器。转发路径保存并恢复 x16/x17，不改变任何通用寄存器；诊断 relay 复制到 arm64 用户态不使用的 AArch32 slot 12/13。IRQ、FIQ、SError 和 EL0 同步槽全部保持 XNU 原样，正常中断、SVC 和缺页异常不再被探针占用。
+- **定时 tick 探针（已实机验证）**：`tools/xnu_tickprobe.py` 在 `initialize_screen` 返回点把原 `bl vm_commpage_init` 改为跳到早期向量表槽 14 的 cave；cave 保留原调用，读取 `sched_tick`，用 `CNTVCT_EL0` 忙等 6,500,000 tick（本机 13 MHz 下 500 ms），再读一次并相减，最后执行 `BRK #0x5357`。实机返回 `x0=3`，说明等待期间定时 IRQ 正常投递，且调度维护 continuation 至少运行了三次。
 
-主机验证包括本轮运行的 23 项工具测试、选择性 stub 微测试和交叉编译。双槽修复后，vm-return 检查点在实机通过：诊断回传、完整恢复均正常。选择性向量的**转发路径目前只在微测试中验证**，尚未在完整引导中触发真实 IRQ/缺页；这也正是下一步要验证的内容。仓库全量检查此前还有六个已有 CRLF shell 问题，不能声称全仓检查已通过。
+主机验证包括本轮运行的 44 项工具测试、选择性 stub 微测试和交叉编译。双槽修复后，vm-return、bootstrap-thread、sched/thread、spllo、lockdown 与正式内核检查点均在实机通过。选择性向量的 IRQ 转发现在有真实证据（`sched_tick` +3）；EL0 的 SVC/缺页尚未在完整引导中触发，但这两个槽保持 XNU 原处理器，未被探针占用。仓库全量检查此前还有六个已有 CRLF shell 问题，不能声称全仓检查已通过。
 
-### 2.4 bootstrap thread 实机结果
+### 2.4 调度器、定时 IRQ、lockdown 与 `bsd_init` 前路径
 
-镜像 `shim/out/entryprobe-el1-thread-brk.img`（26,562,560 bytes，SHA256 `154449c1…9be872`，双槽向量重构建）在 `kernel_bootstrap_thread` 的 `current_processor` 返回后设置断点（VA `0xfffffe0007aaf74c`）。同次启动记录 `pc=fffffe0007aaf74c`、`x0=fffffe0007b88180`、`esr=f2005357`，证明 `kernel_thread_create`、`load_context` 之后 bootstrap thread 已实际运行。设备自动返回 Recovery，完整 67,108,864 字节 `boot_a` 已写回并校验。
-
-首次尝试使用只装 slot 4 的镜像 `1787a791…`，未返回并进入循环重启；根因是 XNU 以 SPSel=0（EL1t）运行、BRK 走 slot 0。改为双槽 stub 后，同一检查点在 vm-return（`81652ccf`）和 bootstrap-thread（`154449c1`）两次实机测试中均正常回传。失败轮次的恢复过程（手动 fastboot → trimmed 前缀 → Recovery → 完整写回）保留在 NOTES 历史区。
+- **调度器上下文切换通过。** `idle_thread_create` 与 `sched_startup` 返回，`pc=fffffe0007aaf7d4`。`sched_startup` 内的 `thread_block()` 切换到 `sched_init_thread` 后能切回 bootstrap thread，说明 task/thread、run queue 与 `machine_switch_context` 已完成首次真实往返。
+- **线程生命周期初始化通过。** `thread_daemon_init` 返回，`pc=fffffe0007aaf80c`。
+- **中断开启与屏幕初始化通过。** `spllo()` 使能 IRQ，`initialize_screen(NULL, kPEAcquireScreen)` 返回，`pc=fffffe0007aaf9ec`；同一段还包含 `PE_init_iokit` 与启动阶段 16。
+- **定时 IRQ 与调度维护通过。** tick cave 在 500 ms 等待中读到 `sched_tick` 增量 3，`pc=fffffe000748d744`。这是“正常 XNU 向量下的持续 IRQ 投递”的直接证据，而不是只依赖函数返回。
+- **lockdown 后诊断回传仍有效。** `OSKextRemoveKextBootstrap` 与 `machine_lockdown` 返回，`pc=fffffe0007aafb54`。`bootstrap_pagetables` 位于 `__DATA_CONST`（PA `0x10117c000`）；lockdown 释放的 `__BOOTDATA` 在 PA `0x102080000`，没有回收 TTBR0 恢复页。向量 stub 位于 `__TEXT_EXEC`，ROX 后仍可执行。
+- **锁定阻塞点：单 CPU 的 `ml_wait_max_cpus()`。** 未修改内核的 `bsd_init` 大跳（`7a5b60b5`）与 XNUPOST-skip（`ce02efbf`）都进入无限重启；`machine_lockdown` 检查点（`f68a28a8`）正常返回，排除 lockdown/relay。NOP-kperf 诊断（`14bef24d`）返回 `pc=fffffe0007aafbe0`，锁定 `kperf_init_early()`。根因是它调用 `ml_wait_max_cpus()`，等待 IOKit CPU 驱动设置 `max_cpus_initialized`；matisse ADT 的 CPU 节点是 `arm,cortex-a510`，而 SweetCPU 只匹配 `qcom,kryo470`，驱动从未实例化。
+- **单 CPU 早返回修复通过。** 临时 payload 把 `ml_wait_max_cpus()` 改成 `mov w0,#1; ret` 后，XNUPOST 与 kperf 都保持启用并到达 `bl bsd_init`（`8783158b`）。正式补丁 `0084-sweet-single-cpu-max-cpus.patch` 在 `machine_info.max_cpus <= 1` 时直接返回；CI `39828405447` 重建内核 `28190f5b…`，实机镜像 `1cd72d23` 在 `pc=fffffe0007aafc00` 返回，端到端验证通过。
+- **恢复。** 两次无限重启都由用户手动进入 fastboot，写 trimmed 原厂前缀，进 Recovery 后写回完整 67,108,864 字节并校验 `2931647a…`。没有残留测试镜像。
 
 ## 3. 如何启动到用户态
 
@@ -102,36 +125,42 @@
 
 ```text
 已完成：arm_init → machine_startup → kernel_bootstrap
-       → vm_mem_bootstrap → vm_page_bootstrap / zone_bootstrap /
-         vm_object_bootstrap / vm_map_init / kmem_init / vm_fault_init
-       → 完整 vm_mem_bootstrap 返回
+       → vm_mem_bootstrap（vm_page / zone / vm_object / vm_map /
+         kmem / vm_fault 全部返回）
        → sched_init → task/thread 初始化 → load_context
-       → kernel_bootstrap_thread（current_processor 返回）
-       → 双槽选择性向量实机验证
+       → kernel_bootstrap_thread
+       → idle_thread_create → sched_startup → thread_daemon_init
+       → spllo → initialize_screen
+       → 定时 IRQ / sched maintenance（sched_tick +3）
+       → OSKextRemoveKextBootstrap → machine_lockdown
+       → CONFIG_XNUPOST → PE_lockdown_iokit → vm_set_restrictions
+       → kperf_init_early
+       → bl bsd_init（当前实机到达点）
 
-下一步：sched_startup / idle_thread_create / thread_daemon_init
-       → 正常 IRQ 持续投递与线程调度
-       → IOKit → bsd_init → md0 根文件系统 → exec 最小 /sbin/launchd
-       → EL0 的 PID 1 输出心跳并持续存活
+下一步：执行 bsd_init
+       → 根设备 / md0 根文件系统 → load_init_program
+       → EL0 的最小 PID 1 心跳并持续存活
+       → Apple launchd → 系统服务 → 桌面
 ```
 
-建议分成四个可验收阶段：
+建议分成五个可验收阶段：
 
 | 阶段 | 要做的事 | 通过标准 |
 | --- | --- | --- |
-| A：完成 VM | 先检查 zone/object 初始化，再完成 vm_map、kmem、vm_fault 等 | 命中 `vm_mem_bootstrap` 返回后的断点，未发生更早异常 |
-| B：启动内核线程 | 推进 scheduler、task/thread、上下文切换和时钟 | 到达 bootstrap thread；在 XNU 正常异常向量下验证定时中断与线程运行 |
-| C：挂载最小根 | 用 `mkpayload.py --ramdisk` 打包静态测试程序，使用 mockfs/md0；之后再试小 HFS+ RAM disk | `md0` 注册、根挂载、`load_init_program` 执行 |
-| D：进入 EL0 | 使用现有 `sweet-init.S` 和 `mkinit.py`，验证代码签名、用户栈和系统调用 | 真机输出 PID 1，`open/write/getpid/select` 正常，多个五秒心跳持续运行 |
+| A：完成 VM（已完成） | zone/object、vm_map、kmem、vm_fault 等 | `vm_mem_bootstrap` 返回后断点命中，未发生更早异常 |
+| B：调度器与 IRQ（已完成） | scheduler、task/thread、上下文切换、`spllo` 与定时中断 | bootstrap thread、`sched_startup`、`thread_daemon_init` 返回；tick 探针 `sched_tick` +3 |
+| C：lockdown 与 bsd_init 前路径（已完成） | `OSKextRemoveKextBootstrap`、`machine_lockdown`、XNUPOST、IOKit lockdown、kperf | 正式 CI 内核 0084 到达 `bl bsd_init`（`pc=fffffe0007aafc00`） |
+| D：bsd_init 与最小根（当前） | 执行 `bsd_init`；用 `mkpayload.py --ramdisk` 打包静态 init，使用 mockfs/md0 | `md0` 注册、根挂载、`load_init_program` 执行 |
+| E：进入 EL0 | 使用现有 `sweet-init.S` 和 `mkinit.py`，验证代码签名、用户栈和系统调用 | 真机输出 PID 1，`open/write/getpid/select` 正常，多个五秒心跳持续运行 |
 
 测试程序路径虽然叫 `/sbin/launchd`，内容是项目自己的静态 init。看到其心跳代表“用户态已跑通”，尚不代表 Apple launchd 或 iOS 已运行。该程序已处理真实 ARM64 对 SP 对齐的要求，不能随意删除这类只在硬件上暴露的修复。
 
 有两处必须提前处理：
 
-1. **当前诊断向量不能直接留到用户态。** 回传方案覆盖了异常入口；后续正常 IRQ、用户态 SVC 和缺页异常必须进入 XNU 自己的处理函数。应在开放中断前恢复正常向量，或另做只拦截指定诊断 BRK、其余入口正确转交的机制。进入线程调度、设备 DMA 或多核后，也不能默认还能无副作用地跳回 Linux。
-2. **每个更深断点都要重新检查内存。** 本轮 vm_pages 的模型映射已写到约 `0x1038c16cf`，不能只看未继续增长的 `avail_start` 来估算清理范围。页表、异常代码、回传状态及 Linux 保留区域的存活都要复核。
+1. **诊断向量与正常异常的边界。** IRQ 转发已在实机证明有效，但诊断回传仍是“命中 BRK 就放弃当前 XNU 状态并返回 Linux”。EL0 的 SVC/缺页槽保持 XNU 原处理器，尚未在完整引导中触发；进入用户态前应移除诊断 relay，或确保它只拦截指定的诊断 BRK，其余异常完全按 XNU 处理。执行到 `bsd_init` 以后，内核已有更多不可回退的状态（BSD、IOKit、线程），不能默认还能无副作用地跳回 Linux。
+2. **每个更深断点都要重新检查内存。** 128 MiB 的清理范围 `[0x100000000, 0x108000000)` 已覆盖到 `bl bsd_init`，但 `bsd_init`、RAM disk、文件系统和用户态会继续分配页表、缓冲区与设备内存。后续断点必须重新核对 dirty 范围、bootstrap TTBR0 页的存活和 Linux 保留区域，不能沿用“上一轮没坏”作为证明。
 
-旧交接把 `vm_retire_boot_pages` 当作可能释放 bootstrap 表的边界。本次核查发现：**当前 CI 内核中该函数只有一条 `ret`，源代码也是空实现**。所以它在此构建中不会自行回收页表；但后续分配、地址映射和向量切换仍需逐段验证，换内核后也必须重新检查。真正更晚的 bootstrap 段回收和 lockdown 不能忽略。
+`vm_retire_boot_pages` 在当前 CI 内核中仍只有一条 `ret`（空实现），但 lockdown 已经通过，且 `bootstrap_pagetables` 位于 `__DATA_CONST`，不会被 `__BOOTDATA` 的释放回收。更晚的 `bsd_init`/RAM disk 分配、页表变化和向量切换仍需逐段验证；换内核后必须重新检查地址与清理范围。
 
 ## 4. 如何真正启动 iOS
 
@@ -146,6 +175,8 @@
 仓库采取 **从 APFS 读取文件、重新制作大小写敏感且带日志的 HFS+ 根卷** 的路线。XNU 已有内建 HFS 支持，无需先完成 APFS 移植。`mkiosroot.sh` 整合 cryptex 文件和共享缓存链接；必须验证实际文件、权限、所有者、硬链接、符号链接以及需要的元数据，并完成文件系统检查。该脚本面向 Linux 的 FUSE/loop mount 环境，不能原样视为 macOS 一条命令可运行。
 
 ### 4.2 分阶段验收
+
+当前实机只到达 `bl bsd_init` 调用点，下面四个阶段都还没有开始；先完成第 3 节的 `bsd_init`、最小根和 EL0。
 
 | 阶段 | 依赖与工作 | 应拿到的证据 |
 | --- | --- | --- |
@@ -243,15 +274,15 @@ DWC3 的 TRB/endpoint 寄存器实现不能直接复用到 MTU3；USB 类协议�
 
 若使用 DMA/QMU，同样要处理 IOMMU/总线地址、缓存一致性、描述符对齐和中断。端口方向与 VBUS 还可能依赖 Type-C/充电芯片，不能照抄原 Qualcomm 驱动的 VBUS override。ADB、usbmux/lockdown 也不会在 USB 枚举后自动出现，它们需要另外的用户态协议实现。
 
-USB 日志能显著减少后续对屏幕和断点回传的依赖；可以在正常 XNU 中断/线程运行稳定后优先做最小 USB 日志，再扩展 ECM 网络。
+USB 日志能显著减少后续对屏幕和断点回传的依赖。定时 IRQ 与调度维护已经在正常 XNU 向量下通过，最小 USB 日志可以作为 `bsd_init`/RAM disk 之后的优先项，再扩展 ECM 网络。
 
 ## 8. 推荐执行顺序与其他注意事项
 
 | 优先级 | 下一项 | 完成标志 |
 | --- | --- | --- |
-| 1 | zone/object 及完整 VM bootstrap（已完成） | 实机到达完整 `vm_mem_bootstrap` 返回 |
-| 2 | 选择性向量与 bootstrap thread 已实机通过；推进 sched_startup、idle/daemon 线程与定时 IRQ（当前优先级最高） | 线程与定时中断持续运行 |
-| 3 | RAM disk 最小用户态 | PID 1 多次心跳，系统调用可重复 |
+| 1 | VM、调度器、定时 IRQ、lockdown 与 kperf 前路径（已完成） | 正式 CI 内核 0084 到达 `bl bsd_init` |
+| 2 | 执行 `bsd_init` 与最小 RAM disk 根（当前优先级最高） | `md0` 注册、根挂载、`load_init_program` 执行 |
+| 3 | EL0 最小 PID 1 | PID 1 多次心跳，`open/write/getpid/select` 可重复 |
 | 4 | 稳定屏幕日志或 MTU3 最小 USB 日志 | 能连续观察真实内核故障，不依赖仅显示 logo |
 | 5 | MTK UFS 只读、受控写入与根镜像 | 块数据校验、文件系统验证通过 |
 | 6 | Apple launchd、dyld/cache 与核心服务 | 真实 iOS 用户空间持续运行 |
@@ -264,7 +295,7 @@ USB 日志能显著减少后续对屏幕和断点回传的依赖；可以在正�
 - **日志与证据：** 优先同次启动日志。`adb exec-out dd` 曾静默短读，分区校验使用设备临时文件再 pull，并同时检查长度和 hash。直接 log_store、expdb 或 UFS 日志不是现成可靠通道。
 - **内存：** 当前 XNU 配置的上部窗口是 `0x100000000..0x22e000000`，约 4.72 GiB；它不代表已经压力验证所有 RAM。后续内存扩展需逐个避开 secure/carve-out、framebuffer、回传及 DMA 保留区。
 - **时钟和中断：** 使用本机 13 MHz、虚拟计时器 INTID27，避免复用 sweet 的 19.2 MHz/INTID19。GPIO编号、Linux IRQ 和 GIC INTID 不能混用。
-- **多核：** 继续保持 `cpus=1`。原设备“六个 A55”方案不适用于 MT6983；以后按实际 MPIDR、A510/A710/X2 拓扑、PSCI、缓存与中断亲和性逐核启用。
+- **多核与 CPU 驱动：** 继续保持 `cpus=1`。补丁 0084 只在 `machine_info.max_cpus <= 1` 时让 `ml_wait_max_cpus()` 早返回；matisse ADT 的 CPU 节点 compatible 是 `arm,cortex-a510`，而 SweetCPU 只匹配 `qcom,kryo470`，所以 CPU 驱动当前没有实例化。开启第二核前必须先让驱动匹配 matisse（或实现独立 CPU 驱动），再按实际 MPIDR、A510/A710/X2 拓扑、PSCI、缓存与中断亲和性逐核启用；不能只把 `cpus=1` 改成 `cpus=8`。
 - **电源与外设：** 按键走 MTK PMIC/SPMI；电池、充电、热管理、挂起恢复均未完成 XNU 移植。先短时可观测测试，再考虑长时间运行；不要把静态电量服务当作真实充电/温控。
 - **后续大项：** Wi-Fi、蓝牙、基带、音频、摄像头、传感器、GPS、GPU、休眠唤醒都需要独立驱动/固件/用户态接口。桌面亮起不会自动补齐这些功能。
 - **写入范围：** iOS 根的预定位置是现有 `userdata`，未来写入仍需当次明确确认；不修改 GPT，保留 bootloader、vendor_boot/Recovery、modem、persist 和校准备份。
@@ -272,49 +303,75 @@ USB 日志能显著减少后续对屏幕和断点回传的依赖；可以在正�
 
 ## 9. 本轮可核对的构建、恢复和交接信息
 
-当前沿用 [GitHub Actions 39640336293](https://github.com/Jinsens/ios-sweet/actions/runs/39640336293)，内核构建提交 `dd9752e`。本轮没有新建内核 CI，也没有推送提交。
+**内核与 CI。** 最新成功构建为 [GitHub Actions 39828405447](https://github.com/Jinsens/ios-sweet/actions/runs/39828405447)，提交 `b616374`，包含补丁 `0084-sweet-single-cpu-max-cpus.patch`。首次在 `main` 上的 dispatch（`39826038020`）在任何 step 开始前被取消；改用 `codex/matisse-xnu-screen-log` 重新 dispatch 后成功。
 
 ```text
-kernel: xnu/out/ci-39640336293/kernel.development.sweet
-SHA256: bc308789486ee96b380ce374bc7fe4c1894f4a115da9662b4cb0cf9a016b543c
+kernel: xnu/out/ci-39828405447/kernel.development.sweet
+SHA256: 28190f5b4c274b4d5c1501f08b776873c5a9190ec67b74021bd4f42b795267f2
 
-本轮镜像 1（双槽向量验证）: shim/out/entryprobe-el1-vm-return-sel.img
+payload: shim/out/matisse-xnu-ci39828405447.payload
+SHA256: e39237a808568658c363b8d10fbac9916b4093c2f8b0992cebfbc870c13f887c
+
+永久补丁验证镜像: shim/out/entryprobe-el1-bsd-init-0084-brk.img
 大小: 26,562,560 bytes
-SHA256: 81652ccf2912acb70630fe781985386eedce35c12cf90ad13f9f7d8fb50ceced
-断点: VA fffffe00073644d8（vm_mem_bootstrap 返回后）
+SHA256: 1cd72d232491a871296d611720a8ac55774f4c743a286131841b2dff1da93599
+断点: VA fffffe0007aafc00 / PA 0x101aafc00（bl bsd_init）
 同次启动记录:
-stage=87 fault=1 esr=f2005357 far=0 pc=fffffe00073644d8
-x0=fffffe00080bbbc0
+stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aafc00
+x0=0
 
-本轮镜像 2（bootstrap thread）: shim/out/entryprobe-el1-thread-brk.img
-大小: 26,562,560 bytes
-SHA256: 154449c1e72284e4111a353c969549d7a810c9a7906cafe6b2160191a39be872
-断点: VA fffffe0007aaf74c（kernel_bootstrap_thread，current_processor 返回后）
-同次启动记录:
-stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aaf74c
-x0=fffffe0007b88180
-
-失败历史（已恢复，根因已定位）:
-首次 slot-4-only 镜像 1787a791 未返回并循环重启；手动进入 fastboot，
-写入 backup/boot_a-stock-trim.img（20,873,216 bytes，Sending/Writing OKAY），
-进入 Recovery 后写回完整备份。根因是 XNU 以 SPSel=0/EL1t 运行，BRK 走 slot 0。
-
-已验证的完整恢复备份:
+完整恢复备份:
 backup/recovery-20261021/boot_a-live-20261021.img
 大小: 67,108,864 bytes
 SHA256: 2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1
 
-证据目录（gitignored）:
-research/matisse/20261022-xnu-resume/
-  sel-vm-return-v2-manifest.json
-  sel-vm-return-v2-dmesg.txt
-  thread-brk-v2-manifest.json
-  thread-brk-v2-dmesg.txt
-  thread-brk-v2-restored.img
-  selective-stub-microtest.txt
-  thread-brk-restore.log
+trimmed 恢复前缀:
+backup/boot_a-stock-trim.img
+大小: 20,873,216 bytes
+SHA256: fe6e8fbf321ea542eb060efcda27b70ae96065e82cc871d4c71082b7268c220d
 ```
 
-关键提交：`f1b6d14` 为 TTBR0 恢复回传；`e24a92c` 为 x0 记录；`cfb5e8c` 为 CPU/GIC 实测记录；`490c41f` 为物理页初始化通过和完整恢复记录；`1e233f4` 为 zone/object 检查点准备；`3d638e1` 为完整 VM bootstrap 返回检查点准备；`5f3ba55` 为选择性诊断向量实现；`42d6582` 为 EL1t/EL1h 双槽修正。
+关键检查点镜像（均为 26,562,560 bytes；命中后自动返回 Recovery，随后全量恢复并校验）：
 
-本轮结束时没有尚未恢复的测试。bootstrap thread 已成为新的实机里程碑，双槽选择性向量已通过；下一步推进 `sched_startup`、idle/daemon 线程，并验证定时 IRQ 在正常 XNU 向量下的持续投递。不要直接刷 iOS 根镜像。
+| 检查点 | 镜像 SHA256 前缀 | 记录 PC |
+| --- | --- | --- |
+| bootstrap thread | `154449c1` | `fffffe0007aaf74c` |
+| `sched_startup` 返回 | `c1859ef9` | `fffffe0007aaf7d4` |
+| `thread_daemon_init` 返回 | `f16c296d` | `fffffe0007aaf80c` |
+| `spllo` / `initialize_screen` 返回 | `ff8e21bf` | `fffffe0007aaf9ec` |
+| 定时 tick 探针 | `80c8f80f` | `fffffe000748d744`（x0=3） |
+| `machine_lockdown` 返回 | `f68a28a8` | `fffffe0007aafb54` |
+| NOP-kperf 诊断 | `14bef24d` | `fffffe0007aafbe0` |
+| payload max_cpus 修复 | `8783158b` | `fffffe0007aafbe0` |
+| 正式 CI 内核 0084 | `1cd72d23` | `fffffe0007aafc00` |
+
+失败记录（均已恢复，未残留测试镜像）：
+
+- slot-4-only 的 `1787a791`：BRK 走 EL1t slot 0，未返回并循环重启；改为双槽 stub 后通过。
+- `bsd_init` 大跳的 `7a5b60b5`：未返回并循环重启；排除 XNUPOST 后仍失败。
+- XNUPOST-skip 的 `ce02efbf`：未返回；随后用 NOP-kperf（`14bef24d`）锁定 `kperf_init_early()`。
+- 所有失败恢复均按：用户手动 fastboot → 写 `boot_a-stock-trim.img` → 进 Recovery → 写完整 64 MiB → 全量读回校验 `2931647a…`。
+
+证据目录（gitignored）：
+
+```text
+research/matisse/20261023-sched-startup/
+  sched-startup-dmesg.txt
+  thread-daemon-dmesg.txt
+  spllo-dmesg.txt
+  tick-dmesg.txt
+  lockdown-dmesg.txt
+  nokperf-dmesg.txt
+  maxcpu-dmesg.txt
+  ci0084-dmesg.txt
+  *-written.img / *-restored.img
+  prepared-build.txt
+  skip-xnupost-build.py
+  nokperf-build.py
+  maxcpu-fix-build.py
+  ci-39828405447/（kernel、buildtree 与 SHA256SUMS）
+```
+
+关键提交：`5f3ba55` 选择性诊断向量；`42d6582` EL1t/EL1h 双槽修正；`8ddef0a`、`90c4084` 调度器检查点与通过记录；`3235c74` thread_daemon；`4a930d1` spllo；`d90dcf8` 定时 IRQ；`eaed2c0` lockdown；`8c353e9`、`a798c4c` XNUPOST/kperf 隔离；`6287cb8` 单 CPU max_cpus 实机通过；`b616374` 永久补丁 0084；`5321eae` 最终交接。
+
+本轮结束时设备在 Recovery（root ADB，slot `_a`），`boot_a` 已恢复并校验，没有尚未恢复的测试；未写 `userdata`。下一步是执行 `bsd_init` 并通过 `mkpayload.py --ramdisk` 提供最小根，先拿 EL0 PID 1 心跳，再谈 Apple launchd 与桌面。不要直接刷 iOS 根镜像。
