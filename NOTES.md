@@ -109,7 +109,16 @@ payload 16,605,840 B SHA256
 `60f82519ca572b355c44986a81cd36f05cd7e70215fd9ecf2022a8294e02d77f`,
 ADT 4664 B SHA256 `1020d120...`, cmdline includes `rd=ufsroot0 ufsrw=0
 serial=0`. Predicted partition `1f41b3a7280582351b9724282ef4cb081077b6c8cb24b007407baa269aa34271`.
-Expected panel output: `SWEET UFS: "userdata" on LUN 0 ... read-only`. Since
+Expected panel output: `SWEET UFS: "userdata" on LUN 0 ... read-only`.
+UFS entry checkpoint prepared, NOT flashed: `shim/out/entryprobe-el1-ufs-entry-brk.img`,
+26,562,560 B, SHA256 `46d5487ed1e675a8fd8d6ff2e3f6043ff2ca58f97e747a2d110132c519f03ee4`;
+payload `shim/out/matisse-xnu-0085-ufs-entry-brk.payload` SHA256
+`8632817047d1655a2194f5b877757ad9e256ccb859bec594e26137738583577f`;
+predicted partition `c1a2687a6b3d592f5929276f3b87b4decfa5f16b5c004c69b6985370c1a516f9`.
+BRK at `_sweet_ufs_rootdev` VA `0xfffffe00074e8090` (entry offset `0x5bc08`,
+replaces `sub sp,sp,#0x120`). A hit proves the kernel reached UFS initialization;
+a miss means the hang is earlier.
+ Since
 userdata is still Android f2fs, the HFS root mount will then fail; that is
 expected. The UFS driver lines are the test.
 
