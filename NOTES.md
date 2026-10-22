@@ -21,10 +21,11 @@ vm_mem_bootstrap returned** to kernel_bootstrap. `sched_init`, task/thread
 init and `load_context` then ran, and the **bootstrap thread executed on
 hardware** (`kernel_bootstrap_thread` after `current_processor`).
 `idle_thread_create`, `sched_startup` (first real `thread_block` round trip)
-and `thread_daemon_init` have also returned on hardware. Selective diagnostic
-vectors are hardware-proven. Interrupt delivery, BSD/userspace and full kernel
-boot remain unproven. These checkpoints alone do not verify visible panel
-refresh.
+and `thread_daemon_init` have also returned on hardware. The kernel then
+reached `spllo()` with interrupts enabled and returned from
+`initialize_screen`. Selective diagnostic vectors are hardware-proven.
+Timer-interrupt delivery, BSD/userspace and full kernel boot remain unproven.
+These checkpoints alone do not verify visible panel refresh.
 
 **Completed: `sched_startup` return (hardware PASS).**
 `shim/out/entryprobe-el1-sched-startup-brk.img`, 26,562,560 B, SHA256
@@ -88,21 +89,31 @@ leave a test image in `boot_a`.
 and then reach `spllo()`/`initialize_screen`; timer IRQ delivery under the
 normal XNU vectors is still unproven.
 
-**Prepared, host-verified, NOT flashed: first post-`spllo` checkpoint.**
+**Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
 `ff8e21bfdd891cb86ccf6de2ec85fb82ab148e8877e598e74b8728059b80b02a`;
 payload SHA256 `c9622ac8894e638f1f269189a7ddee8adf30cf83f9d5619116110de1bb2ecc55`.
 BRK at entry offset `0x623564`, payload offset `0xaabddc`, VA
 `0xfffffe0007aaf9ec` / PA `0x101aaf9ec`, immediately after
 `bl initialize_screen`, i.e. after `spllo()` enabled interrupts and
-`initialize_screen(NULL, kPEAcquireScreen)` returned; it replaces
+`initialize_screen(NULL, kPEAcquireScreen)` returned; it replaced
 `bl vm_commpage_init` (`0x97e63a74`). Same dual-slot selective vectors,
-128 MiB cleanup range and TTBR0 restore as the passed images; 37 tools tests
-pass. Reaching this BRK would prove `kernel_startup_initialize_upto(16)`,
-`PE_init_iokit`, `spllo()` and `initialize_screen` returned. It does **not**
-by itself prove a timer IRQ was delivered: the scheduler tick interval is
-125 ms (`SCHED_TICK_SHIFT=3`), while the code between `spllo()` and this
-checkpoint may be shorter. A separate tick probe is still needed.
+128 MiB cleanup range and TTBR0 restore as the passed images.
+
+Same-boot `spllo-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aaf9ec`, x0
+`fffffe0007c57408`. Thus `kernel_startup_initialize_upto` through
+`STARTUP_SUB_EARLY_BOOT` (16), `PE_init_iokit`, `spllo()` and
+`initialize_screen` returned with interrupts enabled. The device returned to
+Recovery about 30 s after `adb reboot recovery`; predicted written-partition
+SHA256 `8ac9faaa...` matched the full readback, and the complete original was
+written back and verified as `2931647a...`.
+
+This still does **not** prove a timer IRQ was delivered: the scheduler tick
+interval is 125 ms (`SCHED_TICK_SHIFT=3`), and the code between `spllo()` and
+this checkpoint may be shorter. A dedicated tick probe (busy-wait with
+interrupts enabled, then read `sched_tick`, which only increments in the
+scheduler maintenance continuation) is the next step.
 
 **Completed: bootstrap-thread checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
