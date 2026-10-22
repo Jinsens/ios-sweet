@@ -1,6 +1,6 @@
 # Redmi K50 Pro：XNU 实机进展与 iOS 启动路线
 
-更新：2026-10-23，完成调度器启动、定时 IRQ、lockdown 与单 CPU kperf 修复，并到达 `bl bsd_init` 调用点。
+更新：2026-10-23，完成调度器启动、定时 IRQ、lockdown、单 CPU kperf 修复，并在实机执行 `bsd_init`、挂载 md0 根、到达 `load_init_program`。PID 1 的可观察输出仍未取得。
 
 **当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`；`vm_mem_bootstrap` 已完整返回，包括 `vm_page_bootstrap`、`zone_bootstrap`、`vm_object_bootstrap`、`vm_map_init`、`kmem_init`（含 KMEM/ZALLOC 启动阶段和 `zone_init`）与 `vm_fault_init`。`sched_init`、task/thread 初始化与 `load_context` 也已实机运行。此后 `idle_thread_create`、`sched_startup`（含首次真正的 `thread_block` 往返）、`thread_daemon_init`、`spllo`、`initialize_screen`、`machine_lockdown`、`PE_lockdown_iokit`、`vm_set_restrictions`、完整 CONFIG_XNUPOST 测试套件与 `kperf_init_early` 均已实机返回；执行已到达 `kernel_bootstrap_thread` 末尾的 `bl bsd_init` 调用点。500 ms CNTVCT 等待期间 `sched_tick` 增加 3，证明定时中断和调度维护线程在正常 XNU 向量下持续运行。`bsd_init` 本身尚未执行，尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
 
@@ -116,10 +116,14 @@
 - **锁定阻塞点：单 CPU 的 `ml_wait_max_cpus()`。** 未修改内核的 `bsd_init` 大跳（`7a5b60b5`）与 XNUPOST-skip（`ce02efbf`）都进入无限重启；`machine_lockdown` 检查点（`f68a28a8`）正常返回，排除 lockdown/relay。NOP-kperf 诊断（`14bef24d`）返回 `pc=fffffe0007aafbe0`，锁定 `kperf_init_early()`。根因是它调用 `ml_wait_max_cpus()`，等待 IOKit CPU 驱动设置 `max_cpus_initialized`；matisse ADT 的 CPU 节点是 `arm,cortex-a510`，而 SweetCPU 只匹配 `qcom,kryo470`，驱动从未实例化。
 - **单 CPU 早返回修复通过。** 临时 payload 把 `ml_wait_max_cpus()` 改成 `mov w0,#1; ret` 后，XNUPOST 与 kperf 都保持启用并到达 `bl bsd_init`（`8783158b`）。正式补丁 `0084-sweet-single-cpu-max-cpus.patch` 在 `machine_info.max_cpus <= 1` 时直接返回；CI `39828405447` 重建内核 `28190f5b…`，实机镜像 `1cd72d23` 在 `pc=fffffe0007aafc00` 返回，端到端验证通过。
 - **恢复。** 两次无限重启都由用户手动进入 fastboot，写 trimmed 原厂前缀，进 Recovery 后写回完整 67,108,864 字节并校验 `2931647a…`。没有残留测试镜像。
+- **RAM disk 根与 `bsd_init` 执行通过。** 用 `research/sweet-init`（16,635 B，`f5de3714…`）生成 payload（`4df6b274…`，ADT `RAMDisk=<0x1024d0000,0x8000>`、`rd=md0`）。带入口断点的 `bsd_init` 检查点（`e6d4bf7e`）返回 `pc=fffffe000776e048 x0=0`，证明带 RAM disk 的 payload 确实进入 `bsd_init`。
+- **两处 30 秒等待。** `IOKitInitializeTime` 在 `0xfffffe00079ad070` 等 RTC 服务 30 秒；`IOFindBSDRoot` 在 `0xfffffe0007a41e70` 等 IOMedia 30 秒，之后才调用 `mdevadd` 创建 md0。两者与诊断 shim 的 31 秒看门狗重叠，造成此前的“无限重启”。跳过等待后，`vfs_mountroot` 返回 `x0=0`，`bsd_utaskbootstrap` 入口（`pc=fffffe000776ee8c`）与 `load_init_program` 入口（`pc=fffffe00077ee118`）均命中。
+- **看门狗是诊断构建行为。** `mkentryprobe.py` 用 `WDT_AUTO_RESET` 重新武装 MT6983 的 31 秒 AP 看门狗；生产 `shim/build.sh` 在入口 `wdt_disable_raw()` 关闭它。生产镜像 `fa6607a8…`（原始等待）与 `236b9828…`（跳过 RTC/IOMedia 等待）启动后不再循环，但屏幕保持黑屏/logo，说明看门狗复位是诊断假象，真实阻塞在 console/用户态可见性。
+- **当前未证明项。** 生产镜像静止且无输出；跳过 `sweet_display_init` 的 `996197e5…` 仍无文字。`load_init_program` 已到达，但 PID 1 是否执行、`/dev/console` 是否阻塞、用户态是否发生异常，仍需通过 XNU msgbuf 或串口证据确认。
 
 ## 3. 如何启动到用户态
 
-**最短路径是先运行 RAM disk 中的最小 PID 1；这一步不需要 UFS、触摸或完整 iOS 根文件系统。** 当前测试 payload 没有 `RAMDisk` 节点，也没有根设备启动参数；放开当前断点并不会自动出现用户态。
+**最短路径是先运行 RAM disk 中的最小 PID 1；这一步不需要 UFS、触摸或完整 iOS 根文件系统。** 当前 payload 已带 `RAMDisk` 与 `rd=md0`，`bsd_init` 和 `vfs_mountroot` 已在实机完成；剩余问题是执行 init 后的可见证据。
 
 预期顺序如下：
 
@@ -150,8 +154,8 @@
 | A：完成 VM（已完成） | zone/object、vm_map、kmem、vm_fault 等 | `vm_mem_bootstrap` 返回后断点命中，未发生更早异常 |
 | B：调度器与 IRQ（已完成） | scheduler、task/thread、上下文切换、`spllo` 与定时中断 | bootstrap thread、`sched_startup`、`thread_daemon_init` 返回；tick 探针 `sched_tick` +3 |
 | C：lockdown 与 bsd_init 前路径（已完成） | `OSKextRemoveKextBootstrap`、`machine_lockdown`、XNUPOST、IOKit lockdown、kperf | 正式 CI 内核 0084 到达 `bl bsd_init`（`pc=fffffe0007aafc00`） |
-| D：bsd_init 与最小根（当前） | 执行 `bsd_init`；用 `mkpayload.py --ramdisk` 打包静态 init，使用 mockfs/md0 | `md0` 注册、根挂载、`load_init_program` 执行 |
-| E：进入 EL0 | 使用现有 `sweet-init.S` 和 `mkinit.py`，验证代码签名、用户栈和系统调用 | 真机输出 PID 1，`open/write/getpid/select` 正常，多个五秒心跳持续运行 |
+| D：bsd_init 与最小根（已完成） | 执行 `bsd_init`；用 `mkpayload.py --ramdisk` 打包静态 init，使用 mockfs/md0 | `md0` 注册、根挂载、`load_init_program` 入口命中（已完成） |
+| E：进入 EL0（进行中） | 使用现有 `sweet-init.S` 和 `mkinit.py`，验证代码签名、用户栈和系统调用 | 真机输出 PID 1，`open/write/getpid/select` 正常，多个五秒心跳持续运行；当前 console 无输出，需先取得 msgbuf/串口证据 |
 
 测试程序路径虽然叫 `/sbin/launchd`，内容是项目自己的静态 init。看到其心跳代表“用户态已跑通”，尚不代表 Apple launchd 或 iOS 已运行。该程序已处理真实 ARM64 对 SP 对齐的要求，不能随意删除这类只在硬件上暴露的修复。
 
@@ -367,6 +371,28 @@ SHA256: b4af6752d90b82a46b814de428f92e1eeabc39073f15dfdf1a44c6bcc68928e8
 | payload max_cpus 修复 | `8783158b` | `fffffe0007aafbe0` |
 | 正式 CI 内核 0084 | `1cd72d23` | `fffffe0007aafc00` |
 
+RAM-disk/bsd_init 检查点（诊断镜像，命中后返回 Recovery）：
+
+| 检查点 | 镜像 SHA256 前缀 | 记录 PC |
+| --- | --- | --- |
+| `bsd_init` 入口 | `e6d4bf7e` | `fffffe000776e048`（x0=0） |
+| `kauth_init` 返回 | `2cd7b8da` | `fffffe000776e0bc` |
+| `kmem_suballoc` 返回 | `1a7591e5` | `fffffe000776e4a4` |
+| `bsd_bufferinit` 返回 | `20ccaae1` | `fffffe000776e4b0` |
+| RTC 绕过后 `vfsinit` 返回 | `dd2ee108` | `fffffe000776e4b8` |
+| `IOKitBSDInit` 返回 | `2f2a4873` | `fffffe000776e558` |
+| `vfs_mountroot` 返回 | `8db80188` | `fffffe000776e63c`（x0=0） |
+| `bsd_utaskbootstrap` 入口 | `59d7ae2f` | `fffffe000776ee8c` |
+| `load_init_program` 入口 | `56b5080e` | `fffffe00077ee118` |
+
+生产镜像（无诊断 relay、看门狗关闭）：
+
+| 镜像 | SHA256 | 结果 |
+| --- | --- | --- |
+| 原始等待 | `fa6607a8` | 静止黑屏/logo，未循环 |
+| 跳过 RTC/IOMedia 等待 | `236b9828` | 静止黑屏/logo，未循环 |
+| 再跳过 `sweet_display_init` | `996197e5` | 仍无文字 |
+
 失败记录（均已恢复，未残留测试镜像）：
 
 - slot-4-only 的 `1787a791`：BRK 走 EL1t slot 0，未返回并循环重启；改为双槽 stub 后通过。
@@ -396,4 +422,4 @@ research/matisse/20261023-sched-startup/
 
 关键提交：`5f3ba55` 选择性诊断向量；`42d6582` EL1t/EL1h 双槽修正；`8ddef0a`、`90c4084` 调度器检查点与通过记录；`3235c74` thread_daemon；`4a930d1` spllo；`d90dcf8` 定时 IRQ；`eaed2c0` lockdown；`8c353e9`、`a798c4c` XNUPOST/kperf 隔离；`6287cb8` 单 CPU max_cpus 实机通过；`b616374` 永久补丁 0084；`5321eae` 最终交接。
 
-本轮结束时设备在 Recovery（root ADB，slot `_a`），`boot_a` 已恢复并校验，没有尚未恢复的测试；未写 `userdata`。RAM disk 最小根和 `bsd_init`/`load_init_program` 检查点已准备好（见上一节），但尚未刷入。下一步是在获得当次确认后刷入无断点的 `entryprobe-el1-ramdisk-init.img`，观察面板上的 `load_init_program`、PID 1 与 5 秒心跳；失败时依次改用两个检查点定位。先拿 EL0 PID 1，再谈 Apple launchd 与桌面。不要直接刷 iOS 根镜像。
+截至本次文档更新，生产测试镜像仍在 `boot_a`，设备静止、等待手动 fastboot 恢复；恢复后应写回完整 67,108,864 字节并校验 `2931647a…`。本轮未写 `userdata`。RAM disk 最小根和 `bsd_init`/`load_init_program` 检查点已准备好（见上一节），但尚未刷入。下一步是在获得当次确认后刷入无断点的 `entryprobe-el1-ramdisk-init.img`，观察面板上的 `load_init_program`、PID 1 与 5 秒心跳；失败时依次改用两个检查点定位。先拿 EL0 PID 1，再谈 Apple launchd 与桌面。不要直接刷 iOS 根镜像。
