@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU reaches pre-VBAR; early-vector relay next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU page-table checkpoint passed; MMU config checkpoint next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
 full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
@@ -73,10 +73,10 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request separate approval for the prepared early-vector
-relay test below. The two completed BRK tests prove entry fetch and execution
-through the first six start_first_cpu instructions. Next isolate boot_args
-loads, stack setup and page-table preparation before MMU configuration.
+**Next concrete action:** request separate approval for the MMU configuration
+checkpoint below. The completed probes now prove hardware execution through
+boot_args loads, stack setup and page-table preparation. Next isolate
+TCR/TTBR/MAIR and TLB/cache setup before the high-VA VBAR switch/MMU enable.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -95,7 +95,7 @@ Commits: `6c9772e` (bounded breakpoint tooling), `1c7dc60` (entry result),
 `286923e` (pre-VBAR result). Exact manifests/logs/readbacks are in the evidence
 directory above. Neither test proves the remaining original initialization.
 
-**Prepared, NOT flashed: early-vector relay + page-table checkpoint**
+**Completed: early-vector relay + page-table checkpoint**
 `shim/out/entryprobe-el1-tables-brk.img`, 26562560 B, SHA256
 `276ffdd70208c8190f46614b6f09893fb3e9d822ec09ed81f1d8b2f5dfcead4d`.
 Payload SHA256 `69f1676576e11b2f5bcac36c49a255c4a5b7fa6d63442c360fe9ee657eca4c06`.
@@ -117,8 +117,26 @@ to common_start, generated vector trampolines and probe fallback ran; original
 SP, SPSel and DTB argument restored at stock Linux entry. This is host-only
 evidence, NOT hardware success. Log `tables-brk-emulation.txt`.
 Predicted written-partition SHA256 `a5c00b3edbc254030c4d962bd6b9ccfb830aea6d1fff7ed443703680091f8ce0`.
-Device remains in Recovery with original full boot_a verified. Await this
-new test's explicit approval before any write.
+**Hardware PASS (explicitly approved):** same-boot `tables-brk-dmesg.txt`
+recorded `stage=87 fault=1 esr=f2005357 far=0 pc=10148e444`. The kernel
+executed boot_args loads, stack changes and page-table initialization up to
+common_start. The relay handled an EL1t exception and returned automatically
+to Recovery. Full 64 MiB original boot_a hash verified after restoration.
+Next prepare a breakpoint before the high-VA VBAR switch at `0x10148e4f8`,
+after TCR/TTBR/MAIR and TLB/cache operations, still before MMU enable.
+
+**Prepared, NOT flashed: MMU configuration checkpoint**
+`shim/out/entryprobe-el1-mmu-config-brk.img`, 26562560 B, SHA256
+`36228bdb46ade73cb03dc5fc628c5cf675b5ac87956398d4c17f08e26c334f51`.
+Payload SHA256 `3f7c78fbc5b7f1ab25a18d88cc3afc4f64f57d61010721fe4fed6aca181d2f58`.
+BRK offset `0x2070` replaces MSR VBAR_EL1 at `0x10148e4f8`, just before
+XNU changes from low physical vectors to its high virtual vectors.
+The same early-vector relay remains enabled. Host execution with modeled
+MMIO/BRK reached `0x10148e4f8`, then returned to stock Linux with original
+SP/SPSel/DTB restored (`mmu-config-brk-emulation.txt`). Real hardware still
+needs this separate test. Predicted partition SHA256
+`d99e68b1110f8b421ecd8bf88a0f6ff0de8872962381de66d391761f22b4ce00`.
+Device remains in restored Recovery; no new write yet.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
