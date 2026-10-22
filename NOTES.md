@@ -1,9 +1,9 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU completes vm_mem_bootstrap on hardware; scheduler next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): selective vectors host-validated; bootstrap-thread attempt failed and device was fully restored <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`vm-return-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`thread-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
@@ -18,8 +18,57 @@ vm_page_bootstrap, zone_bootstrap, vm_object_bootstrap, vm_map_init,
 kmem_init (with the KMEM and ZALLOC startup phases, including zone_init) and
 vm_fault_init have all returned on hardware: the **complete
 vm_mem_bootstrap returned** to kernel_bootstrap. Scheduler/BSD startup,
-userspace and full kernel boot remain unproven.
+userspace and full kernel boot remain unproven. The first selective-vector
+bootstrap-thread attempt did not return and was fully restored; see the
+failed-attempt block below.
 These checkpoints alone do not verify visible panel refresh.
+
+**Failed hardware attempt: bootstrap-thread checkpoint; full restore verified.**
+`shim/out/entryprobe-el1-thread-brk.img`, 26,562,560 B, SHA256
+`1787a79128f3eb39edabcbdbadbc0fd56ab44203806f5835f7685ac6151f0dcc`.
+Payload SHA256 `3b44b2bf052a865074a19b51ad0b447e0f5552f2b5cda370233fc2ef75d08d06`.
+BRK offset `0x6232c4` at VA `0xfffffe0007aaf74c` / PA `0x101aaf74c`, after
+`current_processor` returns inside `kernel_bootstrap_thread`. Selective
+vectors; cleanup range stayed `[0x100000000, 0x108000000)` (128 MiB).
+Expected record: `pc=fffffe0007aaf74c`.
+
+The device did not return to Recovery within 45 s and entered a reboot loop;
+no SWEET-ENTRY record was captured. The user entered fastboot manually. The
+20,873,216-byte trimmed stock prefix was flashed (fastboot printed pipe
+errors, but `Sending` and `Writing` both returned OKAY), and
+`fastboot reboot recovery` reported "Command failed" yet the device booted
+Recovery. The complete original 67,108,864-byte boot_a was then written and
+read back; SHA256 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`
+verified. The device is in Recovery. Evidence: `thread-brk-restore.log` and
+`thread-brk-restored.img`.
+
+The cause is **not established**. There is no Linux dmesg because Recovery
+never ran from the test image. Three possibilities to separate next, not
+conclusions: the selective vector path is not yet hardware-proven; the new
+thread stack/per-CPU dirty pages may lie outside the 128 MiB clean range;
+or the kernel hung/panicked before the BRK. This attempt does not prove the
+bootstrap-thread checkpoint is unreachable.
+
+**Selective diagnostic vectors (host-validated, NOT hardware-tested).**
+- Only the EL1h synchronous slot (4) is redirected; IRQ/FIQ/SError and EL0
+  synchronous slots keep XNU's original handlers. Non-BRK exceptions are
+  forwarded through a runtime-patched direct B, so no guest GPR is changed.
+- The diagnostic relay body is copied to unused AArch32 slots 12/13.
+- 23 tool tests pass. `selective-stub-microtest.txt` proves forward with
+  registers preserved, the diagnostic brk path and forwarding of other BRK
+  immediates. The selective vm-return image `4d67b49b...` passes the full
+  diagnostic path, 128 MiB cleanup, bootstrap-TTBR0 restore and Linux return
+  in the model (`vm-return-sel-emulation.txt`).
+- Commit `5f3ba55` (implementation; also contains the pre-existing untested
+  mkentryprobe xnu-level edits).
+
+**Prepared fallback: sched_init checkpoint (not tested).**
+`shim/out/entryprobe-el1-sched-init-brk.img`, 26,562,560 B, SHA256
+`e7fe406e766be3e4070e06149c363f4820781602b09e14d7b7caf4e8c1e09f1f`,
+selective vectors, BRK offset `-0x127dec` at VA `0xfffffe000736469c` after
+`sched_init` returns. Host emulation has not been run. Use it to separate the
+vector mechanism from the thread context switch before retrying the thread
+checkpoint.
 
 **Completed: full vm_mem_bootstrap return (hardware PASS).**
 `shim/out/entryprobe-el1-vm-return-brk.img`, 26,562,560 B, SHA256
@@ -161,15 +210,18 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** before any scheduler/thread checkpoint, replace or
-selectively extend the diagnostic vectors so normal XNU IRQ, SVC and
-page-fault entries work. The current relay occupies vector slots and is
-only safe while DAIF stays masked. Then prepare a checkpoint at the first
-scheduler/bootstrap-thread boundary with a fresh allocation/cache-range
-review. The rest of kernel_bootstrap, bsd_init and userspace remain
-untested. The full-return image `99d68ed6` passed and was fully restored;
-zone/object `e4231b90` and post-vm_page `e9b81b88` likewise passed (commit
-`490c41f`). No device test is currently authorized.
+**Next concrete action:** hardware-test the selective vector mechanism on
+the already-proven vm-return checkpoint first:
+`shim/out/entryprobe-el1-vm-return-sel.img`, 26,562,560 B, SHA256
+`4d67b49bd7af34a659a4d34f1c516dd269684f2160136decf7c8a90a7918f9ea`,
+expected `pc=fffffe00073644d8`, x0 `fffffe00080bbbc0`. If it returns, test
+the sched_init image `e7fe406e` next. Retry the bootstrap-thread image only
+after measuring the new thread stack/per-CPU dirty physical range; the
+128 MiB range was not validated for them. The rest of kernel_bootstrap,
+bsd_init and userspace remain untested. The full-return image `99d68ed6`
+passed and was fully restored; zone/object `e4231b90` and post-vm_page
+`e9b81b88` likewise passed (commit `490c41f`). No device test is currently
+authorized.
 The requested standalone Chinese report is
 [docs/matisse-xnu-ios-roadmap-zh.md](docs/matisse-xnu-ios-roadmap-zh.md):
 complete progress, minimal userspace, real iOS, UFS, touch, USB and acceptance

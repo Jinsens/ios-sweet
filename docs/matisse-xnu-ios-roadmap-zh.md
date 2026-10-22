@@ -1,10 +1,10 @@
 # Redmi K50 Pro：XNU 实机进展与 iOS 启动路线
 
-更新：2026-10-23，完成本轮 `vm-return-brk` 实机测试后。
+更新：2026-10-23，完成选择性诊断向量实现、bootstrap-thread 实机尝试失败与完整恢复后。
 
-**当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`；`vm_mem_bootstrap` 已完整返回，包括 `vm_page_bootstrap`、`zone_bootstrap`、`vm_object_bootstrap`、`vm_map_init`、`kmem_init`（含 KMEM/ZALLOC 启动阶段和 `zone_init`）与 `vm_fault_init`。尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
+**当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`；`vm_mem_bootstrap` 已完整返回，包括 `vm_page_bootstrap`、`zone_bootstrap`、`vm_object_bootstrap`、`vm_map_init`、`kmem_init`（含 KMEM/ZALLOC 启动阶段和 `zone_init`）与 `vm_fault_init`。选择性诊断向量已实现并在主机模型中通过，但尚未实机验证；第一次 bootstrap-thread 检查点尝试未返回，设备已完整恢复，调度器/线程阶段仍未取得实机证据。尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
 
-本轮设备自动返回 Recovery；原始 `boot_a` 的全部 67,108,864 字节已恢复并读回校验。本轮没有写入 `userdata`。详细逐次记录以 [NOTES.md](../NOTES.md) 顶部 ACTIVE 区为准，下面历史记录可能代表已经被后续证据替代的判断。
+本轮设备**未自动返回 Recovery**：bootstrap-thread 尝试后进入循环重启，用户手动进入 fastboot，用 20,873,216 字节的 trimmed 原厂前缀恢复，再写回完整 `boot_a` 并读回校验。原始 67,108,864 字节已完整恢复。本轮没有写入 `userdata`。详细逐次记录以 [NOTES.md](../NOTES.md) 顶部 ACTIVE 区为准，下面历史记录可能代表已经被后续证据替代的判断。
 
 ## 1. 项目是什么，哪些成果可以复用
 
@@ -82,8 +82,13 @@
 - 在返回 Linux 前显式清理 XNU 写过的缓存区域；最近一轮范围为物理地址 `[0x100000000, 0x108000000)`，共 128 MiB。
 - XNU 清空 TTBR0 后，仅在异常回传时恢复 bootstrap TTBR0，保持原始初始化流程照常执行。
 - 单独记录 x0，以区别函数“返回了”和“返回成功”。
+- **选择性诊断向量（本轮新增）**：只把 EL1h 同步槽（slot 4）替换为 stub；stub 检查 `ESR_EL1` 是否为 `BRK #0x5357`，是则进入原诊断回传路径，否则通过安装时打补丁的直接 `B` 转交 XNU 原同步处理器。转发路径保存并恢复 x16/x17，不改变任何通用寄存器。诊断 relay 复制到 arm64 用户态不使用的 AArch32 slot 12/13；IRQ、FIQ、SError 和 EL0 同步槽全部保持 XNU 原样。这样正常中断、SVC 和缺页异常不再被探针占用。
 
-主机验证包括 36 项工具测试、交叉编译，以及使用真实指令和实际生成页表的 Unicorn 模型。模型显式模拟 16K 地址转换、部分 MMIO、计数器、GIC 和异常入口；它不证明真实 cache coherence、IRQ 持续投递或硬件时序。仓库全量检查此前还有六个已有 CRLF shell 问题，不能声称全仓检查已通过。
+主机验证包括本轮运行的 23 项工具测试、选择性 stub 微测试、交叉编译，以及使用真实指令和实际生成页表的 Unicorn 模型。选择性镜像的诊断路径、128 MiB 清理、bootstrap TTBR0 恢复和返回 Linux 已在模型中端到端通过；选择性向量的**转发路径只在微测试中验证**，尚未在完整引导中触发真实 IRQ/缺页。模型显式模拟 16K 地址转换、部分 MMIO、计数器、GIC 和异常入口；它不证明真实 cache coherence、IRQ 持续投递或硬件时序。仓库全量检查此前还有六个已有 CRLF shell 问题，不能声称全仓检查已通过。
+
+### 2.4 本轮 bootstrap-thread 尝试与恢复
+
+镜像 `shim/out/entryprobe-el1-thread-brk.img`（26,562,560 bytes，SHA256 `1787a791…1f0dcc`）在 `kernel_bootstrap_thread` 的 `current_processor` 返回后设置断点（VA `0xfffffe0007aaf74c`），使用选择性向量和 128 MiB 清理范围。设备未在 45 秒内返回 Recovery，随后进入循环重启，**没有取得 SWEET-ENTRY 记录**，因此无法判断是未到达断点、诊断回传失败，还是线程栈/percpu 的高物理地址写入落在清理范围之外。用户手动进入 fastboot 后，先写回 trimmed 原厂前缀（fastboot 打印管道错误，但 Sending/Writing 均为 OKAY），设备进入 Recovery，再写回完整 67,108,864 字节并校验 SHA256 `2931647a…af86b1`。该结果不支持任何根因结论，也不能证明 bootstrap-thread 不可达。下一轮应先单独实机验证选择性向量，再用 `sched_init` 检查点逐步推进。
 
 ## 3. 如何启动到用户态
 
@@ -238,7 +243,7 @@ USB 日志能显著减少后续对屏幕和断点回传的依赖；可以在正�
 | 优先级 | 下一项 | 完成标志 |
 | --- | --- | --- |
 | 1 | zone/object 及完整 VM bootstrap（已完成） | 实机到达完整 `vm_mem_bootstrap` 返回 |
-| 2 | 正常异常向量、调度器、计时器/IRQ、内核线程（当前优先级最高） | 线程与定时中断持续运行 |
+| 2 | 选择性向量已实现（主机通过）；先实机验证向量，再推进调度器/计时器/IRQ/内核线程（当前优先级最高） | 向量验证通过；线程与定时中断持续运行 |
 | 3 | RAM disk 最小用户态 | PID 1 多次心跳，系统调用可重复 |
 | 4 | 稳定屏幕日志或 MTU3 最小 USB 日志 | 能连续观察真实内核故障，不依赖仅显示 logo |
 | 5 | MTK UFS 只读、受控写入与根镜像 | 块数据校验、文件系统验证通过 |
@@ -266,13 +271,25 @@ USB 日志能显著减少后续对屏幕和断点回传的依赖；可以在正�
 kernel: xnu/out/ci-39640336293/kernel.development.sweet
 SHA256: bc308789486ee96b380ce374bc7fe4c1894f4a115da9662b4cb0cf9a016b543c
 
-本轮镜像: shim/out/entryprobe-el1-vm-return-brk.img
+本轮尝试镜像（未返回）: shim/out/entryprobe-el1-thread-brk.img
 大小: 26,562,560 bytes
-SHA256: 99d68ed6d5c870070a116e223b7ba29bd76b1e619c34e444f05146c92b1106fa
+SHA256: 1787a79128f3eb39edabcbdbadbc0fd56ab44203806f5835f7685ac6151f0dcc
+断点: VA fffffe0007aaf74c（kernel_bootstrap_thread，current_processor 返回后）
+同次启动记录: 无（设备未启动到 Linux，进入循环重启）
 
-同次启动记录:
-stage=87 fault=1 esr=f2005357 far=0 pc=fffffe00073644d8
-x0=fffffe00080bbbc0（与主机模型预测一致；不是成功/失败返回码）
+选择性向量验证镜像（主机端到端通过，未实机）:
+shim/out/entryprobe-el1-vm-return-sel.img
+SHA256: 4d67b49bd7af34a659a4d34f1c516dd269684f2160136decf7c8a90a7918f9ea
+断点: VA fffffe00073644d8（vm_mem_bootstrap 返回后）
+
+预备回退镜像（未实机）:
+shim/out/entryprobe-el1-sched-init-brk.img
+SHA256: e7fe406e766be3e4070e06149c363f4820781602b09e14d7b7caf4e8c1e09f1f
+断点: VA fffffe000736469c（sched_init 返回后）
+
+本轮恢复过程:
+用户手动进入 fastboot -> 写入 backup/boot_a-stock-trim.img（20,873,216 bytes，
+Sending/Writing 均 OKAY）-> 进入 Recovery -> 写回完整备份并读回。
 
 已验证的完整恢复备份:
 backup/recovery-20261021/boot_a-live-20261021.img
@@ -281,16 +298,15 @@ SHA256: 2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1
 
 证据目录（gitignored）:
 research/matisse/20261022-xnu-resume/
-  vm-return-brk-manifest.json
-  vm-return-brk-dmesg.txt
-  vm-return-brk-restored.img
-  vm-return-brk-emulation.txt
-  touch-driver-binding.txt
-  vm-retire-boot-pages-disassembly.txt
+  thread-brk-build.json
+  thread-brk-payload.json
+  thread-brk-restore.log
+  thread-brk-restored.img
+  vm-return-sel-emulation.txt
+  selective-stub-microtest.txt
+  sched-init-brk-build.json
 ```
 
-关键提交：`f1b6d14` 为 TTBR0 恢复回传；`e24a92c` 为 x0 记录；`cfb5e8c` 为 CPU/GIC 实测记录；`490c41f` 为物理页初始化通过和完整恢复记录；`1e233f4` 为 zone/object 检查点准备；`3d638e1` 为完整 VM bootstrap 返回检查点准备。
+关键提交：`f1b6d14` 为 TTBR0 恢复回传；`e24a92c` 为 x0 记录；`cfb5e8c` 为 CPU/GIC 实测记录；`490c41f` 为物理页初始化通过和完整恢复记录；`1e233f4` 为 zone/object 检查点准备；`3d638e1` 为完整 VM bootstrap 返回检查点准备；`5f3ba55` 为选择性诊断向量实现。
 
-本轮结束时没有尚未恢复的测试。完整 `vm_mem_bootstrap` 返回已在实机通过并完整恢复；主机模型同时确认真实写入物理地址最高 `0x1039e3fff`，128 MiB 清理范围足够，bootstrap 恒等映射在该范围内完整，而 `0x22e000000` 已不再映射，不能无证据扩大清理范围。
-
-下一步不能直接带着当前诊断向量进入调度器：必须先把正常 XNU IRQ、SVC 和缺页异常入口恢复或做成只拦截指定 BRK 的选择性机制，并确认 DAIF 开放后中断持续投递。不要直接刷 iOS 根镜像。
+本轮结束时没有尚未恢复的测试。完整 `vm_mem_bootstrap` 返回仍是目前最后一个实机里程碑；bootstrap-thread 尝试失败且根因未定。下一步先用选择性镜像 `4d67b49b` 在已验证的 vm-return 断点上实机验证向量机制，再测 `sched_init` 镜像 `e7fe406e`；重试 thread 前必须测量线程栈/percpu 的脏页物理范围。不要直接刷 iOS 根镜像。
