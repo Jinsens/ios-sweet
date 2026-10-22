@@ -97,6 +97,41 @@ leave a test image in `boot_a`.
 
 **Docs:** `docs/matisse-xnu-ios-roadmap-zh.md` updated on 2026-10-23 with the scheduler, timer-IRQ, lockdown, kperf and `bsd_init` results.
 
+**ACTIVE: bsd_init bisection found two 30 s waits (2026-10-23).**
+Checkpoints after `kauth_init`, `kmem_suballoc`, `bsd_bufferinit`, and
+(once the waits were patched) `vfsinit`, `IOKitBSDInit`, `vfs_mountroot`
+(x0=0), `bsd_utaskbootstrap`, and `load_init_program` all returned. The two
+blockers were `IOKitInitializeTime` waiting 30 s for an RTC service at
+`0xfffffe00079ad070`, and `IOFindBSDRoot` waiting 30 s for IOMedia at
+`0xfffffe0007a41e70` before `mdevadd` creates md0. The hardware watchdog
+resets at ~30 s, so both waits look like a boot loop. Diagnostic payloads skip
+both (`nop waitForService`, `mov x0,xzr` + `b` over the timeout sleep) and
+reach `load_init_program` (`pc=fffffe00077ee118`). A checkpoint at the first
+`load_init_program_at_path` return (`0x77ee214`) did not hit, so exec likely
+succeeded; `tools/sweet-init.S` then hangs forever if `open("/dev/console")`
+fails, which also triggers the watchdog. Built `research/sweet-init-diag`
+(SHA256 `2917403c...`) that falls back to fd 1 and never spins, payload
+`shim/out/matisse-xnu-0084-diaginit-rtcfast.payload` (`fdef6e15...`) and image
+`entryprobe-el1-diaginit-rtcfast.img` (`4f0376b3...`), not yet booted.
+
+**ACTIVE: RAM-disk bsd_init diagnostics (2026-10-23).** Built
+`research/sweet-init` (16,635 B, SHA256 `f5de3714...`), payload
+`shim/out/matisse-xnu-0084-ramdisk.payload` (SHA256 `4df6b274...`, ADT
+`RAMDisk=<0x1024d0000,0x8000>`, cmdline `rd=md0`), and a no-BRK image
+`entryprobe-el1-ramdisk.img` (`b337bfbf...`). Hardware: no-BRK boot loops with
+`aee_aed.pureason=Watchdog`, so `bsd_init` hangs, not panics. `bsd_init` entry
+checkpoint `entryprobe-el1-bsd-entry-ramdisk-brk.img` (`e6d4bf7e...`) returned
+`pc=fffffe000776e048 x0=0`, proving the RAM-disk payload enters `bsd_init`.
+Checkpoints at `bsd_utaskbootstrap` entry (`679fa200...`), `IOFindBSDRoot`
+return (`0f1be906...`), and a no-wait variant (`060d436c...`) all looped.
+Disassembly: `IOFindBSDRoot` calls `IOService::waitForMatchingService` with a
+30 s timeout before `mdevadd` (which prints "Added memory device md0"); the
+watchdog resets around the same time. Next diagnostic:
+`entryprobe-el1-fastroot-ramdisk-brk.img` (`7ee792f1...`) patches the wait to
+return 0 and replaces the timeout `cbz` with `b 0x...1ed0`, then BRKs after
+`IOFindBSDRoot`; expected to reach `mdevadd`/return x0. Device is currently in
+the no-wait loop; waiting for manual fastboot to restore full `boot_a`.
+
 **Next:** execute `bsd_init` itself with a RAM-disk root (prepared, NOT
 flashed). Host-only build on 2026-10-23 reused CI kernel 39828405447
 (`28190f5b...`, patch 0084), `shim/out/matisse.adt` and the static init
