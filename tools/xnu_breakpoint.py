@@ -71,9 +71,10 @@ def high_vector_sync_va(payload, offset):
     and preserves.
     """
     at, va, _ = payload_location(payload, offset, 2048)
-    insn, = struct.unpack_from('<I', payload, at + 4 * 128)
-    if insn & 0xfc000000 != 0x14000000:
-        raise ValueError('selective vectors require a branch in the EL1h synchronous slot')
+    for slot in (0, 4):
+        insn, = struct.unpack_from('<I', payload, at + slot * 128)
+        if insn & 0xfc000000 != 0x14000000:
+            raise ValueError('selective vectors require a branch in both synchronous slots')
     return va
 
 

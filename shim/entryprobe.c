@@ -47,37 +47,46 @@ void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 	}
 #endif
 #if defined(ENTRY_XNU_HIGH_VECTOR_PA) && defined(ENTRY_XNU_SELECTIVE)
-	/* Keep every normal XNU vector. Only the EL1h synchronous slot gets a
-	 * stub that handles our BRK and forwards all other exceptions to the
-	 * original handler. The relay body is copied to slot 12 (AArch32 EL0
-	 * sync), which arm64 userspace never uses. */
+	/* Keep every normal XNU vector. The EL1t and EL1h synchronous slots
+	 * both get a stub: XNU normally runs with SPSel=0 (EL1t), while some
+	 * paths use SP_EL1, and the diagnostic BRK must be caught either way.
+	 * All other exceptions forward to the original handlers. The relay
+	 * body is copied to slot 12 (AArch32 EL0 sync), unused by arm64
+	 * userspace. */
 	extern const uint32_t probe_sel_stub[], probe_sel_stub_end[];
-	extern const uint32_t probe_sel_forward[];
+	extern const uint32_t probe_sel_forward[], probe_sel_relay_branch[];
 	extern const uint32_t probe_mmu_vector[], probe_mmu_identity[], probe_mmu_physical[];
 	extern const uint32_t probe_mmu_recorder[], probe_mmu_literals_end[];
 	extern const unsigned char probe_vectors[];
 	uintptr_t hv = ENTRY_XNU_HIGH_VECTOR_PA;
-	uintptr_t slot4 = hv + 4 * 128;
-	uint32_t insn = *(volatile uint32_t *)slot4;
-	if ((insn & 0xfc000000) == 0x14000000) {
-		/* Decode the original B target in virtual-address space and patch
-		 * the stub's own B. A direct branch preserves every guest GPR on
-		 * the forward path; a br through x16 would corrupt the
-		 * interrupted context. */
-		int64_t off = ((int64_t)(insn & 0x03ffffff) << 38) >> 36;
-		uint64_t target = ENTRY_XNU_HIGH_VECTOR_VA + 4 * 128 + (uint64_t)off;
-		uintptr_t fwd_off = (uintptr_t)probe_sel_forward - (uintptr_t)probe_sel_stub;
-		uintptr_t fwd = slot4 + fwd_off;
-		uint64_t fwd_va = ENTRY_XNU_HIGH_VECTOR_VA + 4 * 128 + fwd_off;
-		int64_t delta = (int64_t)target - (int64_t)fwd_va;
-		if ((delta & 3) == 0 && delta >= -(1 << 27) && delta < (1 << 27)) {
-			unsigned words = ((uintptr_t)probe_sel_stub_end - (uintptr_t)probe_sel_stub) / 4;
-			for (unsigned i = 0; i < words; i++)
-				((volatile uint32_t *)slot4)[i] = probe_sel_stub[i];
-			*(volatile uint32_t *)fwd = 0x14000000u | (((uint32_t)(delta >> 2)) & 0x03ffffffu);
-		}
-	}
 	uintptr_t relay = hv + 12 * 128;
+	uint64_t relay_va = ENTRY_XNU_HIGH_VECTOR_VA + 12 * 128;
+	uintptr_t fwd_off = (uintptr_t)probe_sel_forward - (uintptr_t)probe_sel_stub;
+	uintptr_t relay_off = (uintptr_t)probe_sel_relay_branch - (uintptr_t)probe_sel_stub;
+	unsigned stub_words = ((uintptr_t)probe_sel_stub_end - (uintptr_t)probe_sel_stub) / 4;
+	for (unsigned slot_index = 0; slot_index <= 4; slot_index += 4) {
+		uintptr_t slot = hv + slot_index * 128;
+		uint64_t slot_va = ENTRY_XNU_HIGH_VECTOR_VA + slot_index * 128;
+		uint32_t insn = *(volatile uint32_t *)slot;
+		if ((insn & 0xfc000000) != 0x14000000)
+			continue;
+		/* Decode the original B target in virtual-address space. Both
+		 * stub branches are direct Bs patched here: a br through a GPR
+		 * would corrupt the interrupted context on the forward path. */
+		int64_t off = ((int64_t)(insn & 0x03ffffff) << 38) >> 36;
+		int64_t delta = (int64_t)(slot_va + (uint64_t)off) -
+		    (int64_t)(slot_va + fwd_off);
+		int64_t relay_delta = (int64_t)relay_va - (int64_t)(slot_va + relay_off);
+		if ((delta & 3) || delta < -(1 << 27) || delta >= (1 << 27) ||
+		    (relay_delta & 3) || relay_delta < -(1 << 27) || relay_delta >= (1 << 27))
+			continue;
+		for (unsigned i = 0; i < stub_words; i++)
+			((volatile uint32_t *)slot)[i] = probe_sel_stub[i];
+		*(volatile uint32_t *)(slot + fwd_off) =
+		    0x14000000u | (((uint32_t)(delta >> 2)) & 0x03ffffffu);
+		*(volatile uint32_t *)(slot + relay_off) =
+		    0x14000000u | (((uint32_t)(relay_delta >> 2)) & 0x03ffffffu);
+	}
 	unsigned rwords = ((uintptr_t)probe_mmu_literals_end - (uintptr_t)probe_mmu_vector) / 4;
 	for (unsigned i = 0; i < rwords; i++)
 		((volatile uint32_t *)relay)[i] = probe_mmu_vector[i];

@@ -488,7 +488,7 @@ probe_mmu_vector_end:
 	 * bytes after slot 4). Slots 12/13 are AArch32 EL0 vectors, unused by
 	 * the arm64 iOS userspace this probe targets. */
 	.balign 16
-	.globl probe_sel_stub, probe_sel_stub_end, probe_sel_forward
+	.globl probe_sel_stub, probe_sel_stub_end, probe_sel_forward, probe_sel_relay_branch
 probe_sel_stub:
 	stp	x16, x17, [sp, #-16]!
 	mrs	x16, esr_el1
@@ -501,15 +501,15 @@ probe_sel_stub:
 	b.ne	1f
 	ldp	x16, x17, [sp], #16
 	mov	x13, #0
-	b	probe_sel_relay
+	.globl probe_sel_relay_branch
+probe_sel_relay_branch:
+	b	.			/* patched to the slot-12 relay at install */
 1:
 	ldp	x16, x17, [sp], #16
 	.globl probe_sel_forward
 probe_sel_forward:
 	b	.			/* patched to the original handler at install */
 probe_sel_stub_end:
-	/* The stub is copied to vector slot 4; slot 12 is 0x400 bytes on. */
-	.set probe_sel_relay, probe_sel_stub + 0x400
 #endif
 #endif
 
