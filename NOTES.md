@@ -1,14 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU final-table construction passed; TTBR1 switch next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU formal TTBR1 switch passed; TTBR0 teardown next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`final-tables-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`ttbr1-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
-construction inside arm_vm_init is hardware-proven. The first switch to those
-tables, later VM initialization and full kernel boot remain unproven.
+construction and the first switch to those tables inside arm_vm_init are
+hardware-proven. TTBR0 teardown, later VM initialization and full kernel boot
+remain unproven.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
 Each test below had explicit user approval including restoration. This LK
@@ -76,10 +77,10 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request separate approval for prepared TTBR1-switch
-image `e9fbcb81` below, then run the approved probe/restoration script once.
-Expected `pc=fffffe0007483ddc esr=f2005357 fault=1`. Existing fallback cannot
-be used after set_mmu_ttb clears TTBR0 at `0xfffffe0007483df8`.
+**Next concrete action:** extend and validate diagnostic fallback to restore
+the bootstrap identity TTBR0 only on exception, before preparing a checkpoint
+after set_mmu_ttb clears TTBR0 at `0xfffffe0007483df8`. The current relay must
+not be reused beyond this boundary. A new hardware test needs new approval.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -257,7 +258,7 @@ Recovery return and the complete 64 MiB original boot_a hash were verified
 Pre-VM milestone commit `21fecbe`; bounded cleanup tooling `cb96eaa`.
 No new kernel CI run; the tested kernel remains run `39640336293` / `dd9752e`.
 
-**Prepared, NOT flashed: first formal TTBR1 switch checkpoint**
+**Completed: first formal TTBR1 switch checkpoint**
 `shim/out/entryprobe-el1-ttbr1-brk.img`, 26,562,560 B, SHA256
 `e9fbcb8119f7a0ca1153306dab5bb0d015b15c34f1f803ada5df3bf0ae072cf2`.
 Payload `shim/out/matisse-xnu-ttbr1-brk.payload` SHA256
@@ -280,7 +281,13 @@ SPSel/DTB are restored. Unicorn's fixed stop address itself triggered an
 unmapped-address lookup on a TLB flush; using a Linux-entry execution hook
 avoids that host-only issue. MMIO, translation, AT/PAR and exception entry
 remain modeled, so this is NOT a hardware result. No tracked source changes
-or new kernel CI were needed. Final-table hardware result commit `780b9c5`.
+or new kernel CI were needed. Final-table hardware result commit `780b9c5`;
+TTBR1 preparation `2c5355f`.
+**Hardware PASS (explicitly approved):** same-boot `ttbr1-brk-dmesg.txt`
+records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007483ddc`.
+The original set_mmu_ttb_alternate executed and returned with the formal
+TTBR1 installed. Automatic Recovery return and complete original 64 MiB
+boot_a restoration/hash were verified (`ttbr1-brk-manifest.json`).
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
