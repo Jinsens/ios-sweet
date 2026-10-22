@@ -134,7 +134,8 @@ def prepare(template, level=None):
 
 
 def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None,
-          xnu_vector_offset=None, xnu_high_vector_offset=None, xnu_clean=False):
+          xnu_vector_offset=None, xnu_high_vector_offset=None, xnu_clean=False,
+          xnu_clean_limit=None):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
@@ -155,7 +156,9 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
     if xnu_clean:
         if high_pa is None:
             raise ValueError('cache cleanup requires the high-vector relay')
-        clean_range = bootstrap_clean_range(payload)
+        clean_range = bootstrap_clean_range(payload, xnu_clean_limit)
+    elif xnu_clean_limit is not None:
+        raise ValueError('cache-clean limit requires --xnu-clean')
     payload_offset = None
     if payload is not None:
         if len(payload) < 0x2a8 or payload[:8] != b'SWEETXNU':
@@ -299,13 +302,15 @@ def main():
                     help='diagnostic: relay high vectors via an identity alias immediately after MMU enable')
     ap.add_argument('--xnu-clean', action='store_true',
                     help='clean kernel/ADT/boot_args caches before returning from early C; bootstrap map required')
+    ap.add_argument('--xnu-clean-limit', type=lambda s: int(s, 0),
+                    help='diagnostic: extend cleanup to this page-aligned physical end to cover early VM allocations')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
     a = ap.parse_args()
     try:
         build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload,
-              a.xnu_vector_offset, a.xnu_high_vector_offset, a.xnu_clean)
+              a.xnu_vector_offset, a.xnu_high_vector_offset, a.xnu_clean, a.xnu_clean_limit)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

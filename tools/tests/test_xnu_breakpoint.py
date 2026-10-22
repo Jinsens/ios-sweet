@@ -32,10 +32,15 @@ class BreakpointTests(unittest.TestCase):
         self.assertEqual(patched[0x30c:], original[0x30c:])
         self.assertEqual(len(patched), len(original))
 
-    def test_refuse_zero_fill_unaligned_and_negative(self):
-        for offset in (0x20, 2, -4):
+    def test_refuse_zero_fill_unaligned_and_outside_segment(self):
+        for offset in (0x20, 2, -8):
             with self.subTest(offset=offset), self.assertRaises(ValueError):
                 insert_breakpoint(payload(), offset)
+
+    def test_negative_offset_can_select_code_before_entry(self):
+        patched, manifest = insert_breakpoint(payload(), -4)
+        self.assertEqual(manifest['target_pa'], '0x100001000')
+        self.assertEqual(struct.unpack_from('<I', patched, 0x300)[0], 0xd42a6ae0)
 
     def test_refuse_bad_table_and_truncated_data(self):
         for field, value in ((12, 100), (0x2a8 + 16, 0x3f8), (0x2a8 + 24, 0x200)):
@@ -73,6 +78,10 @@ class BreakpointTests(unittest.TestCase):
 
     def test_bootstrap_clean_range_includes_adt_alignment_and_boot_args(self):
         self.assertEqual(bootstrap_clean_range(payload()), (0x100000000, 0x10000c000))
+        self.assertEqual(bootstrap_clean_range(payload(), 0x104000000), (0x100000000, 0x104000000))
+        for limit in (0x100008000, 0x110004000, 0x104000001):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                bootstrap_clean_range(payload(), limit)
         source = bytearray(payload())
         struct.pack_into('<Q', source, 64, 0x8000)
         with self.assertRaisesRegex(ValueError, 'range'):

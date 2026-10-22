@@ -63,7 +63,7 @@ def high_vector_pa(payload, offset):
     return pa
 
 
-def bootstrap_clean_range(payload):
+def bootstrap_clean_range(payload, clean_limit=None):
     # Same layout as loader.c: kernel, ADT, then one 16K boot_args page.
     payload_location(payload)
     virt, _, _, adt_size, kernel_end, phys, size = struct.unpack_from('<7Q', payload, 16)
@@ -71,12 +71,14 @@ def bootstrap_clean_range(payload):
     end = ((adt_pa + adt_size + 0x3fff) & ~0x3fff) + 0x4000
     if kernel_end < virt or phys & 0x3fff or not phys < end <= phys + size or end > 1 << 48:
         raise ValueError('invalid bootstrap cache-clean range')
+    if clean_limit is not None:
+        if clean_limit & 0x3fff or not end <= clean_limit <= phys + size or clean_limit > 1 << 48:
+            raise ValueError('cache-clean limit must cover bootstrap data and stay in managed RAM')
+        end = clean_limit
     return phys, end
 
 
 def insert_breakpoint(payload, offset=0):
-    if offset < 0:
-        raise ValueError('breakpoint offset must be nonnegative')
     at, target, pa = payload_location(payload, offset)
     original, = struct.unpack_from('<I', payload, at)
     instruction = 0xd4200000 | (0x5357 << 5)  # BRK #0x5357

@@ -73,9 +73,9 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** obtain separate approval for pre-VM test `25d5d260`
-below. Hardware has passed early C at `0xfffffe0007ad58b0`. Next determine
-whether platform/CPU/timer/bootstrap startup reaches the arm_vm_init call.
+**Next concrete action:** obtain separate approval for final-table test
+`340b9628` below. Hardware has passed all pre-VM initialization. Next isolate
+arm_vm_init's table construction before switching TTBR1 to those tables.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -223,6 +223,29 @@ early startup reached arm_vm_init. Automatic Recovery return and full
 64 MiB original boot_a hash verified. Early-C result commit `ec4d84f`.
 Next: stop just before the first TTBR1 switch inside arm_vm_init; expand
 cache cleanup to cover newly allocated page tables.
+
+**Prepared, NOT flashed: final-table construction checkpoint**
+`shim/out/entryprobe-el1-final-tables-brk.img`, 26562560 B, SHA256
+`340b962813b4bc3cd6cf699525c5003b7643087becc3915dba0390e42de5ec52`.
+Payload SHA256 `9ccf10dd33d42a9d79588de2374b8bcbbff759f56e757d2ce5345ea4813f62fc`.
+BRK entry-relative offset `-0x86b0` at VA `0xfffffe0007483dd8` /
+PA `0x101483dd8` replaces BL set_mmu_ttb_alternate. Original bootstrap
+TTBR0/TTBR1 are still active, preserving the validated fallback.
+`--xnu-clean-limit 0x104000000` extends cleanup to the first 64 MiB of
+managed RAM to include arm_vm_init's new page tables. Generator validates
+the extension is aligned, covers the original bootstrap range, and stays
+inside the declared managed RAM. Signed offsets now allow checkpoints in
+functions located before __start.
+
+34 host tests pass. Unicorn MAX with modeled 16K translations and AT/PAR
+operations executes through this checkpoint and returns to Linux with
+original SCTLR/SP/SPSel/DTB. Allocation and final table pointers are recorded
+in `final-tables-brk-emulation.txt`; alloc end is within the 64 MiB cleanup.
+CPU-mode AT cannot handle this model's missing 16K support, so AT/PAR is
+explicitly modeled; hardware result is still unknown. Predicted partition
+SHA256 `23320b4789d653d980e8c1d5320333cff4ca94da62ed4ab61f8f224e24b0c218`.
+Device remains restored in Recovery, no new write yet. Pre-VM hardware
+milestone committed as `21fecbe`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
