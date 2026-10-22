@@ -14,6 +14,17 @@ the template. The live backup
 (`8775a30a95a44ca5c8d83c38df4d77e2c4c8bad315ac54fb9d1dae60495d9cb7`). No
 `userdata` write. Each new `boot_a` write still needs explicit approval.
 
+**UFS probe boot FAILED/HUNG (2026-10-23).** `shim-boot-0085-ufs.img`
+(SHA256 `d4f3746c...`) was written to `boot_a`; the partition hash matched the
+prediction `1f41b3a7...`. `adb reboot recovery` left the panel on the first
+logo with no console output, and no adb or fastboot device appeared. The shim
+leaves the WDT off, so it will not self-recover. The UFS host takeover is the
+prime suspect, but the exact hang point is not yet known. Recovery is pending:
+user must enter fastboot manually, then flash `backup/boot_a-stock-trim.img`,
+boot Recovery, write back
+`backup/recovery-20261021/boot_a-live-20261021.img`, and verify the full
+64 MiB SHA256 `2931647a...`. Do not flash further tests until that restore.
+
 **The logo and the BSD result are separate.** Diagnostic BRK records prove
 `bsd_init` ran through `vfs_mountroot` (x0=0) and reached `load_init_program`;
 mockfs/md0 was mounted. The panel showing LK's first logo says only that the
