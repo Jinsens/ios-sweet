@@ -290,4 +290,6 @@ research/matisse/20261022-xnu-resume/
 
 关键提交：`f1b6d14` 为 TTBR0 恢复回传；`e24a92c` 为 x0 记录；`cfb5e8c` 为 CPU/GIC 实测记录；`490c41f` 为物理页初始化通过和完整恢复记录；`1e233f4` 为 zone/object 检查点准备。
 
-本轮结束时没有尚未恢复的测试。zone/object 实机断点已通过并完整恢复；下一轮应先准备 `kmem_init`、`vm_fault_init` 与完整 `vm_mem_bootstrap` 返回的可观测性，而不是直接刷 iOS 根镜像。
+本轮结束时没有尚未恢复的测试。zone/object 实机断点已通过并完整恢复；完整 `vm_mem_bootstrap` 返回检查点已在主机模型中端到端通过（镜像 `99d68ed6`，未实机）。下一步需单独授权该实机测试，而不是直接刷 iOS 根镜像。
+
+已准备但未实机的下一检查点：`shim/out/entryprobe-el1-vm-return-brk.img`，26,562,560 bytes，SHA256 `99d68ed6d5c870070a116e223b7ba29bd76b1e619c34e444f05146c92b1106fa`，断点 `0xfffffe00073644d8`（`vm_mem_bootstrap` 返回后）。主机模型确认真实写入物理地址最高 `0x1039e3fff`，仍在 128 MiB 清理范围内；bootstrap 恒等映射在该范围内完整，`0x22e000000` 已不再映射，不能无证据扩大清理范围。
