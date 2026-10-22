@@ -63,6 +63,17 @@ def high_vector_pa(payload, offset):
     return pa
 
 
+def bootstrap_clean_range(payload):
+    # Same layout as loader.c: kernel, ADT, then one 16K boot_args page.
+    payload_location(payload)
+    virt, _, _, adt_size, kernel_end, phys, size = struct.unpack_from('<7Q', payload, 16)
+    adt_pa = kernel_end - virt + phys
+    end = ((adt_pa + adt_size + 0x3fff) & ~0x3fff) + 0x4000
+    if kernel_end < virt or phys & 0x3fff or not phys < end <= phys + size or end > 1 << 48:
+        raise ValueError('invalid bootstrap cache-clean range')
+    return phys, end
+
+
 def insert_breakpoint(payload, offset=0):
     if offset < 0:
         raise ValueError('breakpoint offset must be nonnegative')

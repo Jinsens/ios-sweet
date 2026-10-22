@@ -47,8 +47,8 @@ void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
 	}
 #endif
 #ifdef ENTRY_XNU_HIGH_VECTOR_PA
-	/* Only for the immediate MMU-on checkpoint, before C writes cached
-	 * data or removes the bootstrap identity map. The copied assembly
+	/* For bootstrap checkpoints before identity-map teardown. Early C
+	 * writes require ENTRY_XNU_CLEAN_START/END. The copied assembly
 	 * uses local literals, switches to its physical alias, disables
 	 * translation/caches and branches to our stackless recorder. */
 	extern const uint32_t probe_mmu_vector[], probe_mmu_vector_end[];

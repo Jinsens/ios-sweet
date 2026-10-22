@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 
 import mkbootimg
-from xnu_breakpoint import early_vector_pa, high_vector_pa
+from xnu_breakpoint import early_vector_pa, high_vector_pa, bootstrap_clean_range
 
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
@@ -134,7 +134,7 @@ def prepare(template, level=None):
 
 
 def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None,
-          xnu_vector_offset=None, xnu_high_vector_offset=None):
+          xnu_vector_offset=None, xnu_high_vector_offset=None, xnu_clean=False):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
@@ -151,6 +151,11 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
         if vector_pa is None:
             raise ValueError('high-vector relay requires the early-vector relay')
         high_pa = high_vector_pa(payload, xnu_high_vector_offset)
+    clean_range = None
+    if xnu_clean:
+        if high_pa is None:
+            raise ValueError('cache cleanup requires the high-vector relay')
+        clean_range = bootstrap_clean_range(payload)
     payload_offset = None
     if payload is not None:
         if len(payload) < 0x2a8 or payload[:8] != b'SWEETXNU':
@@ -194,6 +199,9 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
             config += f'#define ENTRY_XNU_VECTOR_PA {vector_pa:#x}ULL\n'
         if high_pa is not None:
             config += f'#define ENTRY_XNU_HIGH_VECTOR_PA {high_pa:#x}ULL\n'
+        if clean_range is not None:
+            config += f'#define ENTRY_XNU_CLEAN_START {clean_range[0]:#x}\n'
+            config += f'#define ENTRY_XNU_CLEAN_END {clean_range[1]:#x}\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         linker = '''ENTRY(_head)
 SECTIONS {
@@ -269,6 +277,7 @@ SECTIONS {
         'payload_sha256': hashlib.sha256(payload).hexdigest() if payload else None,
         'xnu_vector_pa': vector_pa,
         'xnu_high_vector_pa': high_pa,
+        'xnu_clean_range': clean_range,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
@@ -288,13 +297,15 @@ def main():
                     help='diagnostic: relay early XNU vectors at this entry-relative offset; MMU-off only')
     ap.add_argument('--xnu-high-vector-offset', type=lambda s: int(s, 0),
                     help='diagnostic: relay high vectors via an identity alias immediately after MMU enable')
+    ap.add_argument('--xnu-clean', action='store_true',
+                    help='clean kernel/ADT/boot_args caches before returning from early C; bootstrap map required')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
     a = ap.parse_args()
     try:
         build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload,
-              a.xnu_vector_offset, a.xnu_high_vector_offset)
+              a.xnu_vector_offset, a.xnu_high_vector_offset, a.xnu_clean)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

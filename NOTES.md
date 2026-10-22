@@ -73,9 +73,9 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** obtain separate approval for the MMU-on test below.
-Hardware has reached `0x10148e4f8`, immediately before the high-VA VBAR write
-and MMU enable. Next determine whether the real transition succeeds.
+**Next concrete action:** obtain separate approval for early-C test `98e8829d`
+below. Hardware has now passed the MMU-on checkpoint at `0x10148e530`.
+Next prove arm_init's initial C prologue, sweet_early_init and first marker.
 
 **Completed entry BRK test:** `entryprobe-el1-entry-brk.img`, 26,562,560 B,
 SHA256 `386420a822f8e7e4c368d5882b1509cdcbdbe70ffd08bf32e1d96cc84a824ded`.
@@ -170,6 +170,29 @@ The high-vector relay returned automatically to Recovery. Complete original
 64 MiB boot_a hash verified. Evidence: `mmu-on-brk-dmesg.txt`, manifest and
 restored image. Next: a bounded early-C checkpoint with explicit cache
 clean/invalidate before leaving XNU's bootstrap identity mapping.
+
+**Prepared, NOT flashed: bounded early-C checkpoint**
+`shim/out/entryprobe-el1-early-c-brk.img`, 26562560 B, SHA256
+`98e8829d84edeabf476c0c837cfefe1a132d993e6baee39082e3bf54eaa835ff`.
+Payload SHA256 `37ba85594c75f1ec7b4260a6ce20a4bfc56d44ee0385cfdbab6510cf3acdba6e`.
+BRK offset `0x649428` replaces the BL to arm_set_kernel_tbi at
+VA `0xfffffe0007ad58b0` / PA `0x101ad58b0`. It stops after arm_init's
+prologue, sweet_early_init and sweet_early_mark; before later initialization.
+The high-vector relay now has optional `--xnu-clean`: after switching to
+its physical alias it cleans/invalidates each D-cache line in
+`[0x100000000, 0x1024d8000)` using CTR_EL0's line size, then disables MMU
+and returns to the probe. This covers the kernel's static globals/stacks,
+ADT and boot_args used here. It still requires bootstrap identity mappings
+and must not be reused after VM remapping/allocation without a new review.
+The copied relay is 120 bytes and linker-checked to fit each 128-byte slot.
+
+33 host tests pass. With modeled MMIO/16K translation/BRK entry, actual XNU
+C code reached the high-VA checkpoint, the cache-maintenance loop executed,
+and original SCTLR/SP/SPSel/DTB were restored at Linux entry. Emulation does
+not model cache coherency or real hardware timing. Evidence:
+`early-c-brk-emulation.txt`. Predicted partition SHA256
+`370a7bc51f1cb74fce3d0b966851664927707668eb8ce06d83a7882ff25a398e`. Device remains restored in Recovery;
+no write of this new image yet. MMU-on milestone committed as `9161917`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,

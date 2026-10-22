@@ -386,7 +386,7 @@ probe_vectors:
 #ifdef ENTRY_XNU_HIGH_VECTOR_PA
 	/* Copied verbatim into each XNU high vector slot. All references are
 	 * local PC-relative literals, valid at both physical and virtual aliases.
-	 * Use only immediately after MMU enable, before cached data writes. */
+	 * Later early-C checkpoints require the bounded cache-clean option. */
 	.balign 8
 	.globl probe_mmu_vector, probe_mmu_vector_end, probe_mmu_identity
 	.globl probe_mmu_physical, probe_mmu_recorder
@@ -394,6 +394,23 @@ probe_mmu_vector:
 	ldr	x16, probe_mmu_physical
 	br	x16
 probe_mmu_identity:
+#ifdef ENTRY_XNU_CLEAN_START
+	/* Early C may dirty kernel globals/stacks. All such storage is still
+	 * inside the loader's kernel/ADT/boot_args range at this checkpoint.
+	 * Clean/invalidate via its bootstrap identity alias before MMU-off. */
+	mrs	x15, ctr_el0
+	ubfx	x15, x15, #16, #4
+	mov	x14, #4
+	lsl	x15, x14, x15
+	ldr	x16, probe_mmu_clean_start
+	ldr	x17, probe_mmu_clean_end
+14:
+	dc	civac, x16
+	add	x16, x16, x15
+	cmp	x16, x17
+	b.lo	14b
+	dsb	sy
+#endif
 	mrs	x16, sctlr_el1
 	bic	x16, x16, #1
 	bic	x16, x16, #4
@@ -408,6 +425,12 @@ probe_mmu_physical:
 	.quad 0
 probe_mmu_recorder:
 	.quad 0
+#ifdef ENTRY_XNU_CLEAN_START
+probe_mmu_clean_start:
+	.quad ENTRY_XNU_CLEAN_START
+probe_mmu_clean_end:
+	.quad ENTRY_XNU_CLEAN_END
+#endif
 probe_mmu_vector_end:
 #endif
 

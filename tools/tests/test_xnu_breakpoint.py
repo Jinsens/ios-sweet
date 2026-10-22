@@ -5,7 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from xnu_breakpoint import insert_breakpoint, early_vector_pa, high_vector_pa
+from xnu_breakpoint import insert_breakpoint, early_vector_pa, high_vector_pa, bootstrap_clean_range
 
 
 def payload():
@@ -70,6 +70,13 @@ class BreakpointTests(unittest.TestCase):
         struct.pack_into('<I', source, 0x300 + 15 * 128 + 120, 0)
         with self.assertRaisesRegex(ValueError, 'padded'):
             high_vector_pa(source, -0x800)
+
+    def test_bootstrap_clean_range_includes_adt_alignment_and_boot_args(self):
+        self.assertEqual(bootstrap_clean_range(payload()), (0x100000000, 0x10000c000))
+        source = bytearray(payload())
+        struct.pack_into('<Q', source, 64, 0x8000)
+        with self.assertRaisesRegex(ValueError, 'range'):
+            bootstrap_clean_range(source)
 
 
 if __name__ == '__main__':
