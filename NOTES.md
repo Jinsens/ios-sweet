@@ -78,9 +78,8 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** prepare and validate a checkpoint after arm_vm_init
-returns, at VA `0xfffffe0007ad6128` (entry offset `0x649ca0`). Check allocation
-extent and bootstrap table preservation before requesting a hardware test.
+**Next concrete action:** request approval for prepared arm_vm_init return
+checkpoint `9ac98004` below, at VA `0xfffffe0007ad6128` (offset `0x649ca0`).
 The shared relay restores bootstrap TTBR0 only on exception; the older
 per-slot relay cannot be used after identity-map teardown.
 
@@ -329,6 +328,23 @@ Original TTBR0 teardown, TLB flush and relocated early-console mark 10
 executed. The shared relay restored bootstrap TTBR0 and returned to Recovery.
 Complete 64 MiB original boot_a hash verified after restoration; see
 `ttbr0-off-brk-manifest.json` and full restored readback.
+
+**Prepared, NOT flashed: complete arm_vm_init checkpoint**
+`shim/out/entryprobe-el1-post-vm-brk.img`, 26,562,560 B, SHA256
+`9ac98004aea8b30e9ab6a5a5d1360c66930d814d2ed2622154b438dbbb032b89`.
+Payload SHA256 `534508b7776fc84aba87edd866b5a5373684a390d82e64f5c02136c4557399a2`.
+BRK at entry offset `0x649ca0`, VA `0xfffffe0007ad6128` / PA `0x101ad6128`,
+immediately after arm_vm_init returns to arm_init. Uses the hardware-passed
+shared relay with bootstrap TTBR0 `0x10117c000` and cleanup ending
+`0x104000000`. Predicted full partition SHA256
+`d00c603d4c08ec89ed6be181b6cf10dbb4df8b6cef1a07e7b8ffa99393dec7cf`.
+Cross-compile and modeled execution pass (`post-vm-brk-emulation.txt`):
+reaches the return, allocation end `0x102838000` is inside cleanup, bootstrap
+identity table contents still cover the cleanup aliases, current TTBR0 is
+empty and formal TTBR1 still maps the high relay RX. Restores original
+SCTLR/SP/SPSel/DTB and returns to Linux. Modeling limitations above still
+apply; no hardware result yet. No new tracked source change, no new CI.
+TTBR0 hardware result commit `7090a94`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
