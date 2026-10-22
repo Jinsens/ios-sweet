@@ -10,7 +10,7 @@ sweet / Qualcomm target. XNU's original initialization through formal page-table
 construction and the first switch to those tables inside arm_vm_init are
 hardware-proven, as are TTBR0 teardown, TLB invalidation and early console
 mark 10 using the relocated framebuffer, and the complete arm_vm_init return.
-serial_init also returned success (x0=1) on hardware. Later startup and full
+Serial_init also returned success (x0=1) on hardware. Later startup and full
 kernel boot remain unproven. This alone does not verify visible panel refresh.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
@@ -79,10 +79,8 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** validate the checkpoint after PE_init_platform(TRUE),
-VA `0xfffffe0007ad62d8` (offset `0x649e50`). Host simulation currently exhausts
-its post-TTBR0 20M-instruction budget in fbcon_init's clearing loop; increase
-that bound and inspect the next result before proposing another hardware test.
+**Next concrete action:** request approval for post-PE_init_platform(TRUE)
+image `a89bd1c0` below, VA `0xfffffe0007ad62d8` (offset `0x649e50`).
 The shared relay restores bootstrap TTBR0 only on exception; the older
 per-slot relay cannot be used after identity-map teardown.
 
@@ -383,6 +381,23 @@ Return-value recorder commit `e24a92c`.
 serial_init returned success. Automatic Recovery return and complete original
 64 MiB boot_a hash verified after restoration. No user panel observation has
 been collected for this round; don't equate x0=1 with visible text.
+
+**Prepared, NOT flashed: later platform initialization checkpoint**
+`shim/out/entryprobe-el1-post-platform-brk.img`, 26,562,560 B, SHA256
+`a89bd1c087c1a33311c4546db3b6044212c9400b46f401f47996a0a88d011ae1`.
+Payload SHA256 `41a9bc023a3f4170c800b1fe85c578316ad348c525c01a6e0356fc6408d0785c`.
+BRK at entry offset `0x649e50`, VA `0xfffffe0007ad62d8` / PA `0x101ad62d8`,
+after kernel startup through phase 4, console creation/printf setup, idle
+initialization and PE_init_platform(TRUE). Same relay/cleanup/x0 recorder.
+Predicted partition SHA256
+`fca03c37a66e2b863ca95cd666c25c8fc75532cb2f855aa9f87d2324aaa7acb8`.
+Cross-compile and host modeled execution pass, including original-register
+restoration and Linux return (`post-platform-brk-emulation.txt`). Its first
+host attempt exhausted the 20M post-TTBR0 instruction bound in another
+framebuffer clear; increasing that bound to 180M reaches the expected BRK.
+Allocation end remains `0x102838000`; bootstrap table and high-vector checks
+still pass. x0 at this void-function checkpoint has no success/failure meaning.
+No new source change or CI run. Console hardware milestone `2ff0748`.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
