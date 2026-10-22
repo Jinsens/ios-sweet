@@ -106,23 +106,38 @@ loop; no SWEET-ENTRY. Recovery used the same manual-fastboot → trimmed-prefix
 → full-backup path; `boot_a` verified `2931647a...`. CONFIG_XNUPOST is
 therefore not the blocker.
 
-**Prepared, host-verified, NOT flashed: NOP-kperf diagnostic.**
+**Completed: NOP-kperf checkpoint (hardware PASS; kperf confirmed).**
 `shim/out/entryprobe-el1-bsd-init-nokperf-brk.img`, 26,562,560 B, SHA256
 `14bef24d4f369ea13bbcb854eeedb1c7ba540cd3601250a6c8e6bac4fe183cf1`;
 payload SHA256 `b2ae537f5e791b6441c780708a2598d2165b588d3d240188a9847c3cabc0c4f6`
 (`research/.../nokperf-build.py`). It NOPs both XNUPOST calls and the panic
 branch, NOPs `bl kperf_init_early` (`0x7aafbdc`), and breaks at the
-`bl bsd_init` site (`0x7aafbe0`). Only 20 payload bytes differ from the debug
-payload. If it reaches `pc=fffffe0007aafbe0`, `kperf_init_early()`,
-`PE_lockdown_iokit()` and `vm_set_restrictions()` returned and kperf is the
-post-lockdown blocker. If it loops, the failure is before kperf.
+`bl bsd_init` site (`0x7aafbe0`).
 
-Source finding: `kperf_init_early()` calls `ml_wait_max_cpus()`, which blocks
-until `ml_set_max_cpus()` sets `max_cpus_initialized = MAX_CPUS_SET`. That
-setter is called from the IOKit CPU topology paths (`SweetCPU.cpp`,
-`AppleARMSMP.cpp`, `IOCPU.cpp`); on this `cpus=1` boot the ADT topology may
-advertise CPUs that never register, so the barrier can sleep forever. This is
-the leading hypothesis, not yet hardware-confirmed.
+Same-boot `nokperf-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aafbe0`, x0 `0`. With
+kperf skipped, execution reached `bl bsd_init`; `PE_lockdown_iokit` and
+`vm_set_restrictions` returned. Written-partition SHA256 `c4921d05...`
+matched the readback; the full original was restored and verified as
+`2931647a...`.
+
+Root cause (source): kperf calls `ml_wait_max_cpus()`, which blocks until
+`ml_set_max_cpus()` sets `max_cpus_initialized = MAX_CPUS_SET`. On matisse the
+ADT CPU node is `arm,cortex-a510` + `ARM,v8`, while the SweetCPU personality
+matches only `qcom,kryo470`; the CPU driver never instantiates, so the setter
+is never called and the barrier sleeps forever. `machine_info.max_cpus` is 1
+because the matisse ADT has a single CPU node.
+
+**Prepared, host-verified, NOT flashed: payload max_cpus fix.**
+`shim/out/entryprobe-el1-bsd-init-maxcpu-fix.img`, 26,562,560 B, SHA256
+`8783158b9d5ba83e5154b6817da60175020778d7743a14f1f85837d2ff066ee2`;
+payload SHA256 `6d45243bc5fd475ff434df217b7516eee33a4a0f8b6596655d61d4cae6956f1a`.
+It replaces the first two instructions of `ml_wait_max_cpus()` (VA
+`0xfffffe000748fe28`) with `mov w0,#1; ret`, keeps CONFIG_XNUPOST and kperf
+enabled, and breaks at `bl bsd_init` (`0x7aafbe0`). It tests whether returning
+the correct single-CPU maximum is sufficient to pass kperf and the XNUPOST
+suite. This is a diagnostic payload, not the permanent source fix. Only 12
+payload bytes differ from the debug payload.
 
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
