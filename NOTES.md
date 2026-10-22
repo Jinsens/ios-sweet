@@ -115,6 +115,27 @@ this checkpoint may be shorter. A dedicated tick probe (busy-wait with
 interrupts enabled, then read `sched_tick`, which only increments in the
 scheduler maintenance continuation) is the next step.
 
+**Prepared, host-verified, NOT flashed: timer-tick proof.**
+`shim/out/entryprobe-el1-tick-brk.img`, 26,562,560 B, SHA256
+`80c8f80fc924c94900c11f3c37b35a2a116dd728d81c21e1b80075c22a731a64`;
+payload SHA256 `a9dcaf248023333832276bffab285cacb5fc8f7ca43789ed3647b332ba9ca9fb`.
+Instead of a plain BRK after `initialize_screen`, the checkpoint instruction
+at VA `0xfffffe0007aaf9ec` branches to a cave at VA `0xfffffe000748d714`
+(early-vector slot 14 plus 20 bytes; `diag_arm_sentinels()` rewrites only the
+first five words of each early slot). The cave calls `vm_commpage_init`,
+reads `sched_tick` (VA `0xfffffe0007b94698`), busy-waits 6,500,000
+`CNTVCT_EL0` ticks (500 ms at the measured 13 MHz) with interrupts left
+enabled, re-reads `sched_tick`, subtracts, and executes BRK #0x5357.
+
+Expected same-boot record: `pc=fffffe000748d744`, `esr=f2005357`,
+`x0 = sched_tick delta`. **x0 > 0 proves timer interrupt delivery and a live
+scheduler-maintenance wakeup** (the 125 ms maintenance deadline woke the
+thread). x0 = 0 only means no maintenance wakeup ran during the window, not
+that no IRQ was ever delivered. The wait uses CNTVCT directly, so a broken
+interrupt path still returns instead of hanging. New tool
+`tools/xnu_tickprobe.py`; 44 tools tests pass. The image uses the same
+dual-slot selective vectors, 128 MiB cleanup range and TTBR0 restore.
+
 **Completed: bootstrap-thread checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
 vectors, 26,562,560 B, SHA256
