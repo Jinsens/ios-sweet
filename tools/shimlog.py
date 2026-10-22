@@ -42,10 +42,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--part', default='boot_a')
     ap.add_argument('--file')
+    ap.add_argument('--scan', action='store_true',
+                    help='search the whole dump for SWLG (expdb tail)')
     a = ap.parse_args()
 
     blob = open(a.file, 'rb').read() if a.file else read_adb(a.part)
-    text = parse(blob)
+    text = None
+    if a.scan:
+        off = blob.find(b'SWLG')
+        if off >= 0:
+            print(f'SWLG at 0x{off:x}', file=sys.stderr)
+            text = parse(blob[off:])
+    else:
+        text = parse(blob)
     if text is None:
         head = blob[:16].hex(' ')
         raise SystemExit(f'no shim log in {a.part} (first bytes: {head})')

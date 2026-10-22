@@ -796,6 +796,27 @@ void shim_main(uint64_t dtb)
 	diag_stage("S1 board", brd.fb_base, brd.fb_stride);
 	diag_stage("S1 disp", (uint64_t)dprobe, display_error());
 	diag_prev_report();
+#ifdef DIAG_UFS_LOG
+	/* Partition log probe: the panel may be dead, so the answer is the
+	 * SWLG block in expdb, read later with adb dd. */
+	test_ufs();
+	if (display_active())
+		display_refresh();
+	{
+		uint64_t first = 0, blocks = 0;
+		uint32_t len = 0;
+		const char *txt = con_text(&len);
+		int rc = 9;
+
+		if (ufs_gpt_find("expdb", &first, &blocks) && blocks > 64)
+			rc = ufs_log_write("expdb", blocks - 32, txt, len);
+		con_hex2("UFSLOG", "rc=", rc, "blk=", (uint32_t)(blocks ? blocks - 32 : 0));
+		if (display_active())
+			display_refresh();
+	}
+	for (;;)
+		__asm__ volatile("wfe");
+#endif
 	mark(1, "console");
 #ifdef SHIM_LOGSTORE_MARK
 	logstore_mark("console", brd.fb_base, brd.fb_size);

@@ -112,6 +112,38 @@ re-measured before any XNU display work.
 `boot_a` currently contains `0e6e62b66f3246fadd5de23a70e54ff74148ab59a150e38eb0e4a058e1f863f9`,
 not the live backup. Restore it before any non-test boot.
 
+**UFS/expdb partition-log probe (`939e4875…`, 7,004,160 B, gzip):** built
+with `-DDIAG_UFS_LOG`. After the console/display probe it calls `test_ufs()`
+(prints CAP/HCS/HCE/UTRLBA/claim/TUR/CAPACITY and the big GPT partitions),
+then `ufs_log_write("expdb", blocks - 32, con_text(), len)`, which writes a
+`SWLG` header and the console text eight blocks before the end of `expdb`,
+then halts. The image was flashed and booted; no USB appeared within 20 s.
+The panel state was not reported. Read the result from recovery:
+
+```sh
+adb exec-out 'dd if=/dev/block/by-name/expdb bs=1M 2>/dev/null' > expdb.bin
+truncate -s 134217728 expdb.bin
+python3 tools/shimlog.py --file expdb.bin --scan   # prints "SWLG at 0x..."
+```
+
+`tools/shimlog.py --scan` was added for this. If `SWLG` is absent, the MTK
+UFS host takeover (`ufs_ready()`/`claim_host()`) failed before the write; the
+panel `test_ufs` lines, if visible, carry the failing register state. The
+`SWLG` text is the console text up to the probe, so it also carries the
+display-stage result.
+
+`fastboot oem dump_pllk_log` returned only `INFO` lines from
+`mi_get_lock_state` and no `DATA` payload in this test, unlike
+`oem lkmsg`, which returned `DATA00040000`. Do not treat `dump_pllk_log` as a
+working text channel until its response framing is measured.
+
+The bounds-checked PL/LK writer (`shim/logstore.c`, `/chosen/log_store` at
+`0x11df00`, 64 KiB, header `0xabcd1234`/`0xcdab3412`) has not been retried
+after the earlier probe hung; that probe likely wrote past the 64 KiB buffer
+at `+0x3ff00`. A retry must stay inside the `off_lk + sz_lk` region and use
+`/proc/pl_lk` (same Linux boot) or a measured fastboot dump.
+
+
 
 ## >>> SESSION 2026-10-22 - device recheck before next XNU attempt <<<
 
