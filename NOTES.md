@@ -20,11 +20,11 @@ vm_fault_init have all returned on hardware: the **complete
 vm_mem_bootstrap returned** to kernel_bootstrap. `sched_init`, task/thread
 init and `load_context` then ran, and the **bootstrap thread executed on
 hardware** (`kernel_bootstrap_thread` after `current_processor`).
-`idle_thread_create` and `sched_startup` (first real `thread_block` round
-trip) have also returned on hardware. Selective diagnostic vectors are
-hardware-proven. `thread_daemon_init`, interrupt delivery, BSD/userspace and
-full kernel boot remain unproven. These checkpoints alone do not verify
-visible panel refresh.
+`idle_thread_create`, `sched_startup` (first real `thread_block` round trip)
+and `thread_daemon_init` have also returned on hardware. Selective diagnostic
+vectors are hardware-proven. Interrupt delivery, BSD/userspace and full kernel
+boot remain unproven. These checkpoints alone do not verify visible panel
+refresh.
 
 **Completed: `sched_startup` return (hardware PASS).**
 `shim/out/entryprobe-el1-sched-startup-brk.img`, 26,562,560 B, SHA256
@@ -48,7 +48,7 @@ original was written back and verified as `2931647a...`. Evidence:
 sched-startup-dmesg.txt, before/written/restored images and prepared-build.txt
 in `research/matisse/20261023-sched-startup/`.
 
-**Prepared, host-verified, NOT flashed: `thread_daemon_init` checkpoint.**
+**Completed: `thread_daemon_init` return (hardware PASS).**
 `shim/out/entryprobe-el1-thread-daemon-brk.img`, 26,562,560 B, SHA256
 `f16c296dd10705f0434c29c0cc0e6460411730d1be1a0899a88809c9aea4f4e8`;
 payload SHA256 `d41aec2a63d98734a89d1a5935de37e568f0d3b5cd6a6b18d363199f432f30f7`.
@@ -56,8 +56,16 @@ BRK at entry offset `0x623384`, payload offset `0xaabbfc`, VA
 `0xfffffe0007aaf80c` / PA `0x101aaf80c`, after `bl thread_daemon_init`;
 replaces `mov w0,#0xe` (`0x528001c0`) immediately before
 `kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL)`. Same selective,
-cleanup and TTBR0 setup as the passed images; expected record
-`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aaf80c`.
+cleanup and TTBR0 setup as the passed images.
+
+Same-boot `thread-daemon-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007aaf80c`, x0 `0`. Thus
+`thread_daemon_init` returned as well: `idle_thread_create`, `sched_startup`
+and `thread_daemon_init` have all completed on hardware. The device returned
+to Recovery about 30 s after `adb reboot recovery`; predicted written-partition
+SHA256 `a20d347f...` matched the full readback, and the complete original was
+written back and verified as `2931647a...`. Evidence: thread-daemon-dmesg.txt,
+written/restored images and prepared-build.txt.
 
 The build recipe is proven: rebuilding the hardware-passed thread image from
 the same template/payload/offsets (`--xnu-vector-offset 0xb78`,
@@ -70,11 +78,15 @@ slot-4-only and must not be used.
 
 Device state after this test (observed): root ADB in Recovery, slot `_a`,
 `boot_a` fully restored to SHA256
-`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`. The
-`thread_daemon_init` `boot_a` write needs separate approval. After the BRK
-record, write back the full original and verify the hash; on failure, restore
-the trimmed stock prefix via fastboot, boot Recovery, then write the full
-backup. Never leave a test image in `boot_a`.
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`. Each
+further `boot_a` write needs separate approval. After the BRK record, write
+back the full original and verify the hash; on failure, restore the trimmed
+stock prefix via fastboot, boot Recovery, then write the full backup. Never
+leave a test image in `boot_a`.
+
+**Next:** checkpoint after `kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL)`
+and then reach `spllo()`/`initialize_screen`; timer IRQ delivery under the
+normal XNU vectors is still unproven.
 
 **Completed: bootstrap-thread checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-thread-brk.img`, rebuilt with dual-slot selective
