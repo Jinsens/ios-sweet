@@ -1,9 +1,9 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-22 (Asia/Shanghai): XNU passes vm_page_bootstrap; zone/object checkpoint prepared <<<
+## >>> ACTIVE 2026-10-22 (Asia/Shanghai): XNU passes zone/object bootstrap; next VM checkpoint pending <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`post-vm-page-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`zone-object-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
@@ -13,12 +13,13 @@ mark 10 using the relocated framebuffer, and the complete arm_vm_init return.
 Serial_init also returned success (x0=1) on hardware, followed by startup
 phase 4, console/printf setup, idle init and PE_init_platform(TRUE). CPU/timer/
 GIC setup and early_random also passed up to the machine_startup call.
-machine_startup and kernel_bootstrap have now reached vm_mem_bootstrap,
-and vm_page_bootstrap returned on hardware. Remaining VM bootstrap,
+machine_startup and kernel_bootstrap have now reached vm_mem_bootstrap;
+vm_page_bootstrap, zone_bootstrap and vm_object_bootstrap returned on
+hardware. The rest of vm_mem_bootstrap (retire/map/kmem/fault init),
 scheduler/BSD startup, userspace and full kernel boot remain unproven.
 These checkpoints alone do not verify visible panel refresh.
 
-**Prepared, NOT hardware-tested: zone/object bootstrap checkpoint.**
+**Completed: zone/object bootstrap checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-zone-object-brk.img`, 26,562,560 B, SHA256
 `e4231b9071f0a559c72a8d4961acfe895e2a91eb2ebae525647be1704018695a`.
 Payload SHA256 `878148b67d4b242e294b716322ae87d60a2a8da99c2dfbfc8acb0e18d8233fc4`.
@@ -27,20 +28,30 @@ replaces `bl vm_retire_boot_pages`, so it stops only after both
 `zone_bootstrap` and `vm_object_bootstrap` return; that single-instruction
 empty retire call is deliberately not executed. Same shared relay, high
 vectors, TTBR0 restore and x0 recorder; cleanup range stays
-`[0x100000000, 0x108000000)` (128 MiB). Predicted partition SHA256
-`ddef7f6a441ad86ad9981bf4d20f05ad24c9a8498c3ac1405ca39361c9524276`.
+`[0x100000000, 0x108000000)` (128 MiB).
 
-Host model PASS (`zone-object-brk-emulation.txt`). At the trap: TTBR0 empty
-`0x1024d8000`, TTBR1 `0x1024dc000`, DAIF masked, GIC model unchanged,
-x0 `0xfffffe0007b482a0`. `vm_pages` still spans VA
+Same-boot `zone-object-brk-dmesg.txt` records
+`stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007abfad0`, with
+x0 `fffffe0007b482a0`. vm_page_bootstrap, zone_bootstrap and
+vm_object_bootstrap therefore all returned inside vm_mem_bootstrap; the
+ESR is the inserted BRK, not an unexpected kernel fault. Automatic Recovery
+return and the complete original 67,108,864-byte boot_a restoration/readback
+SHA256 `2931647a...` were verified. The written partition matched the
+predicted `ddef7f6a...` hash. Evidence: manifest, same-boot dmesg,
+before/written/restored images and the emulation log in the evidence
+directory. Preparation commit `1e233f4`. No source changes and no new CI.
+
+Host model `zone-object-brk-emulation.txt` had predicted the same x0 and
+PC. At the trap: TTBR0 empty `0x1024d8000`, TTBR1 `0x1024dc000`, DAIF
+masked, GIC model unchanged. `vm_pages` still spans VA
 `0xfffffe000eb38000..0xfffffe000f9356d0`; sampled first/last mappings are PA
 `0x102ac4000` and `0x1038c16cf`, inside the cleanup range. `avail_start`
-stays `0x102838000`; modeled stores reach PA `0x1024fbfff`. Bootstrap-TTBR0
-identity aliases across the whole 128 MiB window, the high-vector page, the
-cleanup loop and the return to stock Linux with original SCTLR/SP/SPSel/DTB
-all pass. These are host-model results, not hardware execution.
-No source changes and no new CI. The device remains in restored Recovery;
-this image has not been written anywhere.
+stayed `0x102838000`; modeled stores reached PA `0x1024fbfff`.
+Bootstrap-TTBR0 identity aliases across the whole 128 MiB window, the
+high-vector page, the cleanup loop and the return to stock Linux with
+original SCTLR/SP/SPSel/DTB all passed. These remain host-model results, not
+hardware execution; the hardware result above is the BRK record plus the
+full restoration check.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
 Each test below had explicit user approval including restoration. This LK
@@ -108,13 +119,13 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** obtain explicit user approval for a boot_a test of
-the prepared zone/object image `e4231b90` via `run-approved-probe.py` (it
-verifies the original partition before and after). If that passes, prepare
-the next checkpoint after `kmem_init`/`vm_fault_init`, then the full
-`vm_mem_bootstrap` return, each with the same fresh allocation/cache-range
-review. The approved post-vm_page_bootstrap image `e9b81b88` passed and was
-restored (result commit `490c41f`). No device test is currently authorized.
+**Next concrete action:** prepare the next checkpoint inside vm_mem_bootstrap
+(after `kmem_init`, then after `vm_fault_init`, and finally at the full
+`vm_mem_bootstrap` return), each with a fresh allocation/cache-range review
+and host emulation before requesting approval. The zone/object image
+`e4231b90` passed on hardware and was fully restored; the earlier
+post-vm_page_bootstrap image `e9b81b88` likewise passed (commit `490c41f`).
+No device test is currently authorized or prepared.
 The requested standalone Chinese report is
 [docs/matisse-xnu-ios-roadmap-zh.md](docs/matisse-xnu-ios-roadmap-zh.md):
 complete progress, minimal userspace, real iOS, UFS, touch, USB and acceptance

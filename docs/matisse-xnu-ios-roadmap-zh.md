@@ -1,8 +1,8 @@
 # Redmi K50 Pro：XNU 实机进展与 iOS 启动路线
 
-更新：2026-10-22，完成本轮 `post-vm-page-brk` 实机测试后。
+更新：2026-10-22，完成本轮 `zone-object-brk` 实机测试后。
 
-**当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`，成功返回 `vm_page_bootstrap`。尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
+**当前结论：这台 K50 Pro 已执行真正的 XNU，完成早期 MMU、正式页表、平台与 CPU/GIC 初始化，并进入 `kernel_bootstrap`，成功返回 `vm_page_bootstrap`、`zone_bootstrap` 和 `vm_object_bootstrap`。尚未进入用户态，也尚未启动 iOS 的 launchd 或桌面。**
 
 本轮设备自动返回 Recovery；原始 `boot_a` 的全部 67,108,864 字节已恢复并读回校验。本轮没有写入 `userdata`。详细逐次记录以 [NOTES.md](../NOTES.md) 顶部 ACTIVE 区为准，下面历史记录可能代表已经被后续证据替代的判断。
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 手机 | Redmi Note 10 Pro | Redmi K50 Pro |
 | SoC | Qualcomm SM7150 | MediaTek MT6983 / Dimensity 9000 |
-| 既有记录 | README、历史 NOTES 记录了 iOS 桌面和触摸成果 | 本次实测到 XNU 物理页管理初始化 |
+| 既有记录 | README、历史 NOTES 记录了 iOS 桌面和触摸成果 | 本次实测到 XNU zone/object 初始化 |
 | 临时启动 | 原设备支持 `fastboot boot` | 本 LK 没有可用的 `fastboot boot` |
 | 显示 | 1080×2400，连续扫描路径 | 1440×3200，DSC 命令模式，需要主动刷新 |
 | 触摸 | Goodix，经 Qualcomm GENI I²C | ST FTS 路线，经 MTK SPI6，见第 6 节 |
@@ -47,7 +47,7 @@
 4. **打通显示对照。** 由于面板是命令模式，只改显存不会自动更新。受控刷新测试中，用户看到了 `DISPLAY KICK` 与移动绿条，也看到了 EL1 测试文字。这证明在当前 LK 遗留状态下可以刷新面板。
 5. **建立同次启动证据。** 自定义代码运行后，把阶段或异常写入所携带的原 Linux banner，再转入 Recovery，从 `dmesg` 读取 `SWEET-ENTRY`。这避免依赖未经证明能跨重启保留的 DRAM 日志。
 6. **确认加载路径。** 只加载、不跳 XNU 的镜像成功完成段复制、ADT 和 boot_args 准备并返回。完整 shim 与无断点直接跳转曾只显示 logo，部分需要手动 fastboot 恢复；logo 本身不说明停在哪。
-7. **逐步推进真实 XNU。** 在实际内核指令流插入受控 BRK，从入口一路推进至当前的物理页管理初始化。每轮先主机检查、再真机执行、最后恢复并验证整个分区。
+7. **逐步推进真实 XNU。** 在实际内核指令流插入受控 BRK，从入口一路推进至当前的 zone/object 初始化。每轮先主机检查、再真机执行、最后恢复并验证整个分区。
 
 ### 2.2 XNU 断点证据
 
@@ -70,6 +70,7 @@
 | 后续平台初始化 | `a89bd1c0` | `fffffe0007ad62d8` | `PE_init_platform(TRUE)` 等返回 |
 | `machine_startup` 调用前 | `34efc91a` | `fffffe0007ad63a0` | CPU、计时器、GIC 上下文和 early_random 初始化 |
 | `vm_page_bootstrap` 返回 | `e9b81b88` | `fffffe0007abfab0` | 已进入 `kernel_bootstrap` → `vm_mem_bootstrap`，完成物理页管理初始化 |
+| `zone_bootstrap`、`vm_object_bootstrap` 返回 | `e4231b90` | `fffffe0007abfad0` | 在 `vm_mem_bootstrap` 内连续完成 zone 与 VM object 初始化 |
 
 `serial_init=1` 只证明函数返回成功；后期各轮没有收集用户的屏幕观察，不能宣称已经看到了 XNU 控制台。独立探针的 IRQ 测试曾成功处理 INTID 27，但当前 XNU 调度器启用中断后的持续运行还未验证。
 
@@ -91,9 +92,10 @@
 
 ```text
 已完成：arm_init → machine_startup → kernel_bootstrap
-       → vm_mem_bootstrap → vm_page_bootstrap 返回
+       → vm_mem_bootstrap → vm_page_bootstrap / zone_bootstrap /
+         vm_object_bootstrap 返回
 
-下一步：zone_bootstrap → vm_object_bootstrap → 其余 VM 初始化
+下一步：vm_map_init → kmem_init → vm_fault_init → 完整 vm_mem_bootstrap 返回
        → 调度器 / Mach IPC / task / thread / clock
        → kernel_bootstrap_thread → IOKit → 正常中断运行
        → bsd_init → md0 根文件系统 → exec 最小 /sbin/launchd
@@ -263,13 +265,13 @@ USB 日志能显著减少后续对屏幕和断点回传的依赖；可以在正�
 kernel: xnu/out/ci-39640336293/kernel.development.sweet
 SHA256: bc308789486ee96b380ce374bc7fe4c1894f4a115da9662b4cb0cf9a016b543c
 
-本轮镜像: shim/out/entryprobe-el1-post-vm-page-brk.img
+本轮镜像: shim/out/entryprobe-el1-zone-object-brk.img
 大小: 26,562,560 bytes
-SHA256: e9b81b88927d98d3b1eef0876679f661ffc610ee498cc9a481b38692c267f461
+SHA256: e4231b9071f0a559c72a8d4961acfe895e2a91eb2ebae525647be1704018695a
 
 同次启动记录:
-stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007abfab0
-x0=a526f9c（这里不是成功/失败返回码）
+stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007abfad0
+x0=fffffe0007b482a0（与主机模型预测一致；不是成功/失败返回码）
 
 已验证的完整恢复备份:
 backup/recovery-20261021/boot_a-live-20261021.img
@@ -278,14 +280,14 @@ SHA256: 2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1
 
 证据目录（gitignored）:
 research/matisse/20261022-xnu-resume/
-  post-vm-page-brk-manifest.json
-  post-vm-page-brk-dmesg.txt
-  post-vm-page-brk-restored.img
-  post-vm-page-brk-emulation.txt
+  zone-object-brk-manifest.json
+  zone-object-brk-dmesg.txt
+  zone-object-brk-restored.img
+  zone-object-brk-emulation.txt
   touch-driver-binding.txt
   vm-retire-boot-pages-disassembly.txt
 ```
 
-关键提交：`f1b6d14` 为 TTBR0 恢复回传；`e24a92c` 为 x0 记录；`cfb5e8c` 为 CPU/GIC 实测记录；`0032264` 为本轮准备；`490c41f` 为本轮物理页初始化通过和完整恢复记录。
+关键提交：`f1b6d14` 为 TTBR0 恢复回传；`e24a92c` 为 x0 记录；`cfb5e8c` 为 CPU/GIC 实测记录；`490c41f` 为物理页初始化通过和完整恢复记录；`1e233f4` 为 zone/object 检查点准备。
 
-本轮结束时没有尚未恢复的测试，也没有下一轮已获授权的镜像。下一次应从 zone/object 与完整 VM bootstrap 的可观测性准备继续，而不是直接刷 iOS 根镜像。
+本轮结束时没有尚未恢复的测试。zone/object 实机断点已通过并完整恢复；下一轮应先准备 `kmem_init`、`vm_fault_init` 与完整 `vm_mem_bootstrap` 返回的可观测性，而不是直接刷 iOS 根镜像。
