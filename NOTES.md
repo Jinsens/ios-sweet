@@ -1,5 +1,46 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): display control reproduced; EL1 bisection next <<<
+
+**Observed this session:** online product is `matisse` (K50 Pro / MT6983),
+initially in fastboot. `oem expdb` works: it returned 2,047,741 gzip bytes,
+decompressed to 134,217,728 bytes. No `SWLG` or `SWX2` marker exists, so the
+previous UFS log probe has no successful-write evidence. Evidence is ignored
+under `research/matisse/20261022-xnu-resume/` (host-date directory).
+
+With the user's explicit approval for this control and its restoration:
+
+- Restored the trimmed live image via `tools/fbraw.py`, then
+  `reboot-recovery` returned OKAY and Recovery ADB came online. The first full
+  readback differed in 4,081 bytes immediately after the trimmed prefix
+  (`0x13de000..0x13df000`); a trimmed flash alone did not restore those bytes.
+- Pushed/wrote the **full 64 MiB** live backup from Recovery. Readback SHA256
+  `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+- Wrote exact validated control `entryprobe-display-kick-hw-ok.img`, SHA256
+  `b8cec21a912dc978b7b78fddd343253e9a93b95b3d91e275bca0fe0bc0eeee3f`.
+  Full partition readback matched predicted SHA256
+  `016331b382ae2c88c668931c8feaa448c42f48948b440fdb7b83b455853b97a7`.
+- Rebooted recovery; user explicitly saw the test screen and moving green
+  bar. Same-boot `display-control-dmesg.txt` has `SWTX1` and zero
+  `ovl status error` / CMDQ software-timeout pre-dumps. The old control's
+  status is still `0x500007` (its FRAME_DONE check fails despite visible
+  refresh); this is the expected known limitation, not a display regression.
+- Re-pushed the full original image after reboot (Recovery `/tmp` is cleared
+  on reboot), restored it and verified the complete 64 MiB hash above.
+  **Current device: Recovery; boot_a fully restored.**
+
+Host tests: all 26 `tools/tests` pass. Latest successful XNU CI remains
+`Jinsens/ios-sweet` run **39640336293**, commit `dd9752e`; no new kernel build
+or XNU success is claimed. Four diagnostic files were already modified at
+session start: `shim/build.sh`, `shim/display.c`, `shim/shim.c`,
+`tools/mkentryprobe.py`; preserve their work.
+
+**Next:** instrument the shim's EL2-to-EL1/display path with a same-boot
+Linux fallback, because the exact EL2 display control works while the full
+shim drops to EL1 and has no usable pre-display fault output. This is a
+hypothesis to measure. Finish host build/checks before seeking approval for
+the next boot_a-only test. No vendor_boot, userdata or GPT writes.
+
 ## >>> SESSION 2026-10-22 - diagnostic kick: log_store trace + XNU sentinels (read first) <<<
 
 **Device state at this writing (observation):** `boot_a` contains the
