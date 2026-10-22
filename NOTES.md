@@ -1,9 +1,9 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU PE_init_platform(TRUE) passed; machine_startup boundary next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU reaches machine_startup; VM page bootstrap next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`post-platform-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`pre-machine-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
@@ -11,8 +11,9 @@ construction and the first switch to those tables inside arm_vm_init are
 hardware-proven, as are TTBR0 teardown, TLB invalidation and early console
 mark 10 using the relocated framebuffer, and the complete arm_vm_init return.
 Serial_init also returned success (x0=1) on hardware, followed by startup
-phase 4, console/printf setup, idle init and PE_init_platform(TRUE). Remaining
-CPU/interrupt setup, machine_startup and full kernel boot remain unproven.
+phase 4, console/printf setup, idle init and PE_init_platform(TRUE). CPU/timer/
+GIC setup and early_random also passed up to the machine_startup call.
+The kernel_bootstrap body and full kernel boot remain unproven.
 These checkpoints alone do not verify visible panel refresh.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
@@ -81,8 +82,10 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request separate approval for pre-machine_startup
-image `34efc91a` below, VA `0xfffffe0007ad63a0` (offset `0x649f18`).
+**Next concrete action:** investigate a checkpoint after vm_page_bootstrap,
+VA `0xfffffe0007abfab0` (offset `0x633628`), with a reviewed allocation and
+cache-clean bound. Do not use the bootstrap-table relay after
+vm_retire_boot_pages without separately proving those tables survive.
 The shared relay restores bootstrap TTBR0 only on exception; the older
 per-slot relay cannot be used after identity-map teardown.
 
@@ -407,7 +410,7 @@ with x0 `fffffe00080bbc00` (not a status value at this checkpoint).
 Original PE_init_platform(TRUE) returned. Automatic Recovery return and
 complete original 64 MiB boot_a restoration/hash verified.
 
-**Prepared, NOT flashed: CPU/timer/GIC setup before machine_startup**
+**Completed: CPU/timer/GIC setup before machine_startup**
 `shim/out/entryprobe-el1-pre-machine-brk.img`, 26,562,560 B, SHA256
 `34efc91a3be079fef6b793144e0f9d33289c70e008f628f155bc2e8468ad62fe`.
 Payload SHA256 `b2d31f7170972ae4920524b90fbaad4d7bb6ff5daff30b366304c44729d63122`.
@@ -426,9 +429,14 @@ system-register behavior are model assumptions, not hardware measurements.
 No interrupt delivery is modeled. At the checkpoint all DAIF bits remain
 masked, modeled GIC enables PPI 27 and SGI 1, allocation end `0x102838000`
 remains in cleanup, and the existing mapping/return checks pass. Normal Linux
-entry follows with original SCTLR/SP/SPSel/DTB restored. Hardware result
-unknown; this test exercises real GIC setup for the first time in this XNU
-path. No new source changes or CI run. Platform hardware result `3168dbb`.
+entry follows with original SCTLR/SP/SPSel/DTB restored. This test exercises
+real GIC setup for the first time in this XNU path. No new source changes or
+CI run. Platform hardware result `3168dbb`; preparation `27e123d`.
+**Hardware PASS (explicitly approved):** same-boot `pre-machine-brk-dmesg.txt`
+records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007ad63a0`,
+x0 `fffffe0007177a68` (boot_args). CPU/timer/GIC context initialization,
+chosen-property checks and early_random ran. Automatic Recovery return and
+complete original 64 MiB boot_a restoration/hash verified.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
