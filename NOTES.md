@@ -35,11 +35,30 @@ or XNU success is claimed. Four diagnostic files were already modified at
 session start: `shim/build.sh`, `shim/display.c`, `shim/shim.c`,
 `tools/mkentryprobe.py`; preserve their work.
 
-**Next:** instrument the shim's EL2-to-EL1/display path with a same-boot
-Linux fallback, because the exact EL2 display control works while the full
-shim drops to EL1 and has no usable pre-display fault output. This is a
-hypothesis to measure. Finish host build/checks before seeking approval for
-the next boot_a-only test. No vendor_boot, userdata or GPT writes.
+**EL1 display milestone:** explicit approval received; built/tested
+`entryprobe-el1-display.img` (20,836,352 B), SHA256
+`a3131110a6a7876d08ade3518e87fdcf9a557b7500eecb2f43722f060e9dd4f0`.
+Full written-partition SHA256
+`4920c9bec967202c8b5a5444c3b5850a9dffa274eb45f856a7d486d215219d91`.
+The user saw `EL1 DISPLAY PROBE`. Recovery returned; same-boot banner:
+entry **EL1**, MIDR `0x410fd462`, SCTLR `0x30d00980`, stage **0x74**,
+fault 0, display error 0, display_probe result 1. Thus **the original entry
+was already EL1**, despite LK's misleading `via EL2` log. The new probe's
+optional EL2/HVC return branch has NOT been exercised on this hardware.
+Full boot_a restored again; hash `2931647a...86b1` verified. Evidence:
+`el1-display-dmesg.txt` / `el1-display-manifest.json` under the directory above.
+
+This probe exposed a real independent bug: `board.c` read the virtual timer
+interrupt's flags cell at +32 instead of its PPI number at +28, reporting
+INTID 17 instead of 27. Corrected with synthetic ARM timer binding regression
+coverage; all 27 host tests pass. The existing matisse ADT already uses 27,
+so this does not explain the previous XNU loader failure.
+
+**Next:** use the now hardware-tested display.c sequence in the full XNU
+shim. A debug payload adds `-enable_kprintf_spam` without changing the kernel
+(CI 39640336293). Build/layout validation first, then separately authorize
+one boot_a-only test and its full restore. No vendor_boot, userdata or GPT
+writes. XNU entry is still unproven.
 
 ## >>> SESSION 2026-10-22 - diagnostic kick: log_store trace + XNU sentinels (read first) <<<
 

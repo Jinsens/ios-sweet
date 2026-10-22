@@ -4,6 +4,10 @@
 #include "board.h"
 #include "logstore.h"
 #include "mmu.h"
+#if defined(ENTRY_EL1_DISPLAY)
+#include "console.h"
+#include "display.h"
+#endif
 #if defined(ENTRY_XNU)
 #include "loader.h"
 #endif
@@ -25,6 +29,9 @@ void entryprobe_irq(uint64_t redist, uint64_t *count, uint64_t *last, uint64_t *
 
 void entryprobe_board(uint64_t dtb, char *banner)
 {
+#if defined(ENTRY_EL1_DISPLAY)
+	field(banner, ENTRY_STAGE, 0x70);
+#endif
 	if (!board_probe((uintptr_t)dtb)) {
 		field(banner, ENTRY_STAGE, 0xff);
 		return;
@@ -33,6 +40,31 @@ void entryprobe_board(uint64_t dtb, char *banner)
 	field(banner, ENTRY_VTIMER, brd.vtimer_intid);
 	field(banner, ENTRY_FB, brd.fb_base);
 	field(banner, ENTRY_STAGE, 2);
+#if defined(ENTRY_EL1_DISPLAY)
+	/* Exercise the full shim's console/display at EL1, then return through
+	 * HVC to the saved EL2 Linux entry. Exceptions carry ESR/FAR/PC into
+	 * this same-boot banner instead of disappearing behind the LK logo. */
+	uint64_t sctlr;
+	__asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+	field(banner, ENTRY_SCTLR, sctlr);
+	field(banner, ENTRY_STAGE, 0x71);
+	con_target((volatile uint32_t *)(uintptr_t)brd.fb_base);
+	con_w = brd.fb_w;
+	con_h = brd.fb_h;
+	con_stride = brd.fb_stride;
+	con_bgr = brd.fb_bgr;
+	con_clear(BLUE);
+	con_str("SWEET", "EL1 DISPLAY PROBE");
+	field(banner, ENTRY_STAGE, 0x72);
+	int rc = display_probe(dtb, brd.fb_base, brd.fb_stride);
+	field(banner, ENTRY_ESR, display_error());
+	field(banner, ENTRY_FAR, rc);
+	field(banner, ENTRY_STAGE, 0x73);
+	if (rc) {
+		display_refresh();
+		field(banner, ENTRY_STAGE, 0x74);
+	}
+#else
 #if ENTRY_LEVEL == 6
 #if defined(ENTRY_XNU)
 	/* Use the hardware-validated kick path to put a known image on the
@@ -95,4 +127,5 @@ void entryprobe_board(uint64_t dtb, char *banner)
 #endif
 #endif
 #endif
+#endif /* !ENTRY_EL1_DISPLAY */
 }

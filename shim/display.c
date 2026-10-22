@@ -41,6 +41,8 @@ now(void)
 #define DSI_CM_WAIT_DATA_LINE_EN (1u << 24)
 #define DSI_CM_WAIT_FIFO_FULL_EN (1u << 27)
 #define DSI_INT_TE_RDY		(1u << 2)
+#define DSI_INT_FRAME_DONE	(1u << 4)
+#define DSI_INT_BUSY		(1u << 31)
 #define DSI_PHY_LC_HS_TX_EN	(1u << 0)
 #define DSI_PS_SEL_MASK		(0xfu << 16)
 #define DSI_PS_SEL_DSC		(5u << 16)
@@ -115,6 +117,14 @@ int display_probe(uint64_t dtb, uint64_t fb, uint32_t stride)
 		error = ERR_NODES;
 		return 0;
 	}
+	/* Measured matisse display0 bases. Keep them live even if the FDT
+	 * lookup fails, so display_force_refresh() can still push the error
+	 * line onto the panel instead of returning with dsi == 0. */
+	dsi = 0x14017000;
+	mutex = 0x14001000;
+	ovl = 0x14004000;
+	clk = 0x14000000;
+	con_ctrl = rd(dsi + DSI_CON_CTRL);
 	if (!resolve_disp(dtb, "mediatek,dsi0", &dsi0, 0x14017000) ||
 	    !resolve_disp(dtb, "mediatek,disp_mutex0", &mutex0, 0x14001000) ||
 	    !resolve_disp(dtb, "mediatek,disp_ovl0_2l", &ovl0, 0x14004000)) {
@@ -229,40 +239,53 @@ int display_probe(uint64_t dtb, uint64_t fb, uint32_t stride)
 	return 1;
 }
 
+static void
+delay_us(uint64_t us)
+{
+	uint64_t end = now() + rsr("cntfrq_el0") / 1000000 * us;
+
+	while (now() < end)
+		__asm__ volatile("yield");
+}
+
 void display_refresh(void)
 {
 	if (!ready)
 		return;
-	/* W0C status: retire the stale TE flag before waiting for the next. */
+	/* Mirror the validated display-kick sequence exactly: re-arm the
+	 * engine and the cmd-mode FIFO on every frame, wait for TE, START,
+	 * give the panel 15 ms to consume the buffer, then stop the mutex.
+	 * This sequence also passed the EL1 display probe on hardware. */
+	wr(dsi + DSI_MEM_CONTI, 0x3cu);
+	wr(dsi + DSI_CON_CTRL, con_ctrl | DSI_EN | DSI_CM_WAIT_DATA_LINE_EN |
+	    DSI_CM_WAIT_FIFO_FULL_EN);
+	wr(dsi + DSI_PHY_LCPAT, 0x55);
+	wr(dsi + DSI_PHY_LCCON, rd(dsi + DSI_PHY_LCCON) | DSI_PHY_LC_HS_TX_EN);
 	wr(dsi + DSI_INTSTA, ~DSI_INT_TE_RDY);
-	uint64_t limit = now() + rsr("cntfrq_el0") / 100;	/* 10 ms */
+	uint64_t limit = now() + rsr("cntfrq_el0") / 25;	/* 40 ms */
 	while ((rd(dsi + DSI_INTSTA) & DSI_INT_TE_RDY) == 0 && now() < limit)
 		__asm__ volatile("yield");
+	wr(dsi + DSI_INTSTA, ~(DSI_INT_TE_RDY | DSI_INT_FRAME_DONE));
 	wr(mutex + 0x08, 0);
 	wr(mutex + 0x20, 0);
 	wr(mutex + 0x20, 1);
 	wr(dsi + DSI_START, 1);
+	delay_us(15000);
+	wr(dsi + DSI_INTSTA, ~(DSI_INT_FRAME_DONE | DSI_INT_BUSY));
+	wr(mutex + 0x20, 0);
 }
 
 /* Diagnostic-only push that ignores the precondition checks. Used after
  * drawing display_probe's error code so the panel can show why it failed. */
 void display_force_refresh(void)
 {
+	int saved = ready;
+
 	if (!dsi || !mutex)
 		return;
-	wr(dsi + DSI_MEM_CONTI, 0x3cu);
-	wr(dsi + DSI_PHY_LCPAT, 0x55);
-	wr(dsi + DSI_PHY_LCCON, rd(dsi + DSI_PHY_LCCON) | DSI_PHY_LC_HS_TX_EN);
-	wr(dsi + DSI_CON_CTRL, con_ctrl | DSI_EN | DSI_CM_WAIT_DATA_LINE_EN |
-	    DSI_CM_WAIT_FIFO_FULL_EN);
-	wr(dsi + DSI_INTSTA, ~DSI_INT_TE_RDY);
-	uint64_t limit = now() + rsr("cntfrq_el0") / 25;	/* 40 ms */
-	while ((rd(dsi + DSI_INTSTA) & DSI_INT_TE_RDY) == 0 && now() < limit)
-		__asm__ volatile("yield");
-	wr(mutex + 0x08, 0);
-	wr(mutex + 0x20, 0);
-	wr(mutex + 0x20, 1);
-	wr(dsi + DSI_START, 1);
+	ready = 1;
+	display_refresh();
+	ready = saved;
 }
 
 int display_active(void)

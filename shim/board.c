@@ -183,7 +183,10 @@ static void refine_from_dtb(uintptr_t dtb)
 		char path[192];
 		if (fdt_find_compatible(dtb, "arm,armv8-timer", path, sizeof(path))) {
 			if (fdt_prop(dtb, path, "interrupts", &v, &len) && len >= 48) {
-				uint32_t virt = fdt_be32((uintptr_t)v + 32) & 0xffff;
+				/* Three cells per interrupt: type, PPI number, flags.
+				 * The virtual timer is tuple 2, number cell 7 (not
+				 * cell 8, which is the trigger/CPU-mask flags). */
+				uint32_t virt = fdt_be32((uintptr_t)v + 28) & 0xffff;
 				uint32_t phys = fdt_be32((uintptr_t)v + 16) & 0xffff;
 				brd.vtimer_intid = 16 + virt;
 				brd.ptimer_intid = 16 + phys;

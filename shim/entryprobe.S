@@ -94,12 +94,81 @@ probe_start:
 	mov	x2, #(ENTRY_BANNER_OFFSET & 0xffff)
 	movk	x2, #(ENTRY_BANNER_OFFSET >> 16), lsl #16
 	add	x1, x1, x2
+#if defined(ENTRY_EL1_DISPLAY)
+	mrs	x10, CurrentEL
+	cmp	x10, #8
+	b.ne	probe_call_c
+	/* Save the EL1 and EL2 controls before reproducing start.S's drop.
+	 * The EL2 vectors stay installed: HVC returns us to Linux even if the
+	 * EL1 C probe faults before its display can show an error. */
+	adr	x9, probe_saved
+	mrs	x10, sctlr_el1
+	str	x10, [x9, #64]
+	mrs	x10, vbar_el1
+	str	x10, [x9, #72]
+	mrs	x10, sp_el1
+	str	x10, [x9, #80]
+	mrs	x10, hcr_el2
+	str	x10, [x9, #88]
+	mrs	x10, cnthctl_el2
+	str	x10, [x9, #96]
+	mrs	x10, cntvoff_el2
+	str	x10, [x9, #104]
+	mrs	x10, cptr_el2
+	str	x10, [x9, #112]
+	mrs	x10, mdcr_el2
+	str	x10, [x9, #120]
+	adr	x10, probe_vectors
+	msr	vbar_el1, x10
+	adr	x10, probe_stack_top
+	msr	sp_el1, x10
+	mov	x10, #3
+	msr	cnthctl_el2, x10
+	msr	cntvoff_el2, xzr
+	mov	x10, #0x33ff
+	msr	cptr_el2, x10
+	msr	mdcr_el2, xzr
+	mov	x10, #(1 << 31)
+	msr	hcr_el2, x10
+	adr	x10, probe_el1
+	msr	elr_el2, x10
+	mov	x10, #0x3c5
+	msr	spsr_el2, x10
+	isb
+	eret
+probe_el1:
+	/* Match the production shim: disable EL1 translation/caches only
+	 * when LK left an active EL1 map. */
+	mrs	x10, sctlr_el1
+	tbz	x10, #0, probe_call_c
+	bic	x10, x10, #1
+	bic	x10, x10, #4
+	bic	x10, x10, #(1 << 12)
+	dsb	sy
+	msr	sctlr_el1, x10
+	isb
+probe_call_c:
+#endif
 	bl	entryprobe_board
 #endif
 	b	probe_finish
 
 /* A failed optional C/DRAM probe must still return to the stock kernel. */
 probe_exception:
+#if defined(ENTRY_EL1_DISPLAY)
+	mrs	x10, CurrentEL
+	cmp	x10, #8
+	b.ne	probe_record_fault
+	mrs	x10, esr_el2
+	ubfx	x11, x10, #26, #6
+	cmp	x11, #0x16		/* HVC64 */
+	b.ne	probe_record_fault
+	and	x10, x10, #0xffff
+	mov	x11, #0x5357
+	cmp	x10, x11
+	b.eq	probe_resume_el2
+probe_record_fault:
+#endif
 	add	x0, x13, #1
 	banner_field ENTRY_FAULT
 	mrs	x10, CurrentEL
@@ -121,7 +190,38 @@ probe_exception:
 	banner_field ENTRY_PC
 
 probe_finish:
-#if ENTRY_LEVEL >= 3
+#if defined(ENTRY_EL1_DISPLAY)
+	mrs	x10, CurrentEL
+	cmp	x10, #4
+	b.ne	probe_finish_el2
+	adr	x9, probe_saved
+	ldr	x10, [x9, #40]
+	cmp	x10, #8
+	b.ne	probe_finish_el2
+	hvc	#0x5357
+	b	.
+probe_resume_el2:
+	adr	x9, probe_saved
+	ldr	x10, [x9, #64]
+	msr	sctlr_el1, x10
+	ldr	x10, [x9, #72]
+	msr	vbar_el1, x10
+	ldr	x10, [x9, #80]
+	msr	sp_el1, x10
+	ldr	x10, [x9, #88]
+	msr	hcr_el2, x10
+	ldr	x10, [x9, #96]
+	msr	cnthctl_el2, x10
+	ldr	x10, [x9, #104]
+	msr	cntvoff_el2, x10
+	ldr	x10, [x9, #112]
+	msr	cptr_el2, x10
+	ldr	x10, [x9, #120]
+	msr	mdcr_el2, x10
+	isb
+probe_finish_el2:
+#endif
+#if ENTRY_LEVEL >= 3 && ENTRY_LEVEL < 6
 	/* The MMU stage maps only our own prefix WB. Clean all its dirty
 	 * lines (including tables, saved registers and stack), plus the banner
 	 * below, before restoring the original MMU-off SCTLR for Linux. */
@@ -164,7 +264,7 @@ probe_finish:
 	b.lo	6b
 7:
 	dsb	sy
-#if ENTRY_LEVEL >= 3
+#if ENTRY_LEVEL >= 3 && ENTRY_LEVEL < 6
 	adr	x9, probe_saved
 	ldr	x10, [x9, #56]
 	msr	sctlr_el1, x10
@@ -273,7 +373,7 @@ probe_vectors:
 	.data
 	.balign 16
 probe_saved:
-	.zero 64
+	.zero 128
 	.bss
 	.balign 16
 	.space 0x8000

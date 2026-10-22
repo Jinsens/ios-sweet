@@ -25,7 +25,7 @@ FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
 DISPLAY_RECORD_FIELDS = tuple('0123456789abcdefghijk')
 DISPLAY_LEVELS = ('display', 'display-kick')
 LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5,
-          'display': 6, 'display-kick': 6}
+          'display': 6, 'display-kick': 6, 'el1-display': 7}
 
 # For display levels the banner holds (first u32 << 32 | second u32) per
 # field. All bases are live-FDT lookups. Field K is the status word:
@@ -164,6 +164,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None):
                 config += f'#define ENTRY_{old} ENTRY_{new}\n'
         if level == 'display-kick':
             config += '#define ENTRY_DISPLAY_KICK 1\n'
+        if level == 'el1-display':
+            config += '#define ENTRY_EL1_DISPLAY 1\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         (tmp / 'probe.ld').write_text('''ENTRY(_head)
 SECTIONS {
@@ -188,8 +190,10 @@ SECTIONS {
             sources += ['entryprobe_timer.c']
         if level in DISPLAY_LEVELS:
             sources += ['entryprobe_display.c']
-        if level == 'display-kick':
+        if level in ('display-kick', 'el1-display'):
             sources += ['console.c']
+        if level == 'el1-display':
+            sources += ['display.c']
         objects = []
         flags = ['--target=aarch64-none-elf', '-O2', '-ffreestanding', '-nostdlib',
                  '-fno-pic', '-mgeneral-regs-only', '-mstrict-align',
