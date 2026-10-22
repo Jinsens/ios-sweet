@@ -148,12 +148,15 @@ CONFIG_XNUPOST suite pass; `PE_lockdown_iokit` and `vm_set_restrictions` also
 returned. Written-partition SHA256 `ad487813...` matched the readback; the
 full original was restored and verified as `2931647a...`.
 
-Permanent source fix (pending): `ml_wait_max_cpus()` in
-`osfmk/arm/machine_routines_common.c` must return immediately when
-`machine_info.max_cpus <= 1`, because the sole CPU is already executing and
-the IOKit CPU driver may never publish the flag (SweetCPU matches
-`qcom,kryo470`, matisse uses `arm,cortex-a510`). This needs a new patch and
-CI kernel; the diagnostic image above is not the permanent fix.
+Permanent source fix: `xnu/patches/0084-sweet-single-cpu-max-cpus.patch`
+makes `ml_wait_max_cpus()` in `osfmk/arm/machine_routines_common.c` return
+immediately when `machine_info.max_cpus <= 1`; the sole CPU is already
+executing and the IOKit CPU driver may never publish the flag (SweetCPU
+matches `qcom,kryo470`, matisse uses `arm,cortex-a510`). Local single-file
+compile with `tools/xnu-cc.py` passes (0 of 1 failed on the ci-39158169212
+tree). Committed as `b616374` and pushed to `Jinsens/ios-sweet` main; CI run
+`39826038020` was queued to build the new kernel. The diagnostic image above
+is not the permanent fix.
 
 **Completed: first post-`spllo` checkpoint (hardware PASS).**
 `shim/out/entryprobe-el1-spllo-brk.img`, 26,562,560 B, SHA256
