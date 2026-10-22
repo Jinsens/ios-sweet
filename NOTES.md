@@ -56,6 +56,17 @@ observation is the pending half of this test**: if the serial0 build drew
 `*** SWEET userspace...` and heartbeats, `serial=3` is confirmed as the console
 root cause; if not, the remaining gap is video console/DSI refresh.
 
+Because the 0084 rtcfast kernel has no 0085 refresh hook, a matching 0085
+serial0 loop image is also prepared (NOT flashed):
+`shim/out/entryprobe-el1-ramdisk-0085-loop-serial0.img`, 26,566,656 B,
+SHA256 `87199095ea18cf3b6ab05c92d8abb5c64284af4177debedcdb8131ffcae509d7`;
+partition hash
+`7b3a67b68de489829769b4da716be51143fb532b4fa3e19f5759e28894876189`.
+Payload `shim/out/matisse-xnu-0085-ramdisk-loop-serial0.payload`, 16,622,352 B,
+SHA256 `0bc90cad72f583e23e042aa44042d0c6e5f931e49b36da82c90c58d6a89da4c1`
+(0085 kernel, loop init, `serial=0`). It keeps the original 30 s RTC/IOMedia
+waits, so expect about 60 s before PID 1; the shim leaves the WDT off.
+
 **Watchdog fact check (device evidence, correcting the `WDT_AUTO_RESET`
 theory).** MediaTek does have a WDT here: the live DTB has
 `watchdog@1c007000` compatible `mediatek,mt6983-wdt`, `/sys/class/watchdog/watchdog0`
