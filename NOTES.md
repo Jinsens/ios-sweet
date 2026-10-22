@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: PID 1 EL0 open checkpoint PASS; boot_a restored live backup; write checkpoint prepared <<<
+## >>> ACTIVE 2026-10-23: PID 1 EL0 open+write checkpoints PASS; boot_a restored live backup <<<
 
 **Current device (read-only adb + approved restore this turn): Recovery, root,
 slot `_a`.** The partition was initially the stock template
@@ -22,7 +22,11 @@ command-mode DSI path is not pushing new frames, not that the kernel stopped.
 `stage=87 esr=0000000056000080 pc=0000000100000420 x0=00000001000004c0
 x16=0000000000000005 spsr=0000000000000000` in the Recovery dmesg: an EL0t
 AArch64 `open` syscall carrying the `/dev/console` path pointer from
-`tools/sweet-init.S`. Evidence: `research/matisse/20261023-pid1/open-dmesg.txt`.
+`tools/sweet-init.S`. The write checkpoint then hit at the same boot path with
+`pc=00000001000004a8 x0=0000000000000000 x16=0000000000000004 spsr=0`:
+`open` returned fd 0 (not 3), the `b.cs hang` path was not taken, and the first
+`write` to the console was issued. Evidence:
+`research/matisse/20261023-pid1/open-dmesg.txt` and `write-dmesg.txt`.
 The correct test trigger was `adb reboot recovery`, not `adb reboot`; the
 normal-mode run ended with `ro.boot.bootreason=Watchdog` and produced no
 readable record.
@@ -61,13 +65,23 @@ SVC whose x16 matches `--el0-syscall`. This directly proves whether
   `esr=0000000056000080`, `pc=0000000100000420`,
   `x0=00000001000004c0` (path pointer), `x16=0000000000000005`,
   `spsr=0000000000000000`. The relay returned to Recovery in about 20 s.
-- `shim/out/entryprobe-el1-ramdisk-syscall-write.img`, 26,566,656 B, SHA256
-  `23270c33bfedb861a2ffcb20fab639c80981d47d95dbb93aa29a282c4ea94f92`;
-  predicted partition `fa931660ff74fd3420754735095e23411e2de754eb578bd8d7040dc47d318a8c`.
-  `--el0-syscall 4`. Expected record: `esr=0000000056000080`,
-  `pc=000000001000004a8`, `x0` = returned console fd (expected 3),
-  `x16=0000000000000004`, `spsr=0000000000000000`.
-- Both embed payload `shim/out/matisse-xnu-ramdisk-rtcfast.payload`, 16,622,400 B,
+- **PASS:** `shim/out/entryprobe-el1-ramdisk-syscall-write.img`, 26,566,656 B,
+  SHA256 `23270c33bfedb861a2ffcb20fab639c80981d47d95dbb93aa29a282c4ea94f92`;
+  raw-write partition hash
+  `fa931660ff74fd3420754735095e23411e2de754eb578bd8d7040dc47d318a8c`
+  matched the on-device readback. `--el0-syscall 4` hit:
+  `esr=0000000056000080`, `pc=00000001000004a8`,
+  `x0=0000000000000000` (fd returned by open), `x16=0000000000000004`,
+  `spsr=0000000000000000`. This proves open returned and the first write was
+  issued; it does not yet prove the write returned.
+- Prepared but not flashed:
+  `shim/out/entryprobe-el1-ramdisk-syscall-select.img`, 26,566,656 B, SHA256
+  `8233800cac3f98b15eaedbf2dac996657954b26d00536bfc2d578e428dc0fbd7`;
+  predicted partition
+  `1185a03a7d0d1a9acee02e232499afbb98ecb48e52d39a53fe54c77274cf1930`;
+  `--el0-syscall 93`. Expected record: `esr=0000000056000080`,
+  `pc=0000000100000488`, `x0=0`, `x16=000000000000005d`, `spsr=0`.
+- Both PASS images embed payload `shim/out/matisse-xnu-ramdisk-rtcfast.payload`, 16,622,400 B,
   SHA256 `2ff27355d4c416516760243811ef6bec2bf71815dfbf18346060f36dd07d4a44`.
   It is the hardware-passed RAM-disk kernel with the RTC and IOMedia 30 s waits
   bypassed and the old `load_init_program` BRK removed (the only four words
@@ -77,11 +91,12 @@ SVC whose x16 matches `--el0-syscall`. This directly proves whether
   stub 100 B (<128), embedded payload hash matched, key words checked
   (`0x77ee118: d104c3ff`, `0x79ad070: d503201f`, `0x7a41e70: aa1f03e0`,
   `0x7a41eb4: 14000007`, slot 8 `140003b3`). All 44 tools tests pass.
-- Next: flash **write**; a hit proves `open("/dev/console")` returned and the
-  first `write` was issued. A miss now means open blocked/failed, not that PID 1
-  never ran. Trigger probes with `adb reboot recovery`; a plain `adb reboot`
-  booted normal mode, ended with `ro.boot.bootreason=Watchdog`, and produced no
-  readable record. Restore `boot_a` from the live backup after every test.
+- Next: trap `getpid` (20) or `select` (93) from the same EL0 path. A hit
+  proves the console `write` returned and the init reached the PID print or the
+  5 s heartbeat loop; a miss means the console write blocked. Trigger probes
+  with `adb reboot recovery`; a plain `adb reboot` booted normal mode, ended
+  with `ro.boot.bootreason=Watchdog`, and produced no readable record. Restore
+  `boot_a` from the live backup after every test.
 
 ## >>> ACTIVE 2026-10-23 (Asia/Shanghai): BSD mounts md0; display refresh fix prepared <<<
 
