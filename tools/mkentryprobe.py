@@ -22,7 +22,7 @@ from xnu_breakpoint import early_vector_pa, high_vector_pa, bootstrap_clean_rang
 
 PREFIX_SIZE = 2 << 20
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
-          'fault', 'esr', 'far', 'pc', 'gicd', 'vtimer', 'fb')
+          'fault', 'esr', 'far', 'pc', 'gicd', 'vtimer', 'fb', 'x0')
 DISPLAY_RECORD_FIELDS = tuple('0123456789abcdefghijk')
 DISPLAY_LEVELS = ('display', 'display-kick')
 LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5,

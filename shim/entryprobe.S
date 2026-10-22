@@ -171,6 +171,11 @@ probe_exception:
 	b.eq	probe_resume_el2
 probe_record_fault:
 #endif
+#ifdef ENTRY_X0
+	/* The vector relay preserves x0. Capture a stopped function's return
+	 * value (or fault operand) before the recorder reuses the register. */
+	banner_field ENTRY_X0
+#endif
 	add	x0, x13, #1
 	banner_field ENTRY_FAULT
 	mrs	x10, CurrentEL
