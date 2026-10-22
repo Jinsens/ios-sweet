@@ -331,6 +331,28 @@ backup/boot_a-stock-trim.img
 SHA256: fe6e8fbf321ea542eb060efcda27b70ae96065e82cc871d4c71082b7268c220d
 ```
 
+**RAM disk 最小根（2026-10-23 主机侧准备，未刷机）。** 使用同一 CI 内核、`shim/out/matisse.adt` 和由 `tools/sweet-init.S` + `tools/mkinit.py` 重建的 `research/sweet-init`（SHA256 `f5de3714…`）。`rd=md0` 经 `platform_cmdline` 保留，命令行 135 B。RAM disk 段位于 VA `0xfffffe00084d0000` / PA `0x1024d0000`，大小 32 KiB；ADT 的 `/chosen/memory-map/RAMDisk` 为 `0x1024d0000/0x8000`，ADT 与 boot_args 随后放在 `0x1024d8000`/`0x1024dc000`，全部在已验证的 128 MiB 清理范围内。
+
+```text
+payload: shim/out/matisse-xnu-ramdisk-init.payload
+大小: 16,622,400 bytes
+SHA256: 4df6b274603e3897e9699bb7bc11791556f1067868e772a0fdf1592d5354f9b9
+
+用户态启动镜像（无断点）: shim/out/entryprobe-el1-ramdisk-init.img
+大小: 26,562,560 bytes
+SHA256: b337bfbf86bbe62c769bf6521df0331f65e7cf7d0c4d9973d83b0ae0cafcbe75
+
+bsd_init 返回检查点: shim/out/entryprobe-el1-ramdisk-bsdinit-return-brk.img
+SHA256: 9a8c43dbe6b2c13bf9ad2136c21320bc7bf23df878759b63bd4b7d57d40c1821
+断点: VA fffffe0007aafc04（bl bsd_init 之后）
+
+load_init_program 检查点: shim/out/entryprobe-el1-ramdisk-load-init-brk.img
+SHA256: b4af6752d90b82a46b814de428f92e1eeabc39073f15dfdf1a44c6bcc68928e8
+断点: VA fffffe00077ee118
+```
+
+三种镜像均重新解包并核对了嵌入的 `SWEETXNU` payload SHA、init 的 `MH_MAGIC_64`、ADT `RAMDisk` 对、命令行长度，以及“只有检查点镜像含一个 `BRK #0x5357`”。44 项工具测试通过。设备仅做只读核对：Recovery、root ADB、slot `_a`，`boot_a` 仍为 `2931647a…`；本轮未写入任何分区。刷机仍需单独确认。
+
 关键检查点镜像（均为 26,562,560 bytes；命中后自动返回 Recovery，随后全量恢复并校验）：
 
 | 检查点 | 镜像 SHA256 前缀 | 记录 PC |
@@ -374,4 +396,4 @@ research/matisse/20261023-sched-startup/
 
 关键提交：`5f3ba55` 选择性诊断向量；`42d6582` EL1t/EL1h 双槽修正；`8ddef0a`、`90c4084` 调度器检查点与通过记录；`3235c74` thread_daemon；`4a930d1` spllo；`d90dcf8` 定时 IRQ；`eaed2c0` lockdown；`8c353e9`、`a798c4c` XNUPOST/kperf 隔离；`6287cb8` 单 CPU max_cpus 实机通过；`b616374` 永久补丁 0084；`5321eae` 最终交接。
 
-本轮结束时设备在 Recovery（root ADB，slot `_a`），`boot_a` 已恢复并校验，没有尚未恢复的测试；未写 `userdata`。下一步是执行 `bsd_init` 并通过 `mkpayload.py --ramdisk` 提供最小根，先拿 EL0 PID 1 心跳，再谈 Apple launchd 与桌面。不要直接刷 iOS 根镜像。
+本轮结束时设备在 Recovery（root ADB，slot `_a`），`boot_a` 已恢复并校验，没有尚未恢复的测试；未写 `userdata`。RAM disk 最小根和 `bsd_init`/`load_init_program` 检查点已准备好（见上一节），但尚未刷入。下一步是在获得当次确认后刷入无断点的 `entryprobe-el1-ramdisk-init.img`，观察面板上的 `load_init_program`、PID 1 与 5 秒心跳；失败时依次改用两个检查点定位。先拿 EL0 PID 1，再谈 Apple launchd 与桌面。不要直接刷 iOS 根镜像。

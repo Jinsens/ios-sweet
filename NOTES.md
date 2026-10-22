@@ -97,9 +97,48 @@ leave a test image in `boot_a`.
 
 **Docs:** `docs/matisse-xnu-ios-roadmap-zh.md` updated on 2026-10-23 with the scheduler, timer-IRQ, lockdown, kperf and `bsd_init` results.
 
-**Next:** execute `bsd_init` itself. The current payload still has no
-`RAMDisk` node and no root-device boot argument, so the next work is a
-RAM-disk root and a checkpoint after `bsd_init`/`load_init_program`.
+**Next:** execute `bsd_init` itself with a RAM-disk root (prepared, NOT
+flashed). Host-only build on 2026-10-23 reused CI kernel 39828405447
+(`28190f5b...`, patch 0084), `shim/out/matisse.adt` and the static init
+`research/sweet-init` (rebuilt from `tools/sweet-init.S` with NDK clang +
+`tools/mkinit.py`, byte-identical SHA256
+`f5de3714ff95e6a3b9ece30723f677de0f3f74ec5eb985a00c5ae872f0ac9bf1`).
+
+- `shim/out/matisse-xnu-ramdisk-init.payload`, 16,622,400 B, SHA256
+  `4df6b274603e3897e9699bb7bc11791556f1067868e772a0fdf1592d5354f9b9`.
+  Cmdline: `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0
+  sweetkeys=0 sweettouch=0 sweetbattery=0 sweetusb=0 ufsrw=0 -noprogress`
+  (135 B, `rd=md0` preserved by `platform_cmdline`).
+- RAM disk segment VA `0xfffffe00084d0000`, 32 KiB, PA `0x1024d0000`;
+  ADT `/chosen/memory-map/RAMDisk = <0x1024d0000, 0x8000>`. ADT is copied at
+  PA `0x1024d8000` (4508 B), boot_args at `0x1024dc000`, topOfKernelData
+  `0x1024e0000`; all inside the proven 128 MiB cleanup range
+  `[0x100000000, 0x108000000)`.
+- `shim/out/entryprobe-el1-ramdisk-init.img`, 26,562,560 B, SHA256
+  `b337bfbf86bbe62c769bf6521df0331f65e7cf7d0c4d9973d83b0ae0cafcbe75`
+  (no BRK; selective dual-slot vectors, stock-template SHA `7a6a462d...`).
+  Expected panel output: `BSD root: md0`, `hfs: mounted SweetRoot...` is not
+  used here (mockfs), `load_init_program: attempting to load /sbin/launchd`,
+  then `*** SWEET userspace: init running as PID 1 ***` and a
+  `SWEET init: still alive` line every 5 s.
+- Checkpoints (same payload plus one `BRK #0x5357`):
+  `entryprobe-el1-ramdisk-bsdinit-return-brk.img` SHA256
+  `9a8c43dbe6b2c13bf9ad2136c21320bc7bf23df878759b63bd4b7d57d40c1821`,
+  BRK at VA `0xfffffe0007aafc04` (immediately after `bl bsd_init` returns);
+  `entryprobe-el1-ramdisk-load-init-brk.img` SHA256
+  `b4af6752d90b82a46b814de428f92e1eeabc39073f15dfdf1a44c6bcc68928e8`,
+  BRK at `_load_init_program` VA `0xfffffe00077ee118`.
+- Validation: re-parsed both compressed boot Images, matched the embedded
+  `SWEETAPP` payload SHA, the init bytes and `MH_MAGIC_64`, the ADT RAMDisk
+  pair, the cmdline length, and that only the checkpoint payloads contain the
+  BRK word. All 44 tools tests pass.
+- Device baseline read-only check this turn: Recovery, root ADB, slot `_a`,
+  `boot_a` SHA256 `2931647a...` matches the full backup. No flash was
+  performed. Each `boot_a` write still requires explicit approval.
+
+Next action: flash the no-BRK image, boot it, and photograph/observe the
+panel. If it does not reach PID 1, use the `bsdinit-return` checkpoint next;
+if that passes but userland does not, use the `load-init` checkpoint.
 
 **Failed: XNUPOST-skip diagnostic (hardware, infinite reboot).**
 `shim/out/entryprobe-el1-bsd-init-skiptest-brk.img`, 26,562,560 B, SHA256
