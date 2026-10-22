@@ -1,20 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> PAUSED 2026-10-23: UFS bring-up parked; boot_a restore pending; BSD + PID 1 proven <<<
+## >>> PAUSED 2026-10-23: boot_a restored; UFS bring-up parked; BSD + PID 1 proven <<<
 
-**Current device: HUNG at the first logo after the UFS entry-checkpoint boot.**
-`boot_a` currently contains
-`shim/out/entryprobe-el1-ufs-entry-brk.img` (partition hash
-`c1a2687a6b3d592f5929276f3b87b4decfa5f16b5c004c69b6985370c1a516f9`); no adb or
-fastboot is reachable. The shim leaves the WDT off, so it will not
-self-recover. **Required restore:** user holds Power + Volume Down to enter
-fastboot; then flash `backup/boot_a-stock-trim.img`, boot Recovery, write
-`backup/recovery-20261021/boot_a-live-20261021.img`, and verify the full
-67,108,864-byte SHA256
+**Current device (verified): Recovery, root, slot `_a`.** The full
+67,108,864-byte `boot_a` was restored from
+`backup/recovery-20261021/boot_a-live-20261021.img` and read back as
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
-A fastboot watcher was started to perform this automatically (flash trim ->
-Recovery -> write live backup -> verify). Do not flash further tests before the
-restore and hash check.
+`boot_b` is a separate image
+(`8775a30a95a44ca5c8d83c38df4d77e2c4c8bad315ac54fb9d1dae60495d9cb7`). No
+`userdata` write. Each new `boot_a` write still needs explicit approval. The
+intermediate trim-prefix restore was `861da6b8...`; the full live backup has
+replaced it.
 
 **UFS bring-up FAILED and is parked (2026-10-23).** Two images were flashed:
 
@@ -56,8 +52,9 @@ relay. `userdata` was not written. Production 0085 video-console output is also
 not confirmed; the serial0 evidence came from the 0084 entryprobe build.
 
 **Next session, in order.**
-1. Restore `boot_a` from `backup/recovery-20261021/boot_a-live-20261021.img`
-   and verify `2931647a...` before anything else.
+1. `boot_a` is already restored to `2931647a...`; re-verify it before any new
+   test, and keep the same trim-prefix -> Recovery -> live-backup recovery path
+   ready.
 2. Bisect the UFS boot earlier: BRK at `IOKitBSDInit` entry and `bsd_init`
    entry using the UFS ADT; compare with the same payload using the old ADT and
    `rd=md0` to separate UFS from payload/ADT placement.
