@@ -9,7 +9,7 @@ import unittest
 
 
 def fdt(children):
-    strings = b'compatible\0reg\0interrupts\0'
+    strings = b'compatible\0reg\0interrupts\0#interrupt-cells\0'
     pad = lambda b: b + bytes((-len(b)) % 4)
     u32 = lambda v: struct.pack('>I', v)
     def prop(name, value):

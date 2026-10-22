@@ -8,6 +8,30 @@
 #include "console.h"
 #include "display.h"
 #endif
+#if defined(ENTRY_LOADER_PROBE)
+#include "loader.h"
+#include "diag.h"
+static char *loader_banner;
+
+void diag_stage(const char *name, uint64_t a, uint64_t b)
+{
+	/* Preserve the loader's last completed checkpoint in Linux's banner.
+	 * The XNU entry replaces VBAR; after that, this fallback is unavailable. */
+	unsigned n = name[0] == 'S' && name[1] >= '0' && name[1] <= '9' ?
+	    (unsigned)(name[1] - '0') : 0;
+	static const char hex[] = "0123456789abcdef";
+	unsigned offsets[] = { ENTRY_STAGE, ENTRY_FAR, ENTRY_PC };
+	uint64_t values[] = { 0x80u + n, a, b };
+	for (unsigned j = 0; j < 3; j++)
+		for (unsigned i = 0; i < 16; i++)
+			loader_banner[offsets[j] + i] = hex[(values[j] >> (60 - i * 4)) & 15];
+}
+
+void diag_arm_sentinels(uint64_t virt, uint64_t phys, uint64_t size)
+{
+	(void)virt; (void)phys; (void)size;
+}
+#endif
 #if defined(ENTRY_XNU)
 #include "loader.h"
 #endif
@@ -63,6 +87,13 @@ void entryprobe_board(uint64_t dtb, char *banner)
 	if (rc) {
 		display_refresh();
 		field(banner, ENTRY_STAGE, 0x74);
+#if defined(ENTRY_LOADER_PROBE)
+		loader_banner = banner;
+		const char *why = loader_boot(dtb);
+		con_str("LOADER", why);
+		display_refresh();
+		field(banner, ENTRY_STAGE, 0x7f);
+#endif
 	}
 #else
 #if ENTRY_LEVEL == 6

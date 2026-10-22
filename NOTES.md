@@ -1,64 +1,92 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): display control reproduced; EL1 bisection next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU load-only control passed; entry breakpoint next <<<
 
-**Observed this session:** online product is `matisse` (K50 Pro / MT6983),
-initially in fastboot. `oem expdb` works: it returned 2,047,741 gzip bytes,
-decompressed to 134,217,728 bytes. No `SWLG` or `SWX2` marker exists, so the
-previous UFS log probe has no successful-write evidence. Evidence is ignored
-under `research/matisse/20261022-xnu-resume/` (host-date directory).
+**Current device (verified): Recovery, boot_a fully restored.** The latest
+full 67,108,864-byte readback (`el1-load-restored.img`) matches original SHA256
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
+sweet / Qualcomm target. XNU execution is still unproven.
 
-With the user's explicit approval for this control and its restoration:
+Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
+Each test below had explicit user approval including restoration. This LK
+has no working `fastboot boot`; tests temporarily replace boot_a. A new
+boot_a test requires separate confirmation per AGENTS.md. Do not write
+vendor_boot, userdata, GPT, bootloaders, recovery, modem or persist.
 
-- Restored the trimmed live image via `tools/fbraw.py`, then
-  `reboot-recovery` returned OKAY and Recovery ADB came online. The first full
-  readback differed in 4,081 bytes immediately after the trimmed prefix
-  (`0x13de000..0x13df000`); a trimmed flash alone did not restore those bytes.
-- Pushed/wrote the **full 64 MiB** live backup from Recovery. Readback SHA256
-  `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
-- Wrote exact validated control `entryprobe-display-kick-hw-ok.img`, SHA256
-  `b8cec21a912dc978b7b78fddd343253e9a93b95b3d91e275bca0fe0bc0eeee3f`.
-  Full partition readback matched predicted SHA256
-  `016331b382ae2c88c668931c8feaa448c42f48948b440fdb7b83b455853b97a7`.
-- Rebooted recovery; user explicitly saw the test screen and moving green
-  bar. Same-boot `display-control-dmesg.txt` has `SWTX1` and zero
-  `ovl status error` / CMDQ software-timeout pre-dumps. The old control's
-  status is still `0x500007` (its FRAME_DONE check fails despite visible
-  refresh); this is the expected known limitation, not a display regression.
-- Re-pushed the full original image after reboot (Recovery `/tmp` is cleared
-  on reboot), restored it and verified the complete 64 MiB hash above.
-  **Current device: Recovery; boot_a fully restored.**
+**Observed results, in order:**
 
-Host tests: all 26 `tools/tests` pass. Latest successful XNU CI remains
-`Jinsens/ios-sweet` run **39640336293**, commit `dd9752e`; no new kernel build
-or XNU success is claimed. Four diagnostic files were already modified at
-session start: `shim/build.sh`, `shim/display.c`, `shim/shim.c`,
-`tools/mkentryprobe.py`; preserve their work.
+- Exact display control `entryprobe-display-kick-hw-ok.img`, 20,836,352 B,
+  SHA256 `b8cec21a912dc978b7b78fddd343253e9a93b95b3d91e275bca0fe0bc0eeee3f`:
+  user saw test screen and moving green bar; same-boot Recovery log had no
+  OVL/CMDQ timeout errors. The old control reports `0x500007` despite visible
+  refresh (known FRAME_DONE-check limitation).
+- `entryprobe-el1-display.img`, 20,836,352 B, SHA256
+  `a3131110a6a7876d08ade3518e87fdcf9a557b7500eecb2f43722f060e9dd4f0`:
+  user saw EL1 text; same-boot stage `0x74`, fault 0, display_error 0,
+  display result 1. **Actual initial entry is already EL1** despite LK's
+  misleading `via EL2` message. MIDR `0x410fd462`, MPIDR `0x81000000`,
+  CNTFRQ 13 MHz, SCTLR `0x30d00980`. EL2/HVC return branch remains untested.
+- Full shim `shim-boot-xnu-resume.img`, 7,008,256 B, SHA256
+  `b89fcc7c29cd9faa9c200c4ba7713bf1ad55c7bd9196d0e3271d0fd448eefafb`:
+  user saw only Redmi logo; forced fastboot entry and full recovery completed.
+- Direct loader/jump `entryprobe-el1-xnu.img`, 26,562,560 B, SHA256
+  `bee6ee32f76f7faa6c1df8736f4eef54b81f1f5978bc087507cfabe10ec73c42`:
+  user saw only logo, no Recovery; host later observed preloader USB.
+  Full boot_a restored. The logo alone does not establish an execution stage.
+- **Load-only `entryprobe-el1-load.img`, 26,562,560 B, SHA256
+  `9e6c2bec44ccef8dc9e4681ca3c360f9930805b4003be4a0ebd80eb52a568c52`:**
+  returned automatically to Recovery. Same-boot `el1-load-dmesg.txt` has
+  `stage=7f fault=0 esr=0 far=410fd462 pc=81000000`, timer INTID 27.
+  The loader reached its last S7 ID checkpoint and returned through
+  LOADER_NO_JUMP, after copying XNU segments, ADT and boot_args. FAR/PC here
+  are MIDR/MPIDR diagnostic values, not exception addresses. Full boot_a
+  restoration and the 64 MiB SHA256 above were verified afterward.
 
-**EL1 display milestone:** explicit approval received; built/tested
-`entryprobe-el1-display.img` (20,836,352 B), SHA256
-`a3131110a6a7876d08ade3518e87fdcf9a557b7500eecb2f43722f060e9dd4f0`.
-Full written-partition SHA256
-`4920c9bec967202c8b5a5444c3b5850a9dffa274eb45f856a7d486d215219d91`.
-The user saw `EL1 DISPLAY PROBE`. Recovery returned; same-boot banner:
-entry **EL1**, MIDR `0x410fd462`, SCTLR `0x30d00980`, stage **0x74**,
-fault 0, display error 0, display_probe result 1. Thus **the original entry
-was already EL1**, despite LK's misleading `via EL2` log. The new probe's
-optional EL2/HVC return branch has NOT been exercised on this hardware.
-Full boot_a restored again; hash `2931647a...86b1` verified. Evidence:
-`el1-display-dmesg.txt` / `el1-display-manifest.json` under the directory above.
+All tests restored the full original partition. A trimmed fastboot restore
+alone previously left one 4 KiB block of test data beyond the prefix; always
+follow it with a full Recovery write and complete readback hash. Recovery
+/tmp is cleared each reboot: re-push the backup before each restoration.
+Use `dd ... && sync` and accept adb state `recovery` as online. Recovery dd
+can append statistics to stdout: take exactly the first 67,108,864 bytes.
 
-This probe exposed a real independent bug: `board.c` read the virtual timer
-interrupt's flags cell at +32 instead of its PPI number at +28, reporting
-INTID 17 instead of 27. Corrected with synthetic ARM timer binding regression
-coverage; all 27 host tests pass. The existing matisse ADT already uses 27,
-so this does not explain the previous XNU loader failure.
+**Build and implementation:** latest successful kernel CI remains
+`Jinsens/ios-sweet` run **39640336293**, commit `dd9752e`; no new CI run.
+`xnu/out/ci-39640336293/kernel.development.sweet` SHA256
+`bc308789486ee96b380ce374bc7fe4c1894f4a115da9662b4cb0cf9a016b543c`.
+Debug payload `shim/out/matisse-xnu-debug.payload` SHA256
+`b6eafe9a953aea1d18a34d579e43e172f1bb0f60a289a51b303d463e13e8fe95`
+adds only `-enable_kprintf_spam`. XNU entry PA `0x10148c488`, boot_args
+`0x1024d4000`, top `0x1024d8000`; physBase `0x100000000`, memSize
+`0x12e000000`. Probe Image 65,552,896 B; marker offset 48,947,200;
+stock Linux +2 MiB and live DTB `0x47c80000` remain intact.
 
-**Next:** use the now hardware-tested display.c sequence in the full XNU
-shim. A debug payload adds `-enable_kprintf_spam` without changing the kernel
-(CI 39640336293). Build/layout validation first, then separately authorize
-one boot_a-only test and its full restore. No vendor_boot, userdata or GPT
-writes. XNU entry is still unproven.
+The timer reader now handles GIC interrupt tuples of **four cells on
+MT6983 and three on sweet**, yielding virtual INTID 27 and physical 30
+against the live tree. 27 host tests pass, all nine original diagnostic
+levels plus el1-xnu/el1-load cross-compile. XNU video mapping checks pass
+11 cases. Full repo validation still fails on six pre-existing CRLF shell
+files; do not report it as passing.
+
+Commits: `712b44f` (display-control/restoration handoff), `031d329` (EL1
+probe, hardware-tested display refresh, initial timer fix). Completed
+load-only and four-cell timer work is being committed next. Pre-existing
+`shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
+the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
+
+**Next concrete action:** prepare a copy of the debug payload with its
+first XNU entry instruction replaced by BRK. Run the validated EL1 loader
+probe against it only after separate test approval. Before XNU replaces
+VBAR, the probe should capture ESR/ELR and return to stock Linux in the same
+boot; ELR `0x10148c488` would establish execution at the high physical entry.
+If successful, advance diagnostic checkpoints through the earliest assembly.
+The MT6983 command-mode panel needs explicit refresh, so DRAM-only early
+framebuffer writes cannot be inferred from the visible logo.
+
+`oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
+not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
+not an established cause. Full-shim Unicorn emulation reached XNU entry
+with modeled MMIO; this does not prove hardware execution.
 
 ## >>> SESSION 2026-10-22 - diagnostic kick: log_store trace + XNU sentinels (read first) <<<
 

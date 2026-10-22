@@ -21,13 +21,16 @@ class BoardTimerTests(unittest.TestCase):
                             str(shim / 'host_board.c'), str(shim / 'board.c'),
                             str(shim / 'fdt.c'), '-o', str(exe)], check=True)
             # Deliberately distinguish IRQ number from trigger/affinity flags.
-            for virt, phys, flags in ((11, 14, 1), (3, 2, 0xf08)):
-                cells = (1, 13, flags, 1, phys, flags,
-                         1, virt, flags, 1, 10, flags)
+            for virt, phys, flags, count in ((11, 14, 1, 4), (3, 2, 0xf08, 3)):
+                cells = tuple(cell for irq in (13, phys, virt, 10)
+                              for cell in ((1, irq, flags, 0) if count == 4
+                                           else (1, irq, flags)))
                 tree = Path(tmp) / 'timer.dtb'
-                tree.write_bytes(fdt([('timer', [
+                tree.write_bytes(fdt([('interrupt-controller', [
+                    ('compatible', b'arm,gic-v3\0'),
+                    ('#interrupt-cells', struct.pack('>I', count))]), ('timer', [
                     ('compatible', b'arm,armv8-timer\0'),
-                    ('interrupts', struct.pack('>12I', *cells))])]))
+                    ('interrupts', struct.pack('>'+'I'*len(cells), *cells))])]))
                 result = subprocess.check_output([str(exe), str(tree)], text=True)
                 self.assertIn(f'timer      virt {16+virt} phys {16+phys} sgi 1', result)
 

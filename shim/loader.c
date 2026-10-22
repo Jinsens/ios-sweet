@@ -240,6 +240,11 @@ const char *loader_boot(uintptr_t dtb)
 #endif
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
+#ifdef LOADER_NO_JUMP
+	/* Same-boot load-only control: exercise every copy/boot_args step,
+	 * then return to the bundled stock Linux without entering XNU. */
+	return "load verified; XNU jump skipped";
+#endif
 	((xnu_entry_t)entry_pa)(ba_pa);
 	return "xnu returned";
 }

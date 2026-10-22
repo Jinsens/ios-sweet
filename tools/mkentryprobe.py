@@ -25,7 +25,8 @@ FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
 DISPLAY_RECORD_FIELDS = tuple('0123456789abcdefghijk')
 DISPLAY_LEVELS = ('display', 'display-kick')
 LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5,
-          'display': 6, 'display-kick': 6, 'el1-display': 7}
+          'display': 6, 'display-kick': 6, 'el1-display': 7,
+          'el1-xnu': 7, 'el1-load': 7}
 
 # For display levels the banner holds (first u32 << 32 | second u32) per
 # field. All bases are live-FDT lookups. Field K is the status word:
@@ -131,10 +132,19 @@ def prepare(template, level=None):
     return header, image, template[rd_off:rd_off + rs], start, offsets, original_banner
 
 
-def build(template_path, out_path, toolchain, level, max_image_size=None):
+def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
+    payload = Path(payload_path).read_bytes() if payload_path else None
+    if (level in ('el1-xnu', 'el1-load')) != (payload is not None):
+        raise ValueError('el1-xnu/el1-load require --payload; other levels do not accept it')
+    payload_offset = None
+    if payload is not None:
+        if len(payload) < 0x2a8 or payload[:8] != b'SWEETXNU':
+            raise ValueError('invalid SWEETXNU payload')
+        payload_offset = (image_size + 4095) & ~4095
+        image_size = payload_offset + 16 + len(payload)
     if max_image_size is not None and image_size > max_image_size:
         raise ValueError('wrapped Image exceeds caller-supplied safe load window')
     out_path = Path(out_path).resolve()
@@ -164,10 +174,12 @@ def build(template_path, out_path, toolchain, level, max_image_size=None):
                 config += f'#define ENTRY_{old} ENTRY_{new}\n'
         if level == 'display-kick':
             config += '#define ENTRY_DISPLAY_KICK 1\n'
-        if level == 'el1-display':
+        if level in ('el1-display', 'el1-xnu', 'el1-load'):
             config += '#define ENTRY_EL1_DISPLAY 1\n'
+        if level in ('el1-xnu', 'el1-load'):
+            config += '#define ENTRY_LOADER_PROBE 1\n'
         (tmp / 'entryprobe_config.h').write_text(config)
-        (tmp / 'probe.ld').write_text('''ENTRY(_head)
+        linker = '''ENTRY(_head)
 SECTIONS {
  . = 0;
  .text : { *(.text.head) *(.text*) }
@@ -180,7 +192,10 @@ SECTIONS {
  stock_image = 0x200000;
  /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }
-''')
+'''
+        if payload_offset is not None:
+            linker = linker.replace('_end = .;', f'_end = {payload_offset};')
+        (tmp / 'probe.ld').write_text(linker)
         sources = ['entryprobe.S']
         if LEVELS[level]:
             sources += ['entryprobe.c', 'board.c', 'fdt.c', 'str.c', 'logstore.c']
@@ -190,15 +205,21 @@ SECTIONS {
             sources += ['entryprobe_timer.c']
         if level in DISPLAY_LEVELS:
             sources += ['entryprobe_display.c']
-        if level in ('display-kick', 'el1-display'):
+        if level in ('display-kick', 'el1-display', 'el1-xnu', 'el1-load'):
             sources += ['console.c']
-        if level == 'el1-display':
+        if level in ('el1-display', 'el1-xnu', 'el1-load'):
             sources += ['display.c']
+        if level in ('el1-xnu', 'el1-load'):
+            sources += ['loader.c']
         objects = []
         flags = ['--target=aarch64-none-elf', '-O2', '-ffreestanding', '-nostdlib',
                  '-fno-pic', '-mgeneral-regs-only', '-mstrict-align',
                  '-fno-stack-protector', '-fno-builtin', '-Wall', '-Wextra', '-Werror',
                  '-I' + str(tmp), '-I' + str(repo / 'shim')]
+        if payload is not None:
+            flags += [f'-DEMBEDDED_XNU_BYTES={len(payload)}']
+        if level == 'el1-load':
+            flags += ['-DLOADER_NO_JUMP']
         for source in sources:
             obj = tmp / (source + '.o')
             subprocess.run([cc, *flags, '-c', str(repo / 'shim' / source), '-o', str(obj)], check=True)
@@ -212,6 +233,9 @@ SECTIONS {
         if len(prefix) > PREFIX_SIZE:
             raise ValueError('probe larger than prefix')
         wrapped = prefix + bytes(PREFIX_SIZE - len(prefix)) + image
+        if payload is not None:
+            wrapped += bytes(payload_offset - len(wrapped))
+            wrapped += b'SWEETAPP' + struct.pack('<Q', len(payload)) + payload
         wrapped += bytes(image_size - len(wrapped))
         packed = gzip.compress(wrapped, compresslevel=9, mtime=0)
         mkbootimg.build(packed, ramdisk, header['cmdline'].decode(), str(out_path),
@@ -223,6 +247,8 @@ SECTIONS {
         'boot_sha256': hashlib.sha256(out_path.read_bytes()).hexdigest(),
         'boot_bytes': out_path.stat().st_size, 'image_size': image_size,
         'stock_entry_offset': PREFIX_SIZE, 'banner_offset_in_stock_image': banner_at,
+        'payload_offset': payload_offset,
+        'payload_sha256': hashlib.sha256(payload).hexdigest() if payload else None,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
@@ -237,12 +263,13 @@ def main():
     ap.add_argument('--template', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--level', choices=LEVELS, default='entry')
+    ap.add_argument('--payload', help='embedded SWEETXNU payload for el1-xnu/el1-load')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
     a = ap.parse_args()
     try:
-        build(a.template, a.out, a.toolchain, a.level, a.max_image_size)
+        build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

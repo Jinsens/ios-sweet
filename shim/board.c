@@ -180,16 +180,22 @@ static void refine_from_dtb(uintptr_t dtb)
 
 	/* Timer PPIs: the arm,armv8-timer order is secure, non-secure, virtual, hyp */
 	{
-		char path[192];
+		char path[192], gic_path[192];
+		uint32_t cells = 3;
+		if (fdt_find_compatible(dtb, "arm,gic-v3", gic_path, sizeof(gic_path)))
+			cells = fdt_u32(dtb, gic_path, "#interrupt-cells", 3);
 		if (fdt_find_compatible(dtb, "arm,armv8-timer", path, sizeof(path))) {
-			if (fdt_prop(dtb, path, "interrupts", &v, &len) && len >= 48) {
-				/* Three cells per interrupt: type, PPI number, flags.
-				 * The virtual timer is tuple 2, number cell 7 (not
-				 * cell 8, which is the trigger/CPU-mask flags). */
-				uint32_t virt = fdt_be32((uintptr_t)v + 28) & 0xffff;
-				uint32_t phys = fdt_be32((uintptr_t)v + 16) & 0xffff;
-				brd.vtimer_intid = 16 + virt;
-				brd.ptimer_intid = 16 + phys;
+			if ((cells == 3 || cells == 4) &&
+			    fdt_prop(dtb, path, "interrupts", &v, &len) && len >= 4 * cells * 4) {
+				/* type, PPI number, flags, optional affinity phandle.
+				 * MT6983 uses four cells; sweet uses three. */
+				uintptr_t phys = (uintptr_t)v + cells * 4;
+				uintptr_t virt = (uintptr_t)v + 2 * cells * 4;
+				if (fdt_be32(phys) == 1 && fdt_be32(virt) == 1 &&
+				    fdt_be32(phys + 4) < 16 && fdt_be32(virt + 4) < 16) {
+					brd.vtimer_intid = 16 + fdt_be32(virt + 4);
+					brd.ptimer_intid = 16 + fdt_be32(phys + 4);
+				}
 			}
 		}
 	}
