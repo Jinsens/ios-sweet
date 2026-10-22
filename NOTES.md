@@ -1,9 +1,9 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU reaches machine_startup; VM page bootstrap next <<<
+## >>> ACTIVE 2026-10-23 (Asia/Shanghai): XNU passes vm_page_bootstrap; userland/driver roadmap next <<<
 
 **Current device (verified): Recovery, boot_a fully restored.** The latest
-full 67,108,864-byte readback (`pre-machine-brk-restored.img`) matches original SHA256
+full 67,108,864-byte readback (`post-vm-page-brk-restored.img`) matches original SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 Online hardware is **matisse / Redmi K50 Pro / MT6983**, not README's
 sweet / Qualcomm target. XNU's original initialization through formal page-table
@@ -13,7 +13,9 @@ mark 10 using the relocated framebuffer, and the complete arm_vm_init return.
 Serial_init also returned success (x0=1) on hardware, followed by startup
 phase 4, console/printf setup, idle init and PE_init_platform(TRUE). CPU/timer/
 GIC setup and early_random also passed up to the machine_startup call.
-The kernel_bootstrap body and full kernel boot remain unproven.
+machine_startup and kernel_bootstrap have now reached vm_mem_bootstrap,
+and vm_page_bootstrap returned on hardware. Remaining VM bootstrap,
+scheduler/BSD startup, userspace and full kernel boot remain unproven.
 These checkpoints alone do not verify visible panel refresh.
 
 Evidence is ignored under `research/matisse/20261022-xnu-resume/`.
@@ -82,8 +84,12 @@ probe, hardware-tested display refresh, initial timer fix). Commit `850e1d2` rec
 `shim/build.sh` --kick and `shim/shim.c` KICK_ONLY work remains untested;
 the old mkentryprobe `xnu` level is likewise untested. Preserve these edits.
 
-**Next concrete action:** request approval for prepared post-vm_page_bootstrap
-image `e9b81b88` below, VA `0xfffffe0007abfab0` (offset `0x633628`).
+**Next concrete action:** prepare a checkpoint after zone/object bootstrap,
+before vm_retire_boot_pages, with a fresh allocation/cache-range review.
+The approved post-vm_page_bootstrap image `e9b81b88` passed and was restored.
+The user requests a separate Chinese Markdown report covering the complete
+process, userspace/iOS path, UFS, touch, USB and remaining constraints.
+Finish that report before requesting another device test.
 Do not use the bootstrap-table relay after
 vm_retire_boot_pages without separately proving those tables survive.
 The shared relay restores bootstrap TTBR0 only on exception; the older
@@ -438,7 +444,7 @@ x0 `fffffe0007177a68` (boot_args). CPU/timer/GIC context initialization,
 chosen-property checks and early_random ran. Automatic Recovery return and
 complete original 64 MiB boot_a restoration/hash verified.
 
-**Prepared, NOT flashed: kernel_bootstrap through vm_page_bootstrap**
+**Completed: kernel_bootstrap through vm_page_bootstrap**
 `shim/out/entryprobe-el1-post-vm-page-brk.img`, 26,562,560 B, SHA256
 `e9b81b88927d98d3b1eef0876679f661ffc610ee498cc9a481b38692c267f461`.
 Payload SHA256 `3d6f731bb3ad5e5fe2629ddc0489ba9ebe2f003ff988eda2246b47607ab9992d`.
@@ -455,8 +461,16 @@ inside the cleanup range. The modeled managed-RAM window is limited to
 128 MiB; bootstrap identity aliases across that window and high vectors
 are checked before executing the fallback. DAIF stays masked, GIC model
 checks pass, and original boot registers are restored at Linux entry.
-This remains a modeled result, not hardware success. No new source changes
-or CI. CPU/GIC hardware milestone `cfb5e8c`.
+These are host model results. No new source changes or CI. CPU/GIC hardware
+milestone `cfb5e8c`; this checkpoint preparation `0032264`.
+**Hardware PASS (explicitly approved):** same-boot `post-vm-page-brk-dmesg.txt`
+records `stage=87 fault=1 esr=f2005357 far=0 pc=fffffe0007abfab0`,
+x0 `0xa526f9c` (not a success status at this checkpoint). Original
+vm_page_bootstrap returned inside vm_mem_bootstrap. The expected BRK is
+deliberately inserted, not an unexpected kernel fault. Automatic Recovery
+return and full 67,108,864-byte boot_a restoration/readback SHA256 verified.
+Evidence: `post-vm-page-brk-manifest.json`, same-boot dmesg and full restored
+readback in the evidence directory. No panel observation collected this round.
 
 `oem expdb` exports a gzip 128 MiB dump but has no SWLG/SWX2 evidence; it is
 not a usable shim log. GenieZone stage-2/RKP messages are a possible lead,
