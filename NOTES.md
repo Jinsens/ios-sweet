@@ -48,14 +48,17 @@ first EL0 SVC whose x16 matches `--el0-syscall`. This directly proves whether
 returned, without a display or UART.
 
 - `shim/out/entryprobe-el1-ramdisk-syscall-open.img`, 26,566,656 B, SHA256
-  `162320a626c3ddc0baf819bafa2ce72251aa580bbc1c232ea1a5efa5e315de30`.
+  `162320a626c3ddc0baf819bafa2ce72251aa580bbc1c232ea1a5efa5e315de30`;
+  predicted 64 MiB partition after a raw write over the restored live backup:
+  `3bdf4811b03bb461ad6f644808a55facfe70f38c3f7f2b095b51ebb0626991ac`.
   `--el0-syscall 5`. Expected record: `esr=0000000056000080`,
   `pc=00000000100000420`, `x0=000000001000004c0` (path pointer),
   `x16=0000000000000005`, `spsr=0000000000000000`.
 - `shim/out/entryprobe-el1-ramdisk-syscall-write.img`, 26,566,656 B, SHA256
-  `23270c33bfedb861a2ffcb20fab639c80981d47d95dbb93aa29a282c4ea94f92`.
+  `23270c33bfedb861a2ffcb20fab639c80981d47d95dbb93aa29a282c4ea94f92`;
+  predicted partition `fa931660ff74fd3420754735095e23411e2de754eb578bd8d7040dc47d318a8c`.
   `--el0-syscall 4`. Expected record: `esr=0000000056000080`,
-  `pc=000000001000004a8`, `x0=0000000000000003` (console fd),
+  `pc=000000001000004a8`, `x0` = returned console fd (expected 3),
   `x16=0000000000000004`, `spsr=0000000000000000`.
 - Both embed payload `shim/out/matisse-xnu-ramdisk-rtcfast.payload`, 16,622,400 B,
   SHA256 `2ff27355d4c416516760243811ef6bec2bf71815dfbf18346060f36dd07d4a44`.
