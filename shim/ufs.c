@@ -530,6 +530,22 @@ init_ufs_link(void)
 		ufs_test_stage = 2;
 		return;
 	}
+	/* Probe whether the host keeps a >4 GiB UTRL base. XNU's contiguous
+	 * DMA lands in the high DDR bank; if UTRLBAU does not stick there,
+	 * the driver's readback fails with EIO. Write a zero UTRD at the
+	 * start of the high bank, program that base, read it back, and
+	 * restore the low list before any doorbell. */
+	volatile uint64_t *high = (volatile uint64_t *)0x100000000ull;
+	for (int i = 0; i < 512; i++)
+		high[i] = 0;
+	__asm__ volatile("dsb sy" ::: "memory");
+	ufs_wr(REG_UTRLRSR, 0);
+	ufs_wr(REG_UTRLBA, 0);
+	ufs_wr(REG_UTRLBAU, 1);
+	ufs_wr(REG_UTRLRSR, 1);
+	ufs_test_info[1] = ((uint64_t)ufs_rd(REG_UTRLBAU) << 32) |
+	    ufs_rd(REG_UTRLBA);
+	ufs_test_info[2] = ufs_rd(REG_UTRLRSR);
 	uintptr_t list = (uintptr_t)utrl;
 	ufs_wr(REG_UTRLRSR, 0);
 	ufs_wr(REG_UTRLBA, (uint32_t)list);

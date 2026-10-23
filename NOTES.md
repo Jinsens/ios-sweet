@@ -655,6 +655,29 @@ so the shim records x0 = the driver's return code. Previously (link
 down) this was `0x3c` = ETIMEDOUT. Now: 0 means the driver took over and
 found the partition; other errno values pin the failing stage.
 
+**HARDWARE RESULT (2026-10-23): XNU driver returns EIO at takeover.**
+Pre-init + error-BRK image `e7b21527...` (partition `7f4a9ef8...`)
+returned in 29.6 s; `pc=fffffe0007a42488` (the `cbnz w0` after
+`_sweet_ufs_rootdev`), **x0=5 = EIO**. Disassembly of `sweet_ufs.o`
+(SHA-fetched from the kernel archive) shows the EIO block at VA
+`fffffe00074e8368+0x130` reached by two `b.ne` at `...8374`
+(`c1000054`) and `...8380` (`61000054`) when `UTRLBA`/`UTRLBAU` do not
+read back as programmed. XNU's contiguous DMA is in the high DDR bank
+(`dram-base=0x100000000`), so the suspect is the controller's 64-bit
+UTRL base readback (CAP_64AS is set, but the register may not retain
+the high word).
+
+**Prepared, not flashed: high-UTRL-base readback probe.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-preinit-highprobe.img`,
+26,570,752 B, SHA256
+`97e348429c705684b10560d3f83c3e1219eec6d84f2b37093b28a08d3c09bfac`;
+predicted partition `566f28da...`. `init_ufs_link` zeroes one 4 KiB
+scratch page at physical `0x1_00000000`, programs UTRLBA=0, UTRLBAU=1,
+RSR=1, reads them back, then restores the low list **without ringing a
+doorbell**. Banner `x0 = UTRLBAU<<32|UTRLBA` (expect `0x100000000`),
+`x16 = UTRLRSR` (expect 1). If BAU reads 0, low DMA is mandatory
+(kernel patch/ADT); if it sticks, the EIO is elsewhere.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
