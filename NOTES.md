@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS reset+HCE reaches UCRDY; v9 prepared <<<
+## >>> ACTIVE 2026-10-23: UFS link startup still fails; refclk test prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -357,16 +357,39 @@ SHA256 `9dfe6a03...`, written partition `84ea176b...`; returned in 31.7 s,
 (`claim_host`), waiting for it before the link startup is another false
 gate. HCE/UCRDY is the correct post-reset condition.
 
-**Prepared, not flashed: reset + pre-link + link startup (v9).**
+**HARDWARE RESULT (2026-10-23): reset + link startup still UIC 1.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v9.img`,
+SHA256 `db72f919...`, written partition `c40c0a48...`; returned in 32.7 s,
+`boot_a` restored/verified. Record:
+
+```
+dtb=0801000000000001 -> strategy 3: TUR rc 1 (timeout), OCS 0,
+                        UIC result 1, post-HCS = 0x8
+spsr=0x404           -> IS after = UIC_COMMAND_COMPL | UIC_ERROR
+```
+
+So even after the syscon reset and HCE, `DME_LINK_STARTUP` still returns
+UIC result 1 and raises `UIC_ERROR`; the host stays at UCRDY (0x8), no
+device/list. The remaining vendor prerequisites are the reference clock
+(`REG_UFS_REFCLK_CTRL` 0x144, REQUEST bit0 / ACK bit1), the UFS clocks and
+the M-PHY/regulators. Note `REG_UFS_MTK_HW_VER` is 0x2240, outside the ADT
+node's 0x1000 `reg` size (the live node is 0x2300); any driver access there
+needs a larger mapping.
+
+**Prepared, not flashed: ref-clock strategies (v10).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v10.img`,
 26,570,752 B, SHA256
-`db72f919ad298f09323155d23cccd91f3fde5a115beac37bbba15da3d7454917`;
+`2f26cdb7c025b2c2565e6281f1086f72bef107d54367cb8fe8a445cde8e7fd70`;
 predicted written partition
-`c40c0a48d89caabde34a6d76a918b069107d600b0329850e41856ebced414141`.
-Commit `8e1bfbe` waits only for UCRDY, so strategy 3 now proceeds:
-syscon resets -> XOUFS bit 7 -> HCE -> MTK pre-link -> DME_LINK_STARTUP ->
-claim -> TUR. Success is TUR rc 0, OCS 0, UIC 0 and DP in the post-HCS
-nibble.
+`9f02fdba5ac6738768b065e9f1fabe96a50547e421a07a16150150c0a54dae6d`.
+Commit `14eb628` adds `refclk_on()` (read 0x144, set REQUEST, wait for
+ACK) and strategies: 0 baseline; 1 refclk + pre-link + link startup;
+2 refclk + reset + refclk + pre-link + link startup; 3 reset + pre-link +
+link startup (no refclk request). `spsr` now records the final refclk
+control (`[1:0]==3` = requested+acked), `fault` records post-HCS. If
+strategy 2 succeeds, the remaining port to XNU is: CT=0, low DMA, syscon
+reset, XOUFS bit, HCE, pre-link, refclk, link startup. If refclk is
+already acked and 2 fails, the M-PHY/clock/regulator init is required.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
