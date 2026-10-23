@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> PAUSED 2026-10-23: boot_a restored; UFS bring-up parked; BSD + PID 1 proven <<<
+## >>> ACTIVE 2026-10-23: UFS resumed; 0084+rtcfast entry checkpoint prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -12,25 +12,50 @@
 intermediate trim-prefix restore was `861da6b8...`; the full live backup has
 replaced it.
 
-**UFS bring-up FAILED and is parked (2026-10-23).** Two images were flashed:
+**UFS bring-up resumed; the earlier two tests are confounded (2026-10-23).**
+Two images were flashed:
 
 1. `shim/out/shim-boot-0085-ufs.img` (SHA256 `d4f3746c...`), a production-style
    `rd=ufsroot0 serial=0` image with the new `/sweet-ufs` ADT node. The
    partition hash matched `1f41b3a7...`, but `adb reboot recovery` left the
    panel on the first logo with no ADB/fastboot. The shim leaves the WDT off,
-   so it did not self-recover.
+   so it did not self-recover. A production image has no diagnostic relay, so
+   "no ADB/fastboot" alone proves nothing.
 2. `shim/out/entryprobe-el1-ufs-entry-brk.img` (SHA256 `46d5487e...`), with a
    BRK at `_sweet_ufs_rootdev` VA `0xfffffe00074e8090`. Partition hash matched
    `c1a2687a...`, but it also hung at the first logo; the BRK did not hit.
 
-The UFS host takeover is therefore unproven. Because the entry BRK did not
-fire, the hang is either before `_sweet_ufs_rootdev` (earlier boot/ADT path) or
-the checkpoint image itself did not reach the relay; it is **not** evidence
-that `ufs_take_over_host()` is the failing function. No `userdata` write was
-made. The current `boot_a` is the second test image; restore it as described
-above before any further test. Next session should bisect earlier
-(`IOKitBSDInit`/`bsd_init` entry) and verify the UFS payload/ADT placement
-before assuming a controller bug.
+**Confound measured (payload bytes, 2026-10-23).** Both 0085 UFS payloads are
+byte-identical to the unpatched `ci-39850065490` kernel: `matisse-xnu-0085-ufs.payload`
+and `matisse-xnu-0085-ufs-entry-brk.payload` have **no rtcfast patches**. The
+BRK at `_sweet_ufs_rootdev` is only reached after `IOKitInitializeTime`'s 30 s
+RTC wait and `IOFindBSDRoot`'s 30 s IOMedia wait, i.e. after roughly 60 s.
+Any observation shorter than that cannot prove a miss. In addition, 0085 is
+the video-console-refresh kernel that was never booted successfully; it must
+be separated from UFS. The rtcfast patches (10 bytes at VAs
+`0xfffffe00079ad070`, `0xfffffe0007a41e70`, `0xfffffe0007a41eb4`) are present
+only in the proven 0084 payload.
+
+**Prepared, not flashed: 0084 + rtcfast + UFS ADT + entry BRK.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-rtcfast-entry-brk.img`,
+26,562,560 B, SHA256
+`f9ceaf53a4663aea422e5f1a316d321e445a72ca7f6879bd0fc2228048367a3a`;
+payload `matisse-xnu-0084-ufs-entry-brk.payload`, 16,605,888 B, SHA256
+`71a8ca22a74d278f6e72f955830a0e6c59fe7ffe492608a5b611ab49c10a8e5c`
+(kernel 0084 `28190f5b...`, ADT `matisse-ufs.adt` `1020d120...`, cmdline
+`... rd=ufsroot0 ufsrw=0 ... serial=0`). Selective vectors, clean range
+`[0x100000000,0x108000000)`, TTBR0 restore `0x10117c000`, standard offsets
+`0xb78` / `-0x4488`. BRK word verified at payload offset `0x4e4480`
+(PA `0x1014e8090`); all three rtcfast words verified. Predicted written
+partition SHA256 `73392f038083c938478dcd6180850b25fef77d34702a604e01df26112cf61c2b`.
+Expected same-boot record: `stage=87 fault=1 esr=f2005357 pc=fffffe00074e8090`.
+After the BRK returns, the relay boots the stock Linux Image and Recovery
+prints the record; the whole cycle should take seconds, not 60 s.
+
+The UFS host takeover remains unproven; a missed entry BRK at 60 s is not
+evidence against `ufs_take_over_host()`. No `userdata` write was made. The
+current `boot_a` was re-verified read-only as `2931647a...` before this
+preparation; each `boot_a` write still needs explicit approval.
 
 ## Summary at pause (handoff for the next session)
 
