@@ -137,13 +137,15 @@ def prepare(template, level=None):
 def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None,
           xnu_vector_offset=None, xnu_high_vector_offset=None, xnu_clean=False,
           xnu_clean_limit=None, xnu_restore_ttbr0=None, xnu_selective=False,
-          xnu_el0_syscall=None):
+          xnu_el0_syscall=None, ufs_regs=False):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
     payload = Path(payload_path).read_bytes() if payload_path else None
     if (level in ('el1-xnu', 'el1-load')) != (payload is not None):
         raise ValueError('el1-xnu/el1-load require --payload; other levels do not accept it')
+    if ufs_regs and level not in ('el1-xnu', 'el1-load'):
+        raise ValueError('UFS register snapshot requires el1-xnu or el1-load')
     vector_pa = None
     if xnu_vector_offset is not None:
         if level != 'el1-xnu':
@@ -234,6 +236,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
             config += f'#define ENTRY_XNU_HIGH_VECTOR_VA {high_va:#x}ULL\n'
         if xnu_el0_syscall is not None:
             config += f'#define ENTRY_EL0_SYSCALL {xnu_el0_syscall}\n'
+        if ufs_regs:
+            config += '#define ENTRY_UFS_REGS 1\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         linker = '''ENTRY(_head)
 SECTIONS {
@@ -320,6 +324,7 @@ SECTIONS {
         'xnu_selective': xnu_selective,
         'xnu_high_vector_va': high_va,
         'xnu_el0_syscall': xnu_el0_syscall,
+        'ufs_regs': ufs_regs,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
@@ -349,6 +354,8 @@ def main():
                     help='diagnostic: intercept the EL1 synchronous slots and leave all normal XNU vectors intact')
     ap.add_argument('--el0-syscall', type=lambda s: int(s, 0),
                     help='diagnostic: abort at the first EL0 AArch64 SVC with this syscall number')
+    ap.add_argument('--ufs-regs', action='store_true',
+                    help='read-only UFSHCI snapshot into the board fields before the XNU jump')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
@@ -356,7 +363,7 @@ def main():
     try:
         build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload,
               a.xnu_vector_offset, a.xnu_high_vector_offset, a.xnu_clean, a.xnu_clean_limit,
-              a.xnu_restore_ttbr0, a.xnu_selective, a.el0_syscall)
+              a.xnu_restore_ttbr0, a.xnu_selective, a.el0_syscall, a.ufs_regs)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

@@ -144,6 +144,32 @@ static void field(char *banner, unsigned offset, uint64_t value)
 		banner[offset + i] = hex[(value >> (60 - i * 4)) & 15];
 }
 
+#ifdef ENTRY_UFS_REGS
+/* Read-only UFSHCI snapshot for the XNU root-device bring-up. The diagnostic
+ * recorder overwrites stage/fault/esr/far/pc/x0/x16/spsr, so reuse the four
+ * fields the EL1-XNU record otherwise fills with board data:
+ *   gicd   = CAP << 32 | VER
+ *   vtimer = HCS << 32 | HCE
+ *   fb     = UTRLBAU << 32 | UTRLBA
+ *   dtb    = UTRLDBR << 32 | UTRLRSR
+ * CAP bit 24 is 64AS (64-bit DMA); HCE bit 0 plus HCS DP/UTRLRDY gate the
+ * takeover. No register is written, and the UFS host is still in LK's state. */
+static void
+entryprobe_ufs_snapshot(char *banner)
+{
+	volatile uint32_t *u = (volatile uint32_t *)(uintptr_t)brd.ufs_base;
+	uint32_t cap = u[0x00 / 4], ver = u[0x08 / 4];
+	uint32_t hcs = u[0x30 / 4], hce = u[0x34 / 4];
+	uint32_t ba = u[0x50 / 4], bau = u[0x54 / 4];
+	uint32_t dbr = u[0x58 / 4], rsr = u[0x60 / 4];
+
+	field(banner, ENTRY_GICD, ((uint64_t)cap << 32) | ver);
+	field(banner, ENTRY_VTIMER, ((uint64_t)hcs << 32) | hce);
+	field(banner, ENTRY_FB, ((uint64_t)bau << 32) | ba);
+	field(banner, ENTRY_DTB, ((uint64_t)dbr << 32) | rsr);
+}
+#endif
+
 void entryprobe_display(uint64_t dtb, char *banner);
 #if defined(ENTRY_DISPLAY_KICK)
 void entryprobe_display_kick(uint64_t dtb, char *banner);
@@ -190,6 +216,9 @@ void entryprobe_board(uint64_t dtb, char *banner)
 		field(banner, ENTRY_STAGE, 0x74);
 #if defined(ENTRY_LOADER_PROBE)
 		loader_banner = banner;
+#if defined(ENTRY_UFS_REGS)
+		entryprobe_ufs_snapshot(banner);
+#endif
 		const char *why = loader_boot(dtb);
 		con_str("LOADER", why);
 		display_refresh();

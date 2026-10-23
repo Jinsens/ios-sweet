@@ -3,6 +3,7 @@ import gzip
 from pathlib import Path
 import struct
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -109,6 +110,14 @@ class ProbeLayoutTests(unittest.TestCase):
         image[0x4000:0x4000+len(text)] = text
         with self.assertRaisesRegex(ValueError, 'uniquely'):
             mkentryprobe.prepare(template(image))
+
+    def test_ufs_snapshot_requires_loader_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'boot.img'
+            path.write_bytes(template())
+            with self.assertRaisesRegex(ValueError, 'UFS register snapshot'):
+                mkentryprobe.build(str(path), str(Path(tmp) / 'out.img'), None,
+                                   'entry', ufs_regs=True)
 
 
 if __name__ == '__main__':
