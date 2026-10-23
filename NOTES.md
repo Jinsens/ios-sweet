@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS link startup fails; MTK pre-link test prepared <<<
+## >>> ACTIVE 2026-10-23: UFS pre-link insufficient; vendor host-reset test prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -309,21 +309,51 @@ also asserts the UniPro/HCI/crypto resets and sets
 `REG_UFS_XOUFS_CTRL (0x140) |= 0x80`. A bare link startup without this
 fails, matching the result.
 
-**Prepared, not flashed: MTK pre-link + link startup (v6).**
+**HARDWARE RESULT (2026-10-23): pre-link alone does not start the link.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v6.img`,
+SHA256 `0d367d5a...`, written partition `18c9a00c...`; returned in 30.7 s,
+`boot_a` restored/verified. Record:
+
+```
+gicd=0fff000000000702 -> strategy 0 baseline: OCS 7
+vtimer=0f01000000000702 -> strategy 1 hibernate exit: OCS 7, UIC 1
+fb=0f01000000000702     -> strategy 2 MTK pre-link + LINK_STARTUP: OCS 7, UIC 1
+dtb=0f01000000000702    -> strategy 3 pre-link + DME_ENABLE + LINK_STARTUP: OCS 7, UIC 1
+x0=0 x16=0x10f spsr=0x401 fault=0x10f
+```
+
+`VS_UNIPROPOWERDOWNCONTROL`/`VS_SAVEPOWERCONTROL` and `DME_ENABLE` are not
+enough; the link still refuses to start (UIC result 1). The host stays
+HCS 0x10f, so the failure is not a state loss from our commands.
+
+**Reset-controller decode (live FDT).** `ufs_ao_cfg@112b8000` and
+`ufs_pdn_cfg@112bc000` expose `ti,syscon-reset` children with
+`ti,reset-bits` (7 cells: assert offset/bit, deassert offset/bit, status
+offset/bit, flags):
+- unipro (ao idx 0): assert 0x44 bit 1, deassert 0x48 bit 1
+- crypto (pdn idx 0): assert 0x44 bit 0, deassert 0x48 bit 0
+- hci (pdn idx 1): assert 0x44 bit 1, deassert 0x48 bit 1
+- flags 0x1c = ASSERT_SET | DEASSERT_SET | STATUS_NONE → set the bit to
+  assert/deassert; use read-modify-write.
+The vendor `ufs_mtk_host_reset` asserts hci/crypto/unipro, waits ~100 us,
+deasserts unipro/crypto/hci, then sets `XOUFS_CTRL (0x140) |= 0x80` before
+the HCE cycle.
+
+**Prepared, not flashed: full vendor reset + pre-link + link startup (v7).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v7.img`,
 26,570,752 B, SHA256
-`0d367d5a81a047d3b8924467f34c29ca781803ca597af386f11d62160700431b`;
+`150619b5e8be397c3fbc0745b008a5574ea4aa84fa14cf8a3b3497e32458f3f8`;
 predicted written partition
-`18c9a00c4f5c45c0cf6502c1cc260ceced9f9d0789ec157710a5849877bc5706`.
-Commit `b64152a` adds DME_SET/DME_GET UIC helpers (500 ms timeout) and
-MTK pre-link. Strategies: 0 baseline, 1 hibernate exit, 2 MTK pre-link +
-`DME_LINK_STARTUP`, 3 MTK pre-link + `DME_ENABLE` (0x12) +
-`DME_LINK_STARTUP`. Record packing unchanged (`gicd`..`dtb` = strategies
-0-3; `x0`=IS before, `x16`=HCS before, `spsr`=IS after, `fault`=HCS
-after, `esr`=5). A strategy with TUR rc 0 and UIC result 0 identifies the
-sequence to port to `bsd/dev/sweet_ufs.c`. If both 2 and 3 still fail,
-the full vendor `ufs_mtk_host_reset` (UniPro/HCI/crypto reset controls +
-XOUFS bit) is the next step.
+`fb8e23be898eeb0ae3d6bfb92af948a8eaf678f40b5c0164735b1c83251cad5d`.
+Commit `98fdaf3` adds `mtk_host_reset()`: syscon RMW resets at
+`ufs_base+0x8000/+0xc000`, 100 us, XOUFS_CTRL bit 7, UTRLRSR=0, HCE 0->1
+with a readiness wait. Strategy 3 becomes reset + HCE + MTK pre-link +
+`DME_LINK_STARTUP` + re-claim + TUR. If strategy 3 gets TUR rc 0 / UIC
+result 0, port this exact sequence (and the CT=0 fix and low-DMA
+allocation) to `bsd/dev/sweet_ufs.c`. If it fails, the remaining vendor
+init is clock/regulator/M-PHY (`ufs_mtk_setup_clocks`,
+`ufs_mtk_setup_ref_clk`, `ufs_mtk_mphy_power_on`) or the reset must be
+followed by LK's PHY parameters.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
