@@ -556,6 +556,21 @@ init_ufs_link(void)
 		__asm__ volatile("yield");
 	ufs_test_info[0] = ((uint64_t)ufs_rd(REG_HCS) << 32) | ufs_rd(REG_UTRLRSR);
 	ufs_test_stage = 3;
+
+	/* The first command after a device reset returns CHECK CONDITION
+	 * (unit attention). XNU's polled driver retries the TUR without a
+	 * REQUEST SENSE, so clear it here: TUR, sense if needed, TUR. */
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0;
+	int rc = scsi(0, tur, sizeof(tur), 0, 0, 0, &ocs, &st);
+	if (rc) {
+		uint8_t sense[6] = { 0x03, 0, 0, 0, 18, 0 };
+		(void)scsi(0, sense, sizeof(sense), data, 18, 1, &ocs, &st);
+	}
+	rc = scsi(0, tur, sizeof(tur), 0, 0, 0, &ocs, &st);
+	ufs_test_info[3] = (uint64_t)rc | (uint64_t)ocs << 8 |
+	    (uint64_t)st << 16 | (uint64_t)ufs_scsi_resp[0] << 24;
+	ufs_test_stage = rc == 0 ? 4 : 5;
 }
 
 void test_ufs(void)

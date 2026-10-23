@@ -678,6 +678,26 @@ doorbell**. Banner `x0 = UTRLBAU<<32|UTRLBA` (expect `0x100000000`),
 `x16 = UTRLRSR` (expect 1). If BAU reads 0, low DMA is mandatory
 (kernel patch/ADT); if it sticks, the EIO is elsewhere.
 
+**HARDWARE RESULT (2026-10-23): host keeps the high UTRL base.**
+High-probe image `97e34842...` (partition `566f28da...`) returned in
+30.7 s; banner `x0=0x0000000100000000` (UTRLBAU=1, UTRLBA=0) and
+`x16=1` (UTRLRSR). 64-bit UTRL programming works, so the XNU EIO is
+**not** the base readback; it is `ufs_scsi`'s command-failure path
+(`ocs || upiu != 0x21 || resp[6] || resp[7]`) returning EIO. The first
+TUR after the device reset gets **CHECK CONDITION (unit attention)** and
+the driver retries the TUR without a REQUEST SENSE, so all three retries
+fail. The shim now clears the UA in `init_ufs_link`: TUR, REQUEST SENSE
+(0x03, 18 bytes) if the TUR failed, TUR again; stage 4 = cleared.
+
+**Prepared, not flashed: UA-clearing pre-init + error checkpoint.**
+`research/matisse/20261023-ufs/entryprobe-el1-xnu-ufs-init-ua-clear-error-brk.img`,
+26,570,752 B, SHA256
+`6b9a2b08f88179b8acadc9f14484fea84a3886f63eeb447611992d7f6de9fce4`;
+predicted partition `7c92190b...`. Unpatched 0084 kernel, BRK after
+`_sweet_ufs_rootdev`: x0=0 means the driver took over, read the GPT and
+set up ufsroot0; 2 = ENOENT (partition name/read); 5 = TUR still fails.
+`spsr`/banner `pc` carries the shim's own TUR result.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
