@@ -398,6 +398,40 @@ refclk_on(void)
 	return v;
 }
 
+/* TopCKGEN gates for the five UFS clocks (mt6983-clk.h IDs 247/174/175/
+ * 176/192). Each MUX_GATE_CLR_SET_UPD entry has a "pdn" bit: set means
+ * the gate is powered down. Clear any that LK left set, then pulse the
+ * matching update bit. Returns [15:8] = gated-before mask, [7:0] =
+ * still-gated-after mask; bits map 0:ufs_hd_haxi 1:aes_ufsfde 2:ufs
+ * 3:ufs_mbist 4:ufs_hf_fmem. */
+static uint32_t
+mtk_clocks_on(void)
+{
+	uintptr_t tc = 0x10000000;	/* topckgen@10000000 */
+	static const struct { uint32_t cfg, set, clr, mask, upd, shift; } g[] = {
+		{ 0x10, 0x14, 0x18, 1u << 23, 0x04, 2 },	/* ufs_hd_haxi */
+		{ 0xe0, 0xe4, 0xe8, 1u << 31, 0x08, 24 },	/* aes_ufsfde */
+		{ 0xf0, 0xf4, 0xf8, 1u << 7, 0x08, 25 },	/* ufs */
+		{ 0xf0, 0xf4, 0xf8, 1u << 15, 0x08, 26 },	/* ufs_mbist */
+		{ 0x130, 0x134, 0x138, 1u << 15, 0x0c, 11 },	/* ufs_hf_fmem */
+	};
+	uint32_t before = 0, after = 0;
+	for (unsigned i = 0; i < sizeof(g) / sizeof(g[0]); i++)
+		if (ufs_rd(tc + g[i].cfg) & g[i].mask)
+			before |= 1u << i;
+	for (unsigned i = 0; i < sizeof(g) / sizeof(g[0]); i++) {
+		if (!(before & (1u << i)))
+			continue;
+		ufs_wr(tc + g[i].clr, g[i].mask);
+		ufs_wr(tc + g[i].upd, ufs_rd(tc + g[i].upd) | (1u << g[i].shift));
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	for (unsigned i = 0; i < sizeof(g) / sizeof(g[0]); i++)
+		if (ufs_rd(tc + g[i].cfg) & g[i].mask)
+			after |= 1u << i;
+	return (before << 8) | after;
+}
+
 /* MediaTek pre-link: permit UniPro power down and disable deep stall. */
 static uint32_t
 mtk_pre_link(void)
@@ -509,10 +543,10 @@ void test_ufs(void)
 	/* Try link wake strategies and one TUR after each. Result packing:
 	 * rc | OCS<<8 | status<<16 | resp0<<24 | resp6<<32 | resp7<<40 |
 	 * UIC result<<48 | post-HCS low nibble<<56.
-	 *   0 baseline, 1 refclk + pre-link + link startup,
-	 *   2 refclk + host reset + refclk + pre-link + link startup,
-	 *   3 host reset + pre-link + link startup (no refclk request). */
-	uint32_t refclk = 0;
+	 *   0 baseline, 1 clocks + refclk + pre-link + link startup,
+	 *   2 clocks + refclk + reset + refclk + pre-link + link startup,
+	 *   3 clocks + reset + pre-link + link startup. */
+	uint32_t refclk = 0, clk = mtk_clocks_on();
 	for (int s = 0; s < 4; s++) {
 		uint32_t ur = 0xff;
 		if (s == 1) {
@@ -543,7 +577,7 @@ void test_ufs(void)
 		    (uint64_t)ufs_scsi_resp[7] << 40 |
 		    (uint64_t)ur << 48 | (uint64_t)(ufs_rd(REG_HCS) & 0xf) << 56;
 	}
-	ufs_test_info[6] = refclk;		/* refclk ctrl, [1:0]==3 = acked */
+	ufs_test_info[6] = (uint64_t)refclk << 16 | clk;	/* clocks + refclk */
 	ufs_test_info[7] = ufs_rd(REG_HCS);
 
 	list_partitions();

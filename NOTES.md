@@ -405,6 +405,22 @@ power-domain state as the suspects. Porting those needs the vendor clock
 gate/power-domain register map; they are not reachable by a simple UIC or
 HCE sequence.
 
+**Prepared, not flashed: UFS topckgen gate enable (v11).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v11.img`,
+26,570,752 B, SHA256
+`6b21ef5348d84f9d231a654bb18074b0893f2a0da46e71171ad59565ad9d1add`;
+predicted written partition
+`b19b53dc5a2460bdebdbde2dc2451f133c32c4d711c9c1d50e32f19add1d9c56`.
+The five UFS clocks in the DT are topckgen mux-gates: IDs 247/174/175/
+176/192 = `ufs_hd_haxi` (`CLK_CFG_0` bit 23), `aes_ufsfde` (`CLK_CFG_13`
+bit 31), `ufs` (`CLK_CFG_14` bit 7), `ufs_mbist` (`CLK_CFG_14` bit 15),
+`ufs_hf_fmem` (`CLK_CFG_18` bit 15). `mtk_clocks_on()` clears any set pdn
+bits via the CLR registers and pulses `CLK_CFG_UPDATE_0/1/2`, then records
+the before/after masks in `spsr` bits [15:0] (bit per clock). `spsr`
+[31:16] is the refclk control. If no gate was set, the clocks were
+already on and the power-domain/regulator path is next; if a gate was
+set and the link now starts, the XNU port needs this clock step too.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
