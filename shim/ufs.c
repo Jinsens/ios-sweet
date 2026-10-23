@@ -340,43 +340,42 @@ tick_freq(void)
 }
 
 /* One UIC command; returns the UIC result byte (0 = success, 0xff = no
- * completion within 100 ms). Completion is IS bit 10 (UIC_COMMAND_COMPL). */
+ * completion). Completion is IS bit 10 (UIC_COMMAND_COMPL); ARG3 is the
+ * DME_GET value. 500 ms matches Linux UIC_CMD_TIMEOUT. */
 static uint32_t
-uic_cmd(uint32_t op)
+uic(uint32_t op, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t *out3)
 {
 	uint32_t is = ufs_rd(REG_IS);
-	ufs_wr(REG_UIC_ARG1, 0);
-	ufs_wr(REG_UIC_ARG2, 0);
-	ufs_wr(REG_UIC_ARG3, 0);
+	ufs_wr(REG_UIC_ARG1, arg1);
+	ufs_wr(REG_UIC_ARG2, arg2);
+	ufs_wr(REG_UIC_ARG3, arg3);
 	ufs_wr(REG_IS, is);		/* W1C: clear the previous status */
 	ufs_wr(REG_UIC_CMD, op);
 	uint64_t start = ticks(), freq = tick_freq();
-	while (!(ufs_rd(REG_IS) & 0x400) && ticks() - start < freq / 10)
+	while (!(ufs_rd(REG_IS) & 0x400) && ticks() - start < freq / 2)
 		__asm__ volatile("yield");
+	if (out3)
+		*out3 = ufs_rd(REG_UIC_ARG3);
 	if (!(ufs_rd(REG_IS) & 0x400))
 		return 0xff;
 	return ufs_rd(REG_UIC_ARG2) & 0xff;
 }
 
-/* Standard UFSHCI host enable cycle; the MTK PHY/clock state stays as LK
- * left it. Returns 0 when HCS reports device present + both lists ready. */
-static int
-host_reset(void)
+static uint32_t
+uic_cmd(uint32_t op)
 {
-	uint64_t start;
-	uint64_t freq = tick_freq();
-	const uint32_t ready = HCS_DP | HCS_UTRLRDY | HCS_UCRDY;
+	return uic(op, 0, 0, 0, 0);
+}
 
-	ufs_wr(REG_UTRLRSR, 0);
-	ufs_wr(REG_HCE, 0);
-	start = ticks();
-	while ((ufs_rd(REG_HCE) & 1) && ticks() - start < freq / 10)
-		__asm__ volatile("yield");
-	ufs_wr(REG_HCE, 1);
-	start = ticks();
-	while ((ufs_rd(REG_HCS) & ready) != ready && ticks() - start < freq / 10)
-		__asm__ volatile("yield");
-	return (ufs_rd(REG_HCS) & ready) == ready ? 0 : 1;
+/* MediaTek pre-link: permit UniPro power down and disable deep stall. */
+static uint32_t
+mtk_pre_link(void)
+{
+	uint32_t v = 0, r;
+	r = uic(0x02, 0xD0A8u << 16, 0, 0, 0);	/* VS_UNIPROPOWERDOWNCONTROL=0 */
+	if (uic(0x01, 0xD0A6u << 16, 0, 0, &v) == 0 && (v & (1u << 6)))
+		uic(0x02, 0xD0A6u << 16, 0, v & ~(1u << 6), 0);
+	return r;
 }
 
 void test_ufs(void)
@@ -428,21 +427,22 @@ void test_ufs(void)
 	/* Try link wake strategies and one TUR after each. Result packing:
 	 * rc | OCS<<8 | status<<16 | resp0<<24 | resp6<<32 | resp7<<40 |
 	 * UIC result<<48 | post-HCS low nibble<<56.
-	 *   0 none (baseline), 1 DME_HIBERNATE_EXIT, 2 DME_LINK_STARTUP,
-	 *   3 host HCE reset + DME_LINK_STARTUP. */
-	static const uint32_t ops[4] = { 0, 0x18, 0x16, 0x16 };
+	 *   0 none (baseline), 1 DME_HIBERNATE_EXIT,
+	 *   2 MTK pre-link + DME_LINK_STARTUP,
+	 *   3 MTK pre-link + DME_ENABLE + DME_LINK_STARTUP. */
 	for (int s = 0; s < 4; s++) {
-		uint32_t uic = 0xff;
-		if (s == 3 && host_reset()) {
-			ufs_test_info[s] = 0xfe;
-			continue;
-		}
-		if (s) {
-			uic = uic_cmd(ops[s]);
-			if (claim_host()) {
-				ufs_test_info[s] = 0xfd | (uint64_t)uic << 48;
-				continue;
-			}
+		uint32_t ur = 0xff;
+		if (s == 1) {
+			ur = uic_cmd(0x18);		/* DME_HIBERNATE_EXIT */
+			claim_host();
+		} else if (s == 2 || s == 3) {
+			ur = mtk_pre_link();
+			if (s == 3)
+				uic_cmd(0x12);		/* DME_ENABLE */
+			uint32_t ls = uic_cmd(0x16);	/* DME_LINK_STARTUP */
+			if (ls != 0xff)
+				ur = ls;		/* record link startup result */
+			claim_host();
 		}
 		uint32_t ocs = 0, st = 0;
 		static const uint8_t tur[6] = { 0x00 };
@@ -452,7 +452,7 @@ void test_ufs(void)
 		    (uint64_t)st << 16 | (uint64_t)ufs_scsi_resp[0] << 24 |
 		    (uint64_t)ufs_scsi_resp[6] << 32 |
 		    (uint64_t)ufs_scsi_resp[7] << 40 |
-		    (uint64_t)uic << 48 | (uint64_t)(ufs_rd(REG_HCS) & 0xf) << 56;
+		    (uint64_t)ur << 48 | (uint64_t)(ufs_rd(REG_HCS) & 0xf) << 56;
 	}
 	ufs_test_info[6] = ufs_rd(REG_IS);
 	ufs_test_info[7] = ufs_rd(REG_HCS);
