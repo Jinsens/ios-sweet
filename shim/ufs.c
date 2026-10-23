@@ -150,9 +150,14 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
 	uint32_t dd = dir == 1 ? 2u : dir == 2 ? 1u : 0u;
-	/* CT=0 is UTP_CMD_TYPE_SCSI; 1 is UTP_CMD_TYPE_UFS (native UFS
-	 * command). A SCSI CDB needs CT=0 or the device/host fails it. */
-	utrl[0].dw0 = (dd << 25) | (1u << 24);	/* SCSI command, interrupt */
+	/* Linux struct request_desc_header is byte-packed per host
+	 * endianness: on little-endian byte2 is
+	 *   bit0 interrupt, bits1-2 data direction, bit3 reserved,
+	 *   bits4-7 command_type (0 = UTP_CMD_TYPE_SCSI).
+	 * Writing (dd << 25) | (1 << 24) put those into byte3 reserved
+	 * bits and left the interrupt bit clear, which the host rejects
+	 * with OCS 7 once the link is up. */
+	utrl[0].dw0 = (uint32_t)(1u | (dd << 1)) << 16;
 	utrl[0].dw2 = 0x0f;			/* OCS: invalid until the host updates it */
 	utrl[0].ucdba = (uint32_t)ucd_pa;
 	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);

@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS clock-gate write hung; device restored <<<
+## >>> ACTIVE 2026-10-23: UFS link UP after SMC reset; UTRD header bug fixed <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -469,6 +469,45 @@ low >=10 us then releasing and waiting 10-15 ms
 (assert/release) -> refclk -> pre-link -> link startup. `spsr` bits
 [31:16] are the SMC a0 result, [1:0] the refclk ACK. A hang is possible
 if the monitor rejects the call; recovery is the trim-prefix path.
+
+**HARDWARE RESULT (2026-10-23): SMC device reset brings the link up.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v13.img`,
+SHA256 `28f690d2...`, written partition `948ee259...`; returned in 31.7 s,
+`boot_a` restored/verified. Record:
+
+```
+spsr = 0x0000000000000003  SMC a0=0 (device reset accepted), refclk acked
+dtb  = 0x0f00000000000702  strategy 3 (host reset + SMC device reset +
+                            refclk + link startup): TUR rc 2, OCS 7,
+                            status 0, UIC 0, post-HCS 0xf
+fault= 0x0f                final HCS DP|UTRLRDY|UCRDY
+```
+
+The SMC reset (`arm_smccc_smc(0x82000276, 2, 0/1)`) makes
+`DME_LINK_STARTUP` return **UIC 0** and sets **DP**: the link is finally
+up. The remaining TUR OCS 7 exposed the UTRD-header bug below; it is not
+a link failure.
+
+**ROOT CAUSE (UTRD header endianness).** Linux `struct
+request_desc_header` on little-endian is byte2 bitfields: bit0 interrupt,
+bits1-2 data direction, bits4-7 command_type. The shim (and the XNU
+`bsd/dev/sweet_ufs.c`) wrote `dw0 = (dd << 25) | (1 << 24)`, which lands
+in **byte3 reserved bits** and leaves the interrupt bit clear. The host
+then rejects the command with OCS 7 once the link works. The correct
+value for a no-data SCSI TUR is `dw0 = (1 | (dd << 1)) << 16`
+(0x00010000 for TUR). This also means the earlier "CT=1 -> CT=0" change
+was based on the wrong byte layout; the actual SCSI command type is 0 in
+byte2 bits4-7.
+
+**Prepared, not flashed: fixed-UTRD test (v14).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v14.img`,
+26,570,752 B, SHA256
+`77f30da4f03f92ac7ee51afb834106bd374ce0e8f34d9a6cfc74707429e80bc2`;
+predicted written partition
+`a40327d2b97075edbbc242ef3d1fa2485147376106011d379271dd906a8bbc54`.
+Strategies unchanged (3 = host reset + SMC device reset + refclk + link
+startup); the corrected DW0 applies to every TUR. Success is strategy 3
+TUR rc 0, OCS 0, status 0, post-HCS 0xf.
 
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
