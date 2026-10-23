@@ -912,6 +912,15 @@ descriptor 0x01 -> poll) after `ufs_take_over_host`, before the TUR.
 Stage-coded failures: 0x8000 | (stage << 8) | query rc. Committed
 `c7eed42`; CI dispatched.
 
+**Prepared: kernel query-init checkpoint.** Kernel `ci-39965437795`
+SHA `5ee4dd00...`; caller moved +0x480 to 0x7a42d04; rtcfast
+0x79ad8f0/0x7a426f0/0x7a42734; BRK 0x7a42d08. Image
+`entryprobe-el1-xnu-hybrid6-ufs-preinit-error-brk.img` SHA `01bd63da...`,
+predicted `fb8460fc...`. x0: 0x8xxx = device-init stage failure
+(0x810x flag read, 0x820x config read, 0x8300 bad descriptor, 0x840x
+write, 0x8500 poll), 0x402 UA, 0x401 flag-clear-but-target-failure,
+0 = TUR/GPT passed.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
