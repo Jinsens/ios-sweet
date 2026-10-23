@@ -37,12 +37,12 @@
  	vm_offset_t dma;                        /* kernel VA of the DMA allocation */
  	uint64_t dma_pa;
  	uint8_t lun;
-@@ -129,7 +150,134 @@
+@@ -129,6 +150,133 @@
  	*(volatile uint32_t *)(su.regs + off) = v;
  }
  
 +/* Read-modify-write one 32-bit syscon register and publish it. */
- static void
++static void
 +mmio_bits(vm_offset_t base, uint32_t off, uint32_t mask, uint32_t value)
 +{
 +	volatile uint32_t *p = (volatile uint32_t *)(base + off);
@@ -168,11 +168,10 @@
 +	return (ufs_rd(REG_HCS) & HCS_UCRDY) ? 0 : 0x106;
 +}
 +
-+static void
+ static void
  dma_sync(uint32_t off, uint32_t len)
  {
- 	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-@@ -251,11 +399,130 @@
+@@ -251,11 +399,136 @@
  	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
  		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
  		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
@@ -282,29 +281,35 @@
 +	int error;
 +
 +	/*
-+	 * Linux ufshcd_complete_dev_init(): set fDeviceInit (flag IDN 0x01),
-+	 * then poll until the device clears it. Reading it without setting it
-+	 * leaves the device uninitialized, so every SCSI command is rejected.
++	 * Read fDeviceInit (flag IDN 0x01, query function 0x01) first: 0
++	 * means the device already finished init (the shim pre-init does it
++	 * after the device reset). Only set it when the device reports 1;
++	 * a redundant SET restarts device init and can wedge the link.
 +	 */
-+	error = ufs_query(0x06, 0x01, 0, 0, 0, true, &v);       /* SET_FLAG */
++	error = ufs_query(0x05, 0x01, 0, 0, 0, false, &v);
 +	if (error)
 +		return 0x8000 | (1 << 8) | (error & 0xff);
-+	for (int i = 0; i < 100; i++) {
++	if (!(v & 1))
++		return 0;
++	error = ufs_query(0x06, 0x01, 0, 0, 0, true, &v);
++	if (error)
++		return 0x8000 | (2 << 8) | (error & 0xff);
++	for (int i = 0; i < 1000; i++) {
 +		v = 0;
-+		error = ufs_query(0x05, 0x01, 0, 0, 0, false, &v); /* READ_FLAG */
++		error = ufs_query(0x05, 0x01, 0, 0, 0, false, &v);
 +		if (error)
-+			return 0x8000 | (2 << 8) | (error & 0xff);
++			return 0x8000 | (3 << 8) | (error & 0xff);
 +		if (!(v & 1))
 +			return 0;
 +		delay(1000);
 +	}
-+	return 0x8000 | (3 << 8);
++	return 0x8000 | (4 << 8);
 +}
 +
  /* READ(10) of count device blocks at lba into the bounce buffer. */
  static int
  ufs_read_blocks(uint64_t lba, uint32_t count)
-@@ -356,11 +623,6 @@
+@@ -356,11 +629,6 @@
  static int
  ufs_take_over_host(void)
  {
@@ -316,7 +321,7 @@
  	if (ufs_rd(REG_UTRLDBR)) {
  		printf("SWEET UFS: requests outstanding from the bootloader\n");
  		return EBUSY;
-@@ -371,6 +633,29 @@
+@@ -371,6 +639,29 @@
  		    su.dma_pa);
  		return ENXIO;
  	}
@@ -346,7 +351,7 @@
  	ufs_wr(REG_IE, 0);                      /* polled operation */
  	ufs_wr(REG_IS, ufs_rd(REG_IS));
  	ufs_wr(REG_UTRLRSR, 0);
-@@ -384,6 +669,10 @@
+@@ -384,6 +675,10 @@
  		printf("SWEET UFS: host did not take our request list\n");
  		return EIO;
  	}
@@ -357,7 +362,7 @@
  	return 0;
  }
  
-@@ -608,6 +897,8 @@
+@@ -608,6 +903,8 @@
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);
@@ -366,7 +371,7 @@
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -624,6 +915,9 @@
+@@ -624,6 +921,9 @@
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
  	if (!error) {

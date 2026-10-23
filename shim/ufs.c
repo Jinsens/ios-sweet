@@ -276,24 +276,25 @@ device_init(void)
 {
 	uint32_t v = 0, st = 0;
 
-	/*
-	 * Linux ufshcd_complete_dev_init(): set fDeviceInit (flag IDN 0x01),
-	 * then poll until the device clears it. A read alone leaves the
-	 * device uninitialized and it rejects SCSI commands.
-	 */
-	uint32_t rc = query_ex(0x06, 0x01, 0, 0, 0, 0, 2, &v, &st);	/* SET_FLAG */
+	/* Flag IDN 0x01; 0 means the device already finished init. */
+	uint32_t rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);	/* READ_FLAG */
 	if (rc)
 		return 0x10 | rc;
-	for (int i = 0; i < 100; i++) {
+	if (!(v & 1))
+		return 0;
+	rc = query_ex(0x06, 0x01, 0, 0, 0, 0, 2, &v, &st);		/* SET_FLAG */
+	if (rc)
+		return 0x20 | rc;
+	for (int i = 0; i < 1000; i++) {
 		v = 0;
-		rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);	/* READ_FLAG */
+		rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);
 		if (rc)
-			return 0x20 | rc;
+			return 0x30 | rc;
 		if (!(v & 1))
 			return 0;
 		wait_ms(1);
 	}
-	return 0x30;
+	return 0x40;
 }
 
 static uint32_t
