@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS link/PHY init is the remaining blocker <<<
+## >>> ACTIVE 2026-10-23: UFS clock-gate write hung device; RESTORE PENDING <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -404,6 +404,32 @@ live FDT), which leaves `ufs_mtk_setup_clocks`/`setup_regulators` and the
 power-domain state as the suspects. Porting those needs the vendor clock
 gate/power-domain register map; they are not reachable by a simple UIC or
 HCE sequence.
+
+**HARDWARE FAILURE (2026-10-23): v11 topckgen clock-gate write hangs.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v11.img`,
+SHA256 `6b21ef53...`, written partition `b19b53dc...` (verified). After
+`adb reboot recovery` the device never returned within 100 s; it is stuck
+at the logo/reboot loop, `adb` and `fastboot` both see nothing.
+`boot_a` **still contains the v11 image** and the full backup was not
+restored. The last action was `mtk_clocks_on()` clearing pdn bits in the
+topckgen `CLK_CFG_*_CLR` registers (UFS clocks); that write is the prime
+suspect (the clock/power-domain handshake via the CLR/UPDATE registers
+is not safe while the UFS power domain is in its handoff state). The shim
+function is now **read-only** (commit after `ffebf76`) so no future build
+repeats the write.
+
+**Recovery (needs the user physically):**
+1. Power+VolumeDown -> fastboot.
+2. `fastboot flash boot_a backup/boot_a-stock-trim.img`
+   (20,873,216 B, SHA `fe6e8fbf...`).
+3. Power+VolumeUp -> Recovery; confirm `adb devices` shows
+   `Q4NVQWVW4DI7EUSW recovery`.
+4. Push `backup/recovery-20261021/boot_a-live-20261021.img`
+   (67,108,864 B), `dd` to `/dev/block/by-name/boot_a`, verify
+   `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+
+Until step 4 succeeds, treat `boot_a` as the test image; do not boot
+Android/system.
 
 **Prepared, not flashed: UFS topckgen gate enable (v11).**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v11.img`,
