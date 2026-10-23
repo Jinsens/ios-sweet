@@ -16,7 +16,7 @@ void test_ufs(void);
  *   4: [1]=READ CAPACITY result with the same packing, [2]=last LBA,
  *      [3]=block size
  *   4: [4]=IS before the DME_HIBERNATE_EXIT, [5]=IS after,
- *      [6]=UIC ARG2 (result in [7:0]), [7]=HCS after
+ *      [6]=UIC ARG2 (result in [7:0]), [7]=physical UTRL address
  */
 extern volatile uint64_t ufs_test_stage;
 extern volatile uint64_t ufs_test_info[8];

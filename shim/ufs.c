@@ -87,7 +87,7 @@ static void zero(void *p, unsigned n)
 		b[i] = 0;
 }
 
-static uint32_t be32(const uint8_t *p)
+static uint32_t __attribute__((unused)) be32(const uint8_t *p)
 {
 	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
@@ -331,6 +331,54 @@ restore_host(uint32_t ba, uint32_t bau, uint32_t rsr)
 	ufs_wr(REG_UTRLRSR, rsr & 1u);
 }
 
+static uint64_t
+tick_freq(void)
+{
+	uint64_t f;
+	__asm__ volatile("isb; mrs %0, cntfrq_el0" : "=r"(f));
+	return f;
+}
+
+/* One UIC command; returns the UIC result byte (0 = success, 0xff = no
+ * completion within 100 ms). Completion is IS bit 10 (UIC_COMMAND_COMPL). */
+static uint32_t
+uic_cmd(uint32_t op)
+{
+	uint32_t is = ufs_rd(REG_IS);
+	ufs_wr(REG_UIC_ARG1, 0);
+	ufs_wr(REG_UIC_ARG2, 0);
+	ufs_wr(REG_UIC_ARG3, 0);
+	ufs_wr(REG_IS, is);		/* W1C: clear the previous status */
+	ufs_wr(REG_UIC_CMD, op);
+	uint64_t start = ticks(), freq = tick_freq();
+	while (!(ufs_rd(REG_IS) & 0x400) && ticks() - start < freq / 10)
+		__asm__ volatile("yield");
+	if (!(ufs_rd(REG_IS) & 0x400))
+		return 0xff;
+	return ufs_rd(REG_UIC_ARG2) & 0xff;
+}
+
+/* Standard UFSHCI host enable cycle; the MTK PHY/clock state stays as LK
+ * left it. Returns 0 when HCS reports device present + both lists ready. */
+static int
+host_reset(void)
+{
+	uint64_t start;
+	uint64_t freq = tick_freq();
+	const uint32_t ready = HCS_DP | HCS_UTRLRDY | HCS_UCRDY;
+
+	ufs_wr(REG_UTRLRSR, 0);
+	ufs_wr(REG_HCE, 0);
+	start = ticks();
+	while ((ufs_rd(REG_HCE) & 1) && ticks() - start < freq / 10)
+		__asm__ volatile("yield");
+	ufs_wr(REG_HCE, 1);
+	start = ticks();
+	while ((ufs_rd(REG_HCS) & ready) != ready && ticks() - start < freq / 10)
+		__asm__ volatile("yield");
+	return (ufs_rd(REG_HCS) & ready) == ready ? 0 : 1;
+}
+
 void test_ufs(void)
 {
 	uint32_t orig_ba = ufs_rd(REG_UTRLBA), orig_bau = ufs_rd(REG_UTRLBAU);
@@ -373,52 +421,41 @@ void test_ufs(void)
 		return;
 	}
 
-	/* The MTK link can be in HIBERN8 after the bootloader. Exit it with a
-	 * bounded UIC command and record the UIC/link status; UIC_COMMAND_COMPL
-	 * is IS bit 10 (0x400), HIBERNATE_EXIT is bit 5 (0x20). */
-	uint32_t is_before = ufs_rd(REG_IS);
-	uint32_t hcs_before = ufs_rd(REG_HCS);
-	ufs_wr(REG_UIC_ARG1, 0);
-	ufs_wr(REG_UIC_ARG2, 0);
-	ufs_wr(REG_UIC_ARG3, 0);
-	ufs_wr(REG_IS, is_before);
-	if (hcs_before & HCS_UCRDY) {
-		ufs_wr(REG_UIC_CMD, 0x18);	/* DME_HIBERNATE_EXIT */
-		uint64_t start = ticks(), freq;
-		__asm__ volatile("isb; mrs %0, cntfrq_el0" : "=r"(freq));
-		while (!(ufs_rd(REG_IS) & 0x400) && ticks() - start < freq / 10)
-			__asm__ volatile("yield");
-	}
+	uint32_t is_before = ufs_rd(REG_IS), hcs_before = ufs_rd(REG_HCS);
 	ufs_test_info[4] = is_before;
-	ufs_test_info[5] = ufs_rd(REG_IS);
-	ufs_test_info[6] = ufs_rd(REG_UIC_ARG2);	/* UIC result in [7:0] */
-	ufs_test_info[7] = ufs_rd(REG_HCS);
+	ufs_test_info[5] = hcs_before;
 
-	uint32_t ocs = 0, st = 0;
-	static const uint8_t tur[6] = { 0x00 };
-	/* A first command may report a unit attention; retry a few times. */
-	for (int i = 0; i < 3; i++) {
-		rc = scsi(0, tur, sizeof(tur), 0, 0, 0, &ocs, &st);
-		con_hex2("UFS TUR", "rc=", rc, "ocs/st=", ocs << 8 | st);
-		if (!rc)
-			break;
+	/* Try link wake strategies and one TUR after each. Result packing:
+	 * rc | OCS<<8 | status<<16 | resp0<<24 | resp6<<32 | resp7<<40 |
+	 * UIC result<<48 | post-HCS low nibble<<56.
+	 *   0 none (baseline), 1 DME_HIBERNATE_EXIT, 2 DME_LINK_STARTUP,
+	 *   3 host HCE reset + DME_LINK_STARTUP. */
+	static const uint32_t ops[4] = { 0, 0x18, 0x16, 0x16 };
+	for (int s = 0; s < 4; s++) {
+		uint32_t uic = 0xff;
+		if (s == 3 && host_reset()) {
+			ufs_test_info[s] = 0xfe;
+			continue;
+		}
+		if (s) {
+			uic = uic_cmd(ops[s]);
+			if (claim_host()) {
+				ufs_test_info[s] = 0xfd | (uint64_t)uic << 48;
+				continue;
+			}
+		}
+		uint32_t ocs = 0, st = 0;
+		static const uint8_t tur[6] = { 0x00 };
+		int rc = scsi(0, tur, sizeof(tur), 0, 0, 0, &ocs, &st);
+		con_hex2("UFS TRY", "s=", s, "rc/ocs=", (uint32_t)rc << 8 | ocs);
+		ufs_test_info[s] = (uint64_t)rc | (uint64_t)ocs << 8 |
+		    (uint64_t)st << 16 | (uint64_t)ufs_scsi_resp[0] << 24 |
+		    (uint64_t)ufs_scsi_resp[6] << 32 |
+		    (uint64_t)ufs_scsi_resp[7] << 40 |
+		    (uint64_t)uic << 48 | (uint64_t)(ufs_rd(REG_HCS) & 0xf) << 56;
 	}
-	ufs_test_stage = 3;
-	ufs_test_info[0] = (uint64_t)rc | (uint64_t)ocs << 8 | (uint64_t)st << 16 |
-	    (uint64_t)ufs_scsi_resp[0] << 24 | (uint64_t)ufs_scsi_resp[6] << 32 |
-	    (uint64_t)ufs_scsi_resp[7] << 40;
-
-	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */
-	rc = scsi(0, cap10, sizeof(cap10), data, 8, 1, &ocs, &st);
-	con_hex2("UFS CAP", "rc=", rc, "ocs/st=", ocs << 8 | st);
-	if (!rc)
-		con_hex2("UFS LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
-	ufs_test_stage = 4;
-	ufs_test_info[1] = (uint64_t)rc | (uint64_t)ocs << 8 | (uint64_t)st << 16 |
-	    (uint64_t)ufs_scsi_resp[0] << 24 | (uint64_t)ufs_scsi_resp[6] << 32 |
-	    (uint64_t)ufs_scsi_resp[7] << 40;
-	ufs_test_info[2] = be32(data);
-	ufs_test_info[3] = be32(data + 4);
+	ufs_test_info[6] = ufs_rd(REG_IS);
+	ufs_test_info[7] = ufs_rd(REG_HCS);
 
 	list_partitions();
 	ufs_test_stage = 5;
