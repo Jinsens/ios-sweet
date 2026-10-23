@@ -991,6 +991,15 @@ not segment layout. Next: relink the control (archive `sweet_ufs.o`, real
 libs, CLT `ld`) and boot it; if it reaches x0=0x81fe, local links work and
 the remaining driver work can be done without CI.
 
+**Real-lib local link matches CI.** With `libfirehose_kernel.a` from
+`xnu-linklibs` and CLT `libclang_rt.cc_kext.a`, the control link (archive
+`sweet_ufs.o`) places `_sweet_ufs_rootdev` at 0xfffffe00074e8090, exactly
+the CI VA; `_IOFindBSDRoot` is 0x7a42654 and the call/cbnz at
+0x7a42d04/0x7a42d08. The firehose stub's smaller code had shifted every
+later object by -0x1000, so earlier local kernels were also misaligned.
+Image `entryprobe-el1-xnu-local-ctrl-real.img` SHA `77feacc4...`,
+predicted `67bba14b...`; expected x0=0x81fe if the local kernel boots.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
