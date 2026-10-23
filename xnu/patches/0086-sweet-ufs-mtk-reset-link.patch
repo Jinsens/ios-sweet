@@ -172,7 +172,7 @@
  dma_sync(uint32_t off, uint32_t len)
  {
  	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-@@ -251,7 +399,13 @@
+@@ -251,11 +399,139 @@
  	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
  		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
  		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
@@ -187,7 +187,133 @@
  	}
  	return 0;
  }
-@@ -356,11 +510,6 @@
+ 
++static uint32_t
++rd_be32(const uint8_t *p)
++{
++	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
++}
++
++/*
++ * One UFS query request (UPIU type 0x16). The device asserts fDeviceInit
++ * after a reset and refuses SCSI commands until the host writes the
++ * configuration descriptor back; Linux does this in ufshcd_device_init().
++ * opcode: 0x01 read descriptor, 0x02 write descriptor, 0x05 read flag.
++ */
++static int
++ufs_query(uint8_t opcode, uint8_t idn, uint8_t index, uint8_t selector,
++    uint32_t len, bool write, uint32_t *value)
++{
++	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
++	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
++	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
++	uint64_t deadline;
++
++	assert(len <= 512);
++	bzero(utrd, sizeof(*utrd));
++	bzero(ucd, sizeof(*ucd));
++
++	ucd->cmd[0] = 0x16;                     /* QUERY REQUEST UPIU */
++	ucd->cmd[3] = ++su.tag;
++	ucd->cmd[12] = opcode;
++	ucd->cmd[13] = idn;
++	ucd->cmd[14] = index;
++	ucd->cmd[15] = selector;
++	utrd->dw0 = (1u << 28) | ((len ? (write ? 1u : 2u) : 0u) << 25) | (1u << 24);
++	utrd->dw2 = 0x0f;
++	utrd->ucdba = (uint32_t)ucd_pa;
++	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
++	utrd->resp = (512u / 4) << 16 | (512u / 4);
++	if (len) {
++		ucd->prdt[0].addr_lo = (uint32_t)bounce_pa;
++		ucd->prdt[0].addr_hi = (uint32_t)(bounce_pa >> 32);
++		ucd->prdt[0].dbc = len - 1;
++		utrd->prdt = (1024u / 4) << 16 | 1;
++	}
++	if (su.cache) {
++		dma_clean(DMA_UTRL, sizeof(*utrd));
++		dma_clean(DMA_UCD, 16);
++		dma_sync(DMA_UCD + offsetof(struct ucd, resp), sizeof(ucd->resp));
++		if (len) {
++			dma_clean(DMA_UCD + offsetof(struct ucd, prdt), sizeof(ucd->prdt[0]));
++			if (write)
++				dma_clean(DMA_BOUNCE, len);
++			else
++				dma_sync(DMA_BOUNCE, len);
++		}
++	} else {
++		dma_sync(DMA_UTRL, sizeof(*utrd));
++		dma_sync(DMA_UCD, sizeof(*ucd));
++	}
++	__builtin_arm_dsb(0xf);
++
++	ufs_wr(REG_UTRLDBR, 1);
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	while (ufs_rd(REG_UTRLDBR) & 1) {
++		if (mach_absolute_time() > deadline) {
++			ufs_wr(REG_UTRLCLR, ~1u);
++			return ETIMEDOUT;
++		}
++		delay(1);
++	}
++	__builtin_arm_dsb(0xf);
++
++	if (su.cache) {
++		dma_sync(DMA_UTRL, sizeof(*utrd));
++		dma_sync(DMA_UCD, sizeof(*ucd));
++		if (len)
++			dma_sync(DMA_BOUNCE, len);
++	}
++	if (utrd->dw2 & 0xff)
++		return 0x200 | (utrd->dw2 & 0xff);
++	if (ucd->resp[0] != 0x36)
++		return 0x300;
++	*value = rd_be32(&ucd->resp[24]);
++	return (ucd->resp[6] || ucd->resp[7]) ? 0x400 | ucd->resp[6] : 0;
++}
++
++/* Finish device init after the host reset. Error codes carry the stage. */
++static int
++ufs_device_init(void)
++{
++	uint8_t *desc = (uint8_t *)(su.dma + DMA_BOUNCE);
++	uint32_t v = 0, len;
++	int error;
++
++	bzero(desc, 512);
++	error = ufs_query(0x05, 0x0b, 0, 0, 0, false, &v);    /* fDeviceInit */
++	if (error)
++		return 0x8000 | (1 << 8) | (error & 0xff);
++	if (!(v & 1)) {
++		return 0;
++	}
++	error = ufs_query(0x01, 0x01, 0, 0, 512, false, &v);   /* config descriptor */
++	if (error)
++		return 0x8000 | (2 << 8) | (error & 0xff);
++	len = v ? v : 512;
++	if (len > 512)
++		len = 512;
++	if (desc[0] < 0x10 || desc[0] > len)
++		return 0x8000 | (3 << 8);
++	error = ufs_query(0x02, 0x01, 0, 0, len, true, &v);    /* write back */
++	if (error)
++		return 0x8000 | (4 << 8) | (error & 0xff);
++	for (int i = 0; i < 20; i++) {
++		v = 0;
++		error = ufs_query(0x05, 0x0b, 0, 0, 0, false, &v);
++		if (!error && !(v & 1)) {
++			return 0;
++		}
++		delay(1000);
++	}
++	return 0x8000 | (5 << 8);
++}
++
+ /* READ(10) of count device blocks at lba into the bounce buffer. */
+ static int
+ ufs_read_blocks(uint64_t lba, uint32_t count)
+@@ -356,11 +632,6 @@
  static int
  ufs_take_over_host(void)
  {
@@ -199,7 +325,7 @@
  	if (ufs_rd(REG_UTRLDBR)) {
  		printf("SWEET UFS: requests outstanding from the bootloader\n");
  		return EBUSY;
-@@ -371,6 +520,29 @@
+@@ -371,6 +642,29 @@
  		    su.dma_pa);
  		return ENXIO;
  	}
@@ -229,7 +355,7 @@
  	ufs_wr(REG_IE, 0);                      /* polled operation */
  	ufs_wr(REG_IS, ufs_rd(REG_IS));
  	ufs_wr(REG_UTRLRSR, 0);
-@@ -384,6 +556,10 @@
+@@ -384,6 +678,10 @@
  		printf("SWEET UFS: host did not take our request list\n");
  		return EIO;
  	}
@@ -240,7 +366,7 @@
  	return 0;
  }
  
-@@ -608,6 +784,8 @@
+@@ -608,6 +906,8 @@
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);
@@ -249,3 +375,13 @@
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
+@@ -624,6 +924,9 @@
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	error = ufs_take_over_host();
+ 	if (!error) {
++		error = ufs_device_init();
++	}
++	if (!error) {
+ 		static const uint8_t tur[6] = { 0x00 };
+ 		/* The first command after the bootloader may report a unit attention. */
+ 		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
