@@ -37,7 +37,7 @@
  	vm_offset_t dma;                        /* kernel VA of the DMA allocation */
  	uint64_t dma_pa;
  	uint8_t lun;
-@@ -129,7 +150,133 @@
+@@ -129,7 +150,134 @@
  	*(volatile uint32_t *)(su.regs + off) = v;
  }
  
@@ -56,7 +56,8 @@
 +	register uint64_t x0 __asm__("x0") = a0;
 +	register uint64_t x1 __asm__("x1") = a1;
 +	register uint64_t x2 __asm__("x2") = a2;
-+	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2)
++	__asm__ volatile("mov x3, xzr; mov x4, xzr; mov x5, xzr; mov x6, xzr;"
++	    " mov x7, xzr; smc #0" : "+r"(x0), "+r"(x1), "+r"(x2)
 +	    : : "x3", "x4", "x5", "x6", "x7", "memory");
 +	return x0;
 +}
@@ -66,7 +67,7 @@
 + * ufs_mtk_device_reset): RST_n is active low, keep it low >=10 us, then
 + * release and give the device 10 ms.
 + */
- static void
++static void
 +ufs_device_reset(void)
 +{
 +	uint64_t id = MTK_SIP_UFS_CONTROL64;
@@ -127,7 +128,7 @@
 +}
 +
 +/* Vendor ufs_mtk_pre_link: allow UniPro power down, clear deep stall. */
-+static void
+ static void
 +ufs_pre_link(void)
 +{
 +	uint32_t v = 0;
@@ -171,7 +172,7 @@
  dma_sync(uint32_t off, uint32_t len)
  {
  	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-@@ -356,11 +503,6 @@
+@@ -356,11 +504,6 @@
  static int
  ufs_take_over_host(void)
  {
@@ -183,7 +184,7 @@
  	if (ufs_rd(REG_UTRLDBR)) {
  		printf("SWEET UFS: requests outstanding from the bootloader\n");
  		return EBUSY;
-@@ -371,6 +513,29 @@
+@@ -371,6 +514,29 @@
  		    su.dma_pa);
  		return ENXIO;
  	}
@@ -213,7 +214,7 @@
  	ufs_wr(REG_IE, 0);                      /* polled operation */
  	ufs_wr(REG_IS, ufs_rd(REG_IS));
  	ufs_wr(REG_UTRLRSR, 0);
-@@ -384,6 +549,10 @@
+@@ -384,6 +550,10 @@
  		printf("SWEET UFS: host did not take our request list\n");
  		return EIO;
  	}
@@ -224,7 +225,7 @@
  	return 0;
  }
  
-@@ -608,6 +777,8 @@
+@@ -608,6 +778,8 @@
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);

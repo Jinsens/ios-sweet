@@ -424,7 +424,8 @@ smc3(uint64_t a0, uint64_t a1, uint64_t a2)
 	register uint64_t x0 asm("x0") = a0;
 	register uint64_t x1 asm("x1") = a1;
 	register uint64_t x2 asm("x2") = a2;
-	asm volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2)
+	asm volatile("mov x3, xzr; mov x4, xzr; mov x5, xzr; mov x6, xzr;"
+	    " mov x7, xzr; smc #0" : "+r"(x0), "+r"(x1), "+r"(x2)
 	    : : "x3", "x4", "x5", "x6", "x7", "memory");
 	return x0;
 }
