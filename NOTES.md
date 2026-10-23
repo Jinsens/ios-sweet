@@ -893,6 +893,16 @@ caller 0x7a428a4 (+0x20), rtcfast 0x79ad490/0x7a42290/0x7a422d4, BRK
 SHA `9325913d...`, predicted `5fcdbe95...`. x0: 0x2xx OCS, 0x300 UPIU,
 0x4xx SCSI status (0x402 UA), 0x5xx sense.
 
+**Shim device init (QUERY).** The kernel TUR returns response UPIU
+`resp[6]=1` (target failure), consistent with fDeviceInit still set after
+the SMC reset. `shim/ufs.c` now runs the Linux `ufshcd_device_init`
+equivalent before the TUR: QUERY read flag fDeviceInit (0x0B); if set,
+read the Configuration Descriptor (IDN 0x01), write it back, poll the flag;
+then TUR. Stage is stored in `ufs_test_info[5]` (0x10/0x20/0x30/0x40/0x50
+prefixes on failure). Image `entryprobe-el1-xnu-hybrid5-ufs-preinit-query.img`
+SHA `22bff0bf...`, predicted `75feaf5d...`, same instrumented kernel.
+Expected x0: 0x402 (UA reached), 0 (success), or 0x401 unchanged.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
