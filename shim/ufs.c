@@ -133,7 +133,9 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
 	uint32_t dd = dir == 1 ? 2u : dir == 2 ? 1u : 0u;
-	utrl[0].dw0 = (1u << 28) | (dd << 25) | (1u << 24);	/* UFS storage, interrupt */
+	/* CT=0 is UTP_CMD_TYPE_SCSI; 1 is UTP_CMD_TYPE_UFS (native UFS
+	 * command). A SCSI CDB needs CT=0 or the device/host fails it. */
+	utrl[0].dw0 = (dd << 25) | (1u << 24);	/* SCSI command, interrupt */
 	utrl[0].dw2 = 0x0f;			/* OCS: invalid until the host updates it */
 	utrl[0].ucdba = (uint32_t)ucd_pa;
 	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
