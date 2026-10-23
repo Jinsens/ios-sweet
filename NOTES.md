@@ -636,6 +636,25 @@ or the XNU path hung before any checkpoint. Next isolation:
 HCS<<32|UTRLRSR. This tells whether `init_ufs_link` itself hangs/fails
 at the XNU call site.
 
+**HARDWARE RESULT (2026-10-23): pre-init completes at el1-load.**
+`entryprobe-el1-ufs-preinit.img` (`f4758deb...`, partition `7e547768...`)
+returned in 29.7 s; banner `esr=3` = `init_ufs_link` reached **ready**
+(stage 3). `stage`/`far` were overwritten by the loader afterwards, but
+the stage value is the function's own counter. So the pre-init sequence
+itself is good; the logo hang is **inside XNU** after the jump.
+
+**Prepared, not flashed: pre-init + error checkpoint.**
+`research/matisse/20261023-ufs/entryprobe-el1-xnu-ufs-init-error-brk.img`,
+26,570,752 B, SHA256
+`e7b21527e491b998a664f156444e725b971e617fefb7b82186403f68b158f9b0`;
+predicted written partition
+`7f4a9ef8b153ceab1fff0864b330e2e0140e78db7e5e121b7e4c2f663b2e5e96`.
+Boots the **unpatched 0084 kernel** with `--ufs-init`; the payload's BRK
+replaces `cbnz w0` after `bl _sweet_ufs_rootdev` (`0xfffffe0007a42488`),
+so the shim records x0 = the driver's return code. Previously (link
+down) this was `0x3c` = ETIMEDOUT. Now: 0 means the driver took over and
+found the partition; other errno values pin the failing stage.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
