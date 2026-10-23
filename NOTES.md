@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS reset+HCE reaches UCRDY; v8 prepared <<<
+## >>> ACTIVE 2026-10-23: UFS reset+HCE reaches UCRDY; v9 prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -349,17 +349,24 @@ readiness gate expected DP as well, which only appears after the link
 starts. Strategy 3 therefore skipped the pre-link/link startup. This is a
 test bug, not a host failure: UCRDY is exactly the expected post-HCE state.
 
-**Prepared, not flashed: reset + pre-link + link startup (v8).**
+**HARDWARE RESULT (2026-10-23): UTRLRDY is not a post-HCE bit.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v8.img`,
+SHA256 `9dfe6a03...`, written partition `84ea176b...`; returned in 31.7 s,
+`boot_a` restored/verified. Strategy 3 still `0xfe` with HCS 0x8. Since
+`UTRLRDY` is only set after the request-list base/RSR are programmed
+(`claim_host`), waiting for it before the link startup is another false
+gate. HCE/UCRDY is the correct post-reset condition.
+
+**Prepared, not flashed: reset + pre-link + link startup (v9).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v9.img`,
 26,570,752 B, SHA256
-`9dfe6a03d0a02d31b1d7e695f85cb351f297160c0f3dfc4dde6ad9100fd4163d`;
+`db72f919ad298f09323155d23cccd91f3fde5a115beac37bbba15da3d7454917`;
 predicted written partition
-`84ea176b8326123fd0aca489323479811c9b1a57f407b54b70164bbe1883cc81`.
-Commit `fa7f99c` changes the post-reset ready mask to `UTRLRDY|UCRDY`
-(no DP). Strategy 3 now runs the full vendor sequence: syscon resets,
-XOUFS_CTRL bit 7, HCE cycle, MTK pre-link, `DME_LINK_STARTUP`, re-claim,
-TUR. A successful strategy 3 should show DP in the post-HCS nibble (`f`)
-and TUR rc 0 / OCS 0 / UIC 0.
+`c40c0a48d89caabde34a6d76a918b069107d600b0329850e41856ebced414141`.
+Commit `8e1bfbe` waits only for UCRDY, so strategy 3 now proceeds:
+syscon resets -> XOUFS bit 7 -> HCE -> MTK pre-link -> DME_LINK_STARTUP ->
+claim -> TUR. Success is TUR rc 0, OCS 0, UIC 0 and DP in the post-HCS
+nibble.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
