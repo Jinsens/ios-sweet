@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS root entry PASS; init-done missed; snapshot prepared <<<
+## >>> ACTIVE 2026-10-23: UFS host takeover-ready; error-code checkpoint prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -122,6 +122,52 @@ rtcfast + `--ufs-regs`, BRK at VA `0xfffffe00074e83b4` (payload offset
 (`0x940000f7`). A hit proves host takeover succeeded and also carries the
 pre-XNU register snapshot. Predicted written partition
 `789468272a2e190ec69a762b185c8a47834124510f8e3d2bf79af90b249e25b7`.
+
+**HARDWARE PASS (2026-10-23): pre-XNU UFSHCI state is takeover-ready.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-regs.img`,
+26,562,560 B, SHA256
+`ba1ed1c41c5ae2052d2fb2a7a7bf0e78e28f2104a8bf2c06601ebae2173797b6`
+(`el1-load`, `--ufs-regs`, payload `755ae110...`), written partition
+`75c514ba0f382b96596f386a8245b06d8fec3fcb5700f136144392582a61309c`;
+device returned in 30.6 s and the original `boot_a` was restored/verified.
+Record (fields repurposed by the snapshot):
+
+```
+gicd=3587071f00000200  -> CAP=0x3587071f VER=0x00000200
+vtimer=0000010f00000001 -> HCS=0x0000010f HCE=0x00000001
+fb=0000000051254400     -> UTRLBAU=0x00000000 UTRLBA=0x51254400
+dtb=0000000000000001    -> UTRLDBR=0x00000000 UTRLRSR=0x00000001
+stage=000000000000007f
+```
+
+CAP bit 24 (64AS) is set, so DMA above 4 GiB is explicitly supported and the
+driver's ENXIO gate passes. HCE=1 and HCS has DP|UTRLRDY|UCRDY; no request is
+outstanding and the bootloader's list is running. The host is in the state
+`ufs_take_over_host()` expects, so the full-init failure is in the takeover
+write-back or (more likely) the first SCSI command / GPT read, or in the
+devfs registration. UTRLBA=0x51254400 is low memory and 1 KiB aligned.
+
+**Prepared, not flashed: UFS error-code checkpoint.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-error-brk.img`,
+26,562,560 B, SHA256
+`f7fb157e0d009191ec544026db126d9156b55f462a7ba83328782b5f1ac0d532`;
+payload `matisse-xnu-0084-ufs-error-brk.payload`, 16,605,888 B, SHA256
+`63a9634d6c478dc1d9edcff2805504fa2b0acd42391c6ac299117ef79c99daee`.
+rtcfast + `--ufs-regs`; BRK at VA `0xfffffe0007a42488` (payload offset
+`0xa3e878`, PA `0x101a42488`) replaces the `cbnz w0` (`0x350032c0`) right
+after `bl _sweet_ufs_rootdev` in `IOFindBSDRoot`. This intercepts both
+outcomes instead of letting the error path panic and reboot:
+
+- `x0 == 0`: the whole UFS init (takeover, TUR, GPT, bdevsw/cdevsw/devfs)
+  succeeded.
+- `x0 != 0`: `x0` is the driver's errno (5 EIO, 6 ENXIO, 12 ENOMEM,
+  16 EBUSY, 2 ENOENT, 60 ETIMEDOUT, ...).
+
+Expected record: `pc=fffffe0007a42488`, plus the same UFS snapshot fields.
+Predicted written partition
+`094d6c7d3cd1472fac68f67e295ce28107a013abec541a6da320749e499b4ddd`.
+The test can take up to ~15 s of SCSI timeouts; the relay returns to Recovery
+in the same boot.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified after restore). Each `boot_a` write still needs
