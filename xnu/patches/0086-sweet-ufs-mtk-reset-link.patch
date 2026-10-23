@@ -42,7 +42,7 @@
  }
  
 +/* Read-modify-write one 32-bit syscon register and publish it. */
-+static void
+ static void
 +mmio_bits(vm_offset_t base, uint32_t off, uint32_t mask, uint32_t value)
 +{
 +	volatile uint32_t *p = (volatile uint32_t *)(base + off);
@@ -128,7 +128,7 @@
 +}
 +
 +/* Vendor ufs_mtk_pre_link: allow UniPro power down, clear deep stall. */
- static void
++static void
 +ufs_pre_link(void)
 +{
 +	uint32_t v = 0;
@@ -172,7 +172,7 @@
  dma_sync(uint32_t off, uint32_t len)
  {
  	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-@@ -251,11 +399,139 @@
+@@ -251,11 +399,130 @@
  	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
  		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
  		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
@@ -214,6 +214,7 @@
 +	bzero(ucd, sizeof(*ucd));
 +
 +	ucd->cmd[0] = 0x16;                     /* QUERY REQUEST UPIU */
++	ucd->cmd[1] = write ? 0x81 : 0x01;      /* standard write/read request */
 +	ucd->cmd[3] = ++su.tag;
 +	ucd->cmd[12] = opcode;
 +	ucd->cmd[13] = idn;
@@ -269,7 +270,7 @@
 +		return 0x200 | (utrd->dw2 & 0xff);
 +	if (ucd->resp[0] != 0x36)
 +		return 0x300;
-+	*value = rd_be32(&ucd->resp[24]);
++	*value = rd_be32(&ucd->resp[20]);       /* utp_upiu_query.value */
 +	return (ucd->resp[6] || ucd->resp[7]) ? 0x400 | ucd->resp[6] : 0;
 +}
 +
@@ -277,43 +278,33 @@
 +static int
 +ufs_device_init(void)
 +{
-+	uint8_t *desc = (uint8_t *)(su.dma + DMA_BOUNCE);
-+	uint32_t v = 0, len;
++	uint32_t v = 0;
 +	int error;
 +
-+	bzero(desc, 512);
-+	error = ufs_query(0x05, 0x0b, 0, 0, 0, false, &v);    /* fDeviceInit */
++	/*
++	 * Linux ufshcd_complete_dev_init(): set fDeviceInit (flag IDN 0x01),
++	 * then poll until the device clears it. Reading it without setting it
++	 * leaves the device uninitialized, so every SCSI command is rejected.
++	 */
++	error = ufs_query(0x06, 0x01, 0, 0, 0, true, &v);       /* SET_FLAG */
 +	if (error)
 +		return 0x8000 | (1 << 8) | (error & 0xff);
-+	if (!(v & 1)) {
-+		return 0;
-+	}
-+	error = ufs_query(0x01, 0x01, 0, 0, 512, false, &v);   /* config descriptor */
-+	if (error)
-+		return 0x8000 | (2 << 8) | (error & 0xff);
-+	len = v ? v : 512;
-+	if (len > 512)
-+		len = 512;
-+	if (desc[0] < 0x10 || desc[0] > len)
-+		return 0x8000 | (3 << 8);
-+	error = ufs_query(0x02, 0x01, 0, 0, len, true, &v);    /* write back */
-+	if (error)
-+		return 0x8000 | (4 << 8) | (error & 0xff);
-+	for (int i = 0; i < 20; i++) {
++	for (int i = 0; i < 100; i++) {
 +		v = 0;
-+		error = ufs_query(0x05, 0x0b, 0, 0, 0, false, &v);
-+		if (!error && !(v & 1)) {
++		error = ufs_query(0x05, 0x01, 0, 0, 0, false, &v); /* READ_FLAG */
++		if (error)
++			return 0x8000 | (2 << 8) | (error & 0xff);
++		if (!(v & 1))
 +			return 0;
-+		}
 +		delay(1000);
 +	}
-+	return 0x8000 | (5 << 8);
++	return 0x8000 | (3 << 8);
 +}
 +
  /* READ(10) of count device blocks at lba into the bounce buffer. */
  static int
  ufs_read_blocks(uint64_t lba, uint32_t count)
-@@ -356,11 +632,6 @@
+@@ -356,11 +623,6 @@
  static int
  ufs_take_over_host(void)
  {
@@ -325,7 +316,7 @@
  	if (ufs_rd(REG_UTRLDBR)) {
  		printf("SWEET UFS: requests outstanding from the bootloader\n");
  		return EBUSY;
-@@ -371,6 +642,29 @@
+@@ -371,6 +633,29 @@
  		    su.dma_pa);
  		return ENXIO;
  	}
@@ -355,7 +346,7 @@
  	ufs_wr(REG_IE, 0);                      /* polled operation */
  	ufs_wr(REG_IS, ufs_rd(REG_IS));
  	ufs_wr(REG_UTRLRSR, 0);
-@@ -384,6 +678,10 @@
+@@ -384,6 +669,10 @@
  		printf("SWEET UFS: host did not take our request list\n");
  		return EIO;
  	}
@@ -366,7 +357,7 @@
  	return 0;
  }
  
-@@ -608,6 +906,8 @@
+@@ -608,6 +897,8 @@
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);
@@ -375,7 +366,7 @@
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -624,6 +924,9 @@
+@@ -624,6 +915,9 @@
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
  	if (!error) {

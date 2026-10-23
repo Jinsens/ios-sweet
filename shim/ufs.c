@@ -221,6 +221,7 @@ query_ex(uint8_t opcode, uint8_t idn, uint8_t index, uint8_t selector,
 	zero(&ucd, sizeof(ucd));
 
 	ucd.cmd[0] = 0x16;
+	ucd.cmd[1] = dir == 2 ? 0x81 : 0x01;	/* standard write/read request */
 	ucd.cmd[3] = ++tag;
 	ucd.cmd[12] = opcode;
 	ucd.cmd[13] = idn;
@@ -228,7 +229,7 @@ query_ex(uint8_t opcode, uint8_t idn, uint8_t index, uint8_t selector,
 	ucd.cmd[15] = selector;
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
-	uint32_t dd = dir == 1 ? 2u : dir == 2 ? 1u : 0u;
+	uint32_t dd = len ? (dir == 1 ? 2u : dir == 2 ? 1u : 0u) : 0u;
 	utrl[0].dw0 = (1u << 28) | (dd << 25) | (1u << 24);
 	utrl[0].dw2 = 0x0f;
 	utrl[0].ucdba = (uint32_t)ucd_pa;
@@ -256,7 +257,7 @@ query_ex(uint8_t opcode, uint8_t idn, uint8_t index, uint8_t selector,
 	__asm__ volatile("dsb sy" ::: "memory");
 	uint32_t ocs = utrl[0].dw2 & 0xff;
 	*status_out = ucd.resp[7];
-	*value = be32(&ucd.resp[24]);
+	*value = be32(&ucd.resp[20]);	/* utp_upiu_query.value */
 	if (ocs)
 		return 2;
 	if (ucd.resp[0] != 0x36)
@@ -275,32 +276,24 @@ device_init(void)
 {
 	uint32_t v = 0, st = 0;
 
-	uint32_t rc = query_ex(0x05, 0x0b, 0, 0, 0, 0, 0, &v, &st);
+	/*
+	 * Linux ufshcd_complete_dev_init(): set fDeviceInit (flag IDN 0x01),
+	 * then poll until the device clears it. A read alone leaves the
+	 * device uninitialized and it rejects SCSI commands.
+	 */
+	uint32_t rc = query_ex(0x06, 0x01, 0, 0, 0, 0, 2, &v, &st);	/* SET_FLAG */
 	if (rc)
 		return 0x10 | rc;
-	if (!(v & 1))
-		return 0;			/* already initialized */
-
-	zero(data, 512);
-	rc = query_ex(0x01, 0x01, 0, 0, data, 512, 1, &v, &st);
-	if (rc)
-		return 0x20 | rc;
-	uint32_t len = v ? v : 512;
-	if (len > 512)
-		len = 512;
-	if (data[0] < 0x10 || data[0] > len)
-		return 0x30;			/* implausible descriptor */
-	rc = query_ex(0x02, 0x01, 0, 0, data, len, 2, &v, &st);
-	if (rc)
-		return 0x40 | rc;
-	for (int i = 0; i < 20; i++) {
+	for (int i = 0; i < 100; i++) {
 		v = 0;
-		rc = query_ex(0x05, 0x0b, 0, 0, 0, 0, 0, &v, &st);
-		if (!rc && !(v & 1))
+		rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);	/* READ_FLAG */
+		if (rc)
+			return 0x20 | rc;
+		if (!(v & 1))
 			return 0;
 		wait_ms(1);
 	}
-	return 0x50;
+	return 0x30;
 }
 
 static uint32_t
