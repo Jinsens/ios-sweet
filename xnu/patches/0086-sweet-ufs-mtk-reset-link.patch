@@ -172,7 +172,22 @@
  dma_sync(uint32_t off, uint32_t len)
  {
  	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-@@ -356,11 +504,6 @@
+@@ -251,7 +399,13 @@
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+ 		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
+-		return EIO;
++		if (ocs)
++			return 0x200 | (ocs & 0xff);
++		if (ucd->resp[0] != 0x21)
++			return 0x300;
++		if (ucd->resp[6])
++			return 0x400 | ucd->resp[6];
++		return 0x500 | ucd->resp[7];
+ 	}
+ 	return 0;
+ }
+@@ -356,11 +510,6 @@
  static int
  ufs_take_over_host(void)
  {
@@ -184,7 +199,7 @@
  	if (ufs_rd(REG_UTRLDBR)) {
  		printf("SWEET UFS: requests outstanding from the bootloader\n");
  		return EBUSY;
-@@ -371,6 +514,29 @@
+@@ -371,6 +520,29 @@
  		    su.dma_pa);
  		return ENXIO;
  	}
@@ -214,7 +229,7 @@
  	ufs_wr(REG_IE, 0);                      /* polled operation */
  	ufs_wr(REG_IS, ufs_rd(REG_IS));
  	ufs_wr(REG_UTRLRSR, 0);
-@@ -384,6 +550,10 @@
+@@ -384,6 +556,10 @@
  		printf("SWEET UFS: host did not take our request list\n");
  		return EIO;
  	}
@@ -225,7 +240,7 @@
  	return 0;
  }
  
-@@ -608,6 +778,8 @@
+@@ -608,6 +784,8 @@
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);
