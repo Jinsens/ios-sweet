@@ -903,6 +903,15 @@ prefixes on failure). Image `entryprobe-el1-xnu-hybrid5-ufs-preinit-query.img`
 SHA `22bff0bf...`, predicted `75feaf5d...`, same instrumented kernel.
 Expected x0: 0x402 (UA reached), 0 (success), or 0x401 unchanged.
 
+**Kernel-side device init.** The shim's query did not change the driver's
+target failure (`x0=0x401`): the driver's own host reset runs after the
+shim, so device init must happen inside 0086. Added `ufs_query` (UPIU
+0x16: read flag 0x05, read/write descriptor 0x01/0x02, value at response
+byte 24) and `ufs_device_init` (fDeviceInit 0x0B -> read/write config
+descriptor 0x01 -> poll) after `ufs_take_over_host`, before the TUR.
+Stage-coded failures: 0x8000 | (stage << 8) | query rc. Committed
+`c7eed42`; CI dispatched.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
