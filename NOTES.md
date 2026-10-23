@@ -838,6 +838,14 @@ Commit `d561707`; CI run dispatched (0085 still disabled) to rebuild the
 hybrid; next step: locate the function (pattern), apply the shifted
 rtcfast (+0x3e0) and error BRK, rebuild the image, and read x0.
 
+**Prepared, not flashed: SMC-register-fix hybrid checkpoint.**
+Kernel `xnu/out/ci-39957884892/kernel.development.sweet` SHA
+`4c61c01f...` (0084+0086, 0085 disabled, x3-x7 zeroed before smc).
+Function `0x74e8090`, caller `0x7a42864`; rtcfast +0x3e0, error BRK at
+`0x7a42868`. Image `entryprobe-el1-xnu-hybrid2-ufs-error-brk.img`,
+SHA256 `b6f04c04...`, predicted partition `5c3af8b9...`. x0: 0 success,
+5 EIO (TUR/UA), 6 ENXIO (reset/link still failing).
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
