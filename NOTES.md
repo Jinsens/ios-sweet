@@ -963,6 +963,26 @@ Local test image `entryprobe-el1-xnu-local-ufs-lowdma-query.img` SHA
   verify the query UPIU offsets/opcode against the device; the TUR then
   still returns target failure (0x401).
 
+**Local link bootstrap (CI artifact `xnu-linklibs`).** `.github/workflows/
+xnu.yml` now uploads `xnu-linklibs` (real `libfirehose_kernel.a`, Xcode 15
+`libcc_kext.a`, ctf tools) next to `xnu-buildtree` and `xnu-kernel`.
+Local relink recipe (no Xcode):
+1. Extract `kernel.development.sweet.a` (1098 objects) and the
+   `xnu-buildtree` (patched xnu + generated headers).
+2. Compile `sweet_ufs.c` with the CI flags (from the run log) rewired to
+   the extracted buildtree; cwd must be `build/xnu.obj/DEVELOPMENT_ARM64_SWEET/bsd/DEVELOPMENT`
+   for `meta_features.h`/config headers. Compile `xnu/libsa/nonlto.c` the
+   same way.
+3. Link with the CI `linkarguments` (rewrite runner paths; output
+   `kernel.*.unstripped`), the 1094-object filelist, `nonlto.o`,
+   `version.o`/`lastkernel*.o`, the real `-lfirehose_kernel` and
+   Xcode's `-lcc_kext` (from `xnu-linklibs`). The CLT substitutes
+   (firehose stubs + `libclang_rt.cc_kext.a`) produced a kernel that
+   logo-reboots even with the original object.
+4. `strip -S`; local `__TEXT_EXEC` vmsize is not rounded to 0x4000 and
+   VAs after `sweet_ufs.o` differ from CI; derive patch VAs from the
+   local unstripped `nm`/disassembly.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
