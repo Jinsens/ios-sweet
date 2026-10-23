@@ -846,6 +846,13 @@ Function `0x74e8090`, caller `0x7a42864`; rtcfast +0x3e0, error BRK at
 SHA256 `b6f04c04...`, predicted partition `5c3af8b9...`. x0: 0 success,
 5 EIO (TUR/UA), 6 ENXIO (reset/link still failing).
 
+**ROOT CAUSE (ENXIO): HCS_UCRDY is bit 3, not bit 2.** The shim has
+`HCS_UCRDY (1u << 3)` and its host reset works (post-HCE HCS=0x8). The
+0086 kernel patch copied `(1u << 2)`, which is UTMRLRDY and never sets
+after the MTK HCE cycle, so `ufs_host_reset` always timed out and
+returned ENXIO (x0=6). Fixed in `0086` (commit `97cd5b2`); CI run for
+`97cd5b2` dispatched (0085 still disabled).
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
