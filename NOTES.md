@@ -1000,6 +1000,16 @@ later object by -0x1000, so earlier local kernels were also misaligned.
 Image `entryprobe-el1-xnu-local-ctrl-real.img` SHA `77feacc4...`,
 predicted `67bba14b...`; expected x0=0x81fe if the local kernel boots.
 
+**Real firehose + CLT cc_kext still logo-reboots.** The control link with
+`libfirehose_kernel.a` (run 39974967885) and CLT `libclang_rt.cc_kext.a`
+matches the CI VAs exactly but the kernel does not boot; the remaining
+substitute is the compiler-rt library (Xcode `libcc_kext.a`) and possibly
+the `ld`/`strip` version. Workflow run 39977655530 (`16812dc`) uploads
+Xcode's `libcc_kext.a`, `libclang_rt.cc_kext.a`, `ld-xcode` and
+`strip-xcode` in `xnu-linklibs`. Next: relink the control with the Xcode
+cc_kext (same archive object) and boot it; if that works, compile the
+driver locally and continue the query/UA work without CI.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
