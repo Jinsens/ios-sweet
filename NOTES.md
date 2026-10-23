@@ -1010,6 +1010,29 @@ Xcode's `libcc_kext.a`, `libclang_rt.cc_kext.a`, `ld-xcode` and
 cc_kext (same archive object) and boot it; if that works, compile the
 driver locally and continue the query/UA work without CI.
 
+**Local-link attempt closed (2026-10-23).** Relinking the control with the
+real `libfirehose_kernel.a` (arm64) and Xcode 15's
+`libclang_rt.cc_kext.a`, exact CI symbol layout
+(`_sweet_ufs_rootdev` 0x74e8090), still logo-reboots; CLT `ld`/`strip` and
+the absent CTF/dSYM remain. Do not spend more boots on local links until
+Xcode 15's full toolchain (or its `ld`/`strip` + CTF chain) is available.
+CI (`workflow_dispatch`) is the only reliable kernel build path.
+`xnu-linklibs` now carries `libfirehose_kernel.a`,
+`libclang_rt.cc_kext.a`, `ld-xcode`, `strip-xcode`, `ctfconvert`,
+`ctfmerge` for that future attempt. `boot_a` is restored to
+`2931647a...`.
+
+**UFS state at stop.** The working checkpoint is the CI high-DMA query
+kernel (`5ee4dd00`, later `527152b0`) with the shim `--ufs-init`: the
+driver's host reset/link pass (the kernel `smc` still does not reset the
+device; the shim does), then QUERY read-flag fDeviceInit fails with
+response UPIU byte 6 = 0xfe (x0=0x81fe), and the TUR returns target
+failure (0x401). No QUERY variant, low-DMA window, or local link has
+worked. Next investigation is offline: capture the full query response
+(type/opcode/idn/status/value) and compare the query UPIU layout with
+JEDEC; consider dropping QUERY and handling the post-reset unit attention
+with SCSI REQUEST SENSE/retry instead.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
