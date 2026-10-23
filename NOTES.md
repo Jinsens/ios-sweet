@@ -822,6 +822,22 @@ renamed to `.disabled`; kernel SHA256 `217659ff...`, 17,222,848 B.
 the 0086 driver does the full MTK init. x0 after rootdev: 0 success,
 5 EIO, 2 ENOENT, 6 ENXIO.
 
+**HARDWARE RESULT (2026-10-23): hybrid (no 0085) reaches the checkpoint;
+x0=6 ENXIO.** Image `25335318...` (partition `805c96e0...`) returned in
+31.7 s, `pc=fffffe0007a42868`, **x0=6**. So 0085 was indeed the logo
+hang; the 0086 driver runs but its host reset/link path returns ENXIO
+(`host reset failed` or `link startup failed`).
+
+**ROOT CAUSE CANDIDATE (fixed, CI rebuilding): SMCCC a3-a7.** The
+compiled `ufs_smc` sets only x0/x1/x2 before `smc #0`; x3-x7 were left
+uninitialized. SMCCC requires a3-a7 = 0. The shim's call happened to
+work; in the kernel the garbage registers can make the monitor reject
+the UFS reset, leaving the link down -> ENXIO. Both the shim `smc3` and
+the kernel `ufs_smc` now zero x3-x7 with `mov xN, xzr` before `smc #0`.
+Commit `d561707`; CI run dispatched (0085 still disabled) to rebuild the
+hybrid; next step: locate the function (pattern), apply the shifted
+rtcfast (+0x3e0) and error BRK, rebuild the image, and read x0.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
