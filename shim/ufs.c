@@ -125,39 +125,40 @@ int ufs_ready(void)
 }
 
 /*
- * Issue one SCSI command in slot 0.
+ * Issue one UPIU in slot 0.
+ * upiu_type: 0x00 NOP OUT, 0x01 SCSI COMMAND.
+ * ctype: UTP_CMD_TYPE_SCSI (0) or UTP_CMD_TYPE_UFS_STORAGE (1).
  * dir: 0 = no data, 1 = device to host, 2 = host to device.
  * Returns 0 on success, otherwise a code describing the failure stage.
  */
-static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
-    int dir, uint32_t *ocs_out, uint32_t *status_out)
+static uint32_t
+scsi_ex(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf,
+    uint32_t len, int dir, uint8_t upiu_type, uint32_t ctype,
+    uint32_t *ocs_out, uint32_t *status_out)
 {
 	static uint8_t tag;
 	zero(&utrl[0], sizeof(utrl[0]));
 	zero(&ucd, sizeof(ucd));
 
-	/* Command UPIU: header (12 bytes), expected length, CDB. */
-	ucd.cmd[0] = 0x01;			/* transaction type: COMMAND */
-	ucd.cmd[1] = dir == 1 ? 0x40 : dir == 2 ? 0x20 : 0x00;	/* R / W data direction */
-	ucd.cmd[2] = lun;
+	ucd.cmd[0] = upiu_type;
 	ucd.cmd[3] = ++tag;
-	ucd.cmd[12] = len >> 24;
-	ucd.cmd[13] = len >> 16;
-	ucd.cmd[14] = len >> 8;
-	ucd.cmd[15] = len;
-	for (unsigned i = 0; i < cdb_len; i++)
-		ucd.cmd[16 + i] = cdb[i];
+	if (upiu_type == 0x01) {
+		ucd.cmd[1] = dir == 1 ? 0x40 : dir == 2 ? 0x20 : 0x00;
+		ucd.cmd[2] = lun;
+		ucd.cmd[12] = len >> 24;
+		ucd.cmd[13] = len >> 16;
+		ucd.cmd[14] = len >> 8;
+		ucd.cmd[15] = len;
+		for (unsigned i = 0; i < cdb_len; i++)
+			ucd.cmd[16 + i] = cdb[i];
+	}
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
 	uint32_t dd = dir == 1 ? 2u : dir == 2 ? 1u : 0u;
-	/* Linux struct request_desc_header is byte-packed per host
-	 * endianness: on little-endian byte2 is
-	 *   bit0 interrupt, bits1-2 data direction, bit3 reserved,
-	 *   bits4-7 command_type (0 = UTP_CMD_TYPE_SCSI).
-	 * Writing (dd << 25) | (1 << 24) put those into byte3 reserved
-	 * bits and left the interrupt bit clear, which the host rejects
-	 * with OCS 7 once the link is up. */
-	utrl[0].dw0 = (uint32_t)(1u | (dd << 1)) << 16;
+	/* UTRD DW0 (vendor ufshci.h): bit24 interrupt, bits25-26 data
+	 * direction, bits28-31 command type. CT=0 is SCSI, 1 is UFS
+	 * storage (NOP OUT / queries). */
+	utrl[0].dw0 = (ctype << 28) | (dd << 25) | (1u << 24);
 	utrl[0].dw2 = 0x0f;			/* OCS: invalid until the host updates it */
 	utrl[0].ucdba = (uint32_t)ucd_pa;
 	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
@@ -193,6 +194,13 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	if (ucd.resp[0] != 0x21)		/* RESPONSE UPIU */
 		return 3;
 	return *status_out ? 4 : 0;
+}
+
+static uint32_t
+scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
+    int dir, uint32_t *ocs_out, uint32_t *status_out)
+{
+	return scsi_ex(lun, cdb, cdb_len, buf, len, dir, 0x01, 0, ocs_out, status_out);
 }
 
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
@@ -546,8 +554,8 @@ void test_ufs(void)
 	 * UIC result<<48 | post-HCS low nibble<<56.
 	 *   0 baseline, 1 refclk + pre-link + link startup,
 	 *   2 refclk + host reset + refclk + pre-link + link startup,
-	 *   3 host reset + device reset (SMC) + refclk + pre-link + link. */
-	uint32_t refclk = 0, smc = 0;
+	 *   3 host reset + device reset (SMC) + refclk + link + NOP + TUR. */
+	uint32_t refclk = 0, smc = 0, nop_rc = 0, nop_ocs = 0;
 	for (int s = 0; s < 4; s++) {
 		uint32_t ur = 0xff;
 		if (s == 1) {
@@ -570,6 +578,11 @@ void test_ufs(void)
 			refclk = refclk_on();
 			ur = link_start();
 		}
+		if (s == 3) {
+			uint32_t n0 = 0, s0 = 0;
+			nop_rc = scsi_ex(0, 0, 0, 0, 0, 0, 0x00, 1, &n0, &s0);
+			nop_ocs = n0;
+		}
 		uint32_t ocs = 0, st = 0;
 		static const uint8_t tur[6] = { 0x00 };
 		int rc = scsi(0, tur, sizeof(tur), 0, 0, 0, &ocs, &st);
@@ -580,7 +593,9 @@ void test_ufs(void)
 		    (uint64_t)ufs_scsi_resp[7] << 40 |
 		    (uint64_t)ur << 48 | (uint64_t)(ufs_rd(REG_HCS) & 0xf) << 56;
 	}
-	ufs_test_info[6] = (uint64_t)(smc & 0xffff) << 16 | refclk;  /* smc + refclk */
+	ufs_test_info[6] = (uint64_t)(smc & 0xff) << 32 |
+	    (uint64_t)(nop_ocs & 0xff) << 16 | (uint64_t)(nop_rc & 0xff) << 8 |
+	    refclk;	/* smc (bits32-39), NOP rc/OCS, refclk */
 	ufs_test_info[7] = ufs_rd(REG_HCS);
 
 	list_partitions();

@@ -509,6 +509,33 @@ Strategies unchanged (3 = host reset + SMC device reset + refclk + link
 startup); the corrected DW0 applies to every TUR. Success is strategy 3
 TUR rc 0, OCS 0, status 0, post-HCS 0xf.
 
+**HARDWARE RESULT (2026-10-23): corrected-UTRD v14 changes nothing.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v14.img`,
+SHA256 `77f30da4...`, written partition `a40327d2...`; returned in 31.7 s,
+`boot_a` restored/verified. Strategy 3 still
+`0x0f00000000000702` (rc 2, OCS 7, UIC 0, post-HCS 0xf), i.e. the UTRD
+byte2 edit had no effect.
+
+**Correction: DW0 was already right.** The vendor `ufshci.h` defines
+`UTP_REQ_DESC_INT_CMD=0x01000000` (bit24),
+`UPIU_COMMAND_TYPE_OFFSET=28`,`UTP_DEVICE_TO_HOST=0x04000000` (bit26),
+`UTP_NO_DATA_TRANSFER=0`. So `(dd<<25)|(1<<24)` was correct; the v14
+byte2 form was wrong and is reverted. The link-up TUR OCS 7 therefore
+comes from the UTP path, not the descriptor header.
+
+**Prepared, not flashed: NOP OUT first (v15).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v15.img`,
+26,570,752 B, SHA256
+`fcde69bef92cd4fcf9b5514f9967f55785a15e83f743969d22ce4e653065c3bb`;
+predicted written partition
+`218621a175fec19bd61525b9f01c7028b74a194b11e767697481267886de46d5`.
+Linux `ufshcd_verify_dev_init` sends a NOP OUT (UPIU 0x00,
+`UTP_CMD_TYPE_UFS_STORAGE=1`) immediately after link startup, before
+any SCSI command. v15 does the same in strategy 3, then the TUR. `spsr`
+packs smc (bits32-39), NOP OCS (bits16-23), NOP rc (bits8-15), refclk
+(bits0-7). If NOP is rc0/OCS0 and the TUR is still OCS 7, the failure is
+SCSI/UPIU-specific; if NOP is also OCS 7, the UTP path is not ready.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
