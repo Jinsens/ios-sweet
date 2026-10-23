@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS pre-link insufficient; vendor host-reset test prepared <<<
+## >>> ACTIVE 2026-10-23: UFS reset+HCE reaches UCRDY; v8 prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -339,21 +339,27 @@ The vendor `ufs_mtk_host_reset` asserts hci/crypto/unipro, waits ~100 us,
 deasserts unipro/crypto/hci, then sets `XOUFS_CTRL (0x140) |= 0x80` before
 the HCE cycle.
 
-**Prepared, not flashed: full vendor reset + pre-link + link startup (v7).**
+**HARDWARE RESULT (2026-10-23): reset leaves HCS=0x8 (UCRDY), then fixes.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v7.img`,
+SHA256 `150619b5...`, written partition `fb8e23be...`; returned in 31.7 s,
+`boot_a` restored/verified. Record: strategies 0-2 unchanged (OCS 7,
+UIC 1 for link startup); strategy 3 = `0xfe`; `fault=0x8`. So the syscon
+reset + XOUFS + HCE cycle brought HCE up with **HCS=0x8 (UCRDY)** but the
+readiness gate expected DP as well, which only appears after the link
+starts. Strategy 3 therefore skipped the pre-link/link startup. This is a
+test bug, not a host failure: UCRDY is exactly the expected post-HCE state.
+
+**Prepared, not flashed: reset + pre-link + link startup (v8).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v8.img`,
 26,570,752 B, SHA256
-`150619b5e8be397c3fbc0745b008a5574ea4aa84fa14cf8a3b3497e32458f3f8`;
+`9dfe6a03d0a02d31b1d7e695f85cb351f297160c0f3dfc4dde6ad9100fd4163d`;
 predicted written partition
-`fb8e23be898eeb0ae3d6bfb92af948a8eaf678f40b5c0164735b1c83251cad5d`.
-Commit `98fdaf3` adds `mtk_host_reset()`: syscon RMW resets at
-`ufs_base+0x8000/+0xc000`, 100 us, XOUFS_CTRL bit 7, UTRLRSR=0, HCE 0->1
-with a readiness wait. Strategy 3 becomes reset + HCE + MTK pre-link +
-`DME_LINK_STARTUP` + re-claim + TUR. If strategy 3 gets TUR rc 0 / UIC
-result 0, port this exact sequence (and the CT=0 fix and low-DMA
-allocation) to `bsd/dev/sweet_ufs.c`. If it fails, the remaining vendor
-init is clock/regulator/M-PHY (`ufs_mtk_setup_clocks`,
-`ufs_mtk_setup_ref_clk`, `ufs_mtk_mphy_power_on`) or the reset must be
-followed by LK's PHY parameters.
+`84ea176b8326123fd0aca489323479811c9b1a57f407b54b70164bbe1883cc81`.
+Commit `fa7f99c` changes the post-reset ready mask to `UTRLRDY|UCRDY`
+(no DP). Strategy 3 now runs the full vendor sequence: syscon resets,
+XOUFS_CTRL bit 7, HCE cycle, MTK pre-link, `DME_LINK_STARTUP`, re-claim,
+TUR. A successful strategy 3 should show DP in the post-HCS nibble (`f`)
+and TUR rc 0 / OCS 0 / UIC 0.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
