@@ -983,6 +983,14 @@ Local relink recipe (no Xcode):
    VAs after `sweet_ufs.o` differ from CI; derive patch VAs from the
    local unstripped `nm`/disassembly.
 
+**CI run 39974967885** (`d200e0e`, workflow adds `xnu-linklibs`) builds the
+real `libfirehose_kernel.a` + Xcode 15 `libcc_kext.a`. The local control
+kernel's segment table matches the CI kernel exactly (same vmaddrs/sizes
+for every segment; only `__CTF` is absent locally), so the logo reboot is
+not segment layout. Next: relink the control (archive `sweet_ufs.o`, real
+libs, CLT `ld`) and boot it; if it reaches x0=0x81fe, local links work and
+the remaining driver work can be done without CI.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
