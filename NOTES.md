@@ -878,6 +878,14 @@ image `entryprobe-el1-xnu-hybrid4-ufs-preinit-error-brk.img`, SHA
 then succeeds, x0=5 (TUR/UA) or 0; if 0x107 again, the kernel's host
 reset itself breaks the link.
 
+**Pre-init stage test: x0=5 EIO.** With the shim `--ufs-init` (SMC64
+device reset + link before XNU), the stage-code driver's host reset and
+link startup now succeed; it reaches the TUR, which fails with EIO. This
+proves the kernel's `smc` does not reset the device and the shim pre-init
+is required. Instrumented `ufs_scsi` failure codes in 0086 (commit
+`841ec85`): 0x2xx OCS, 0x300 bad UPIU, 0x4xx SCSI status, 0x5xx sense.
+CI run for `841ec85` dispatched.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
