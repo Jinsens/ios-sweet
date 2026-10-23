@@ -37,7 +37,7 @@
  	vm_offset_t dma;                        /* kernel VA of the DMA allocation */
  	uint64_t dma_pa;
  	uint8_t lun;
-@@ -129,6 +150,133 @@
+@@ -129,7 +150,134 @@
  	*(volatile uint32_t *)(su.regs + off) = v;
  }
  
@@ -128,7 +128,7 @@
 +}
 +
 +/* Vendor ufs_mtk_pre_link: allow UniPro power down, clear deep stall. */
-+static void
+ static void
 +ufs_pre_link(void)
 +{
 +	uint32_t v = 0;
@@ -168,9 +168,10 @@
 +	return (ufs_rd(REG_HCS) & HCS_UCRDY) ? 0 : 0x106;
 +}
 +
- static void
++static void
  dma_sync(uint32_t off, uint32_t len)
  {
+ 	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
 @@ -251,11 +399,139 @@
  	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
  		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
@@ -365,38 +366,16 @@
  	return 0;
  }
  
-@@ -608,22 +906,32 @@
+@@ -608,6 +906,8 @@
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);
--	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
--	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
--		printf("SWEET UFS: no contiguous DMA memory\n");
--		return ENOMEM;
--	}
--	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)su.dma);
--	if (!pn) {
 +	su.ao = ml_io_map(MTK_UFS_AO_PA, 0x1000);
 +	su.pdn = ml_io_map(MTK_UFS_PDN_PA, 0x1000);
-+	/*
-+	 * TEST: place the UTRL/UCD/bounce block in the free window inside the
-+	 * bootloader's 2 MiB prefix (below 4 GiB) instead of a high-bank
-+	 * kalloc. The prefix's code and BSS end well below 0x80000, and the
-+	 * stock boot image starts at 0x40200000. The UFS host is known to
-+	 * execute commands from the shim's low buffers; this isolates whether
-+	 * the >4 GiB UCD address is what the device rejects.
-+	 */
-+	su.dma_pa = 0x40080000ULL;
-+	su.dma = (vm_offset_t)ml_io_map((vm_offset_t)su.dma_pa, DMA_SIZE);
-+	if (!su.dma) {
-+		printf("SWEET UFS: cannot map low DMA window\n");
- 		return ENOMEM;
- 	}
--	su.dma_pa = ptoa_64(pn);
-+	bzero((void *)su.dma, DMA_SIZE);
- 	su.lun = 0;
- 	su.secsize = DEV_BSIZE;
- 
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET UFS: no contiguous DMA memory\n");
+@@ -624,6 +924,9 @@
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
  	if (!error) {
