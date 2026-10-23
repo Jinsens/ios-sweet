@@ -401,9 +401,10 @@ mtk_host_reset(void)
 {
 	uintptr_t ao = ufs_base() + 0x8000, pdn = ufs_base() + 0xc000;
 	uint64_t start, freq = tick_freq();
-	/* After HCE only the UIC/list layers are ready; DP appears after the
-	 * link starts, which is the next step. */
-	const uint32_t ready = HCS_UTRLRDY | HCS_UCRDY;
+	/* After HCE only the UIC layer is ready. UTRLRDY appears once the
+	 * request list base/RSR are programmed (claim_host), DP after link
+	 * startup, so waiting on them here would fail a healthy host. */
+	const uint32_t ready = HCS_UCRDY;
 
 	mmio_bits(pdn, 0x44, 1u << 1, 1u << 1);
 	mmio_bits(pdn, 0x44, 1u << 0, 1u << 0);
