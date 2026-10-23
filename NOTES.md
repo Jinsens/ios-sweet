@@ -948,6 +948,21 @@ Local test image `entryprobe-el1-xnu-local-ufs-lowdma-query.img` SHA
 `f41d0b57...`, predicted `8f8ae8cf...`; kernel includes low DMA at
 0x40080000 + kernel QUERY init, shim pre-init, BRK at 0x7a41c68.
 
+**Low-DMA and local-link dead ends (2026-10-23).**
+- Low DMA at 0x40080000 (`ml_io_map`) logo-reboots even with the CI-built
+  kernel `7cbb139f` and `ufscache=1`; revert the low-DMA patch (done to
+  `c7eed42`, high-DMA query + stage/SCSI codes). Do not retry this window.
+- Local kernel builds link and strip, but even the control link with the
+  original `sweet_ufs.o` logo-reboots. The buildtree archive lacks
+  `libfirehose_kernel.a`, Xcode's `libcc_kext.a` and the CTF tools;
+  substituting CLT `libclang_rt.cc_kext.a` + firehose stubs produces a
+  non-bootable kernel. CI remains the only working kernel build path.
+- Last good checkpoint: kernel `5ee4dd00` / run 39965437795 (query init,
+  high DMA) returns x0=0x81fe: QUERY read flag fDeviceInit response UPIU
+  byte 6 = 0xfe. Next: capture the full query response (all 32 bytes) and
+  verify the query UPIU offsets/opcode against the device; the TUR then
+  still returns target failure (0x401).
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
