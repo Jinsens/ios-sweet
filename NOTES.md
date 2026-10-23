@@ -792,6 +792,23 @@ token, never prints it). The 0086 kernel needs a fresh payload
 (`mkpayload.py` with the UFS ADT and the usual cmdline); rtcfast/BRK
 binary patches are 0084-specific and are **not** applied to 0086.
 
+**CI 0086 built (run 39953360175).** Kernel
+`xnu/out/ci-39953360175/kernel.development.sweet`, SHA256
+`0f40d4b7...`, 17,206,416 B. `_sweet_ufs_rootdev` is still at
+`0xfffffe00074e8090` (same as 0084), and its caller's `cbnz w0` moved to
+`0xfffffe0007a42868`. Patched that word to BRK `0xd42a6ae0`, built
+`matisse-xnu-0086-ufs-error-brk.payload` (SHA `29ae9909...`) with the
+UFS ADT and the usual cmdline. rtcfast is **not** applied (0084 VAs).
+
+**Prepared, not flashed: 0086 self-init error checkpoint.**
+`research/matisse/20261023-ufs/entryprobe-el1-xnu-0086-ufs-error-brk.img`,
+26,562,560 B, SHA256
+`53aac6c33058b970057fe5efc21837b1c95687bf2873829fc39335692605ef66`;
+predicted partition `d8e83381...`. No shim `--ufs-init`: the 0086
+driver runs the MTK host reset, SMC64 device reset, refclock, pre-link,
+link startup and takeover itself, then the BRK records x0. Without
+rtcfast the boot waits ~60 s; allow 180 s.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
