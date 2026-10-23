@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS CT=0 gets OCS 7; detailed selftest v2 prepared <<<
+## >>> ACTIVE 2026-10-23: UFS TUR OCS 7; UIC hibernate-exit probe prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -239,27 +239,48 @@ this encoding, so it is not yet known whether the no-data TUR succeeded.
 Likely remaining suspects: the UCD/PRDT alignment (the shim's UCD was only
 128-byte aligned), the PRDT/data descriptor, or the response UPIU.
 
-**Prepared, not flashed: CT=0 v2 with detailed capture.**
+**HARDWARE RESULT (2026-10-23): TUR itself gets OCS 7, no response UPIU.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v2.img`,
+26,566,656 B, SHA256 `a669f68e...`, written partition `70b5a2a7...`;
+device returned in 30.7 s and `boot_a` was restored/verified. Record:
+
+```
+esr=0000000000000005  -> stage 5 (GPT scan returned)
+gicd=0000000000000702 -> TUR rc 2 (OCS), OCS 7 (FATAL_ERROR),
+                         SCSI status 0, response[0/6/7] = 0
+vtimer=0000000000000702 -> READ CAPACITY identical
+fb=0 dtb=0            -> last LBA 0, block size 0
+```
+
+4 KiB-aligning the UTRL/UCD changed nothing, and the **no-data TUR** fails
+the same way: the host completes it with `OCS_FATAL_ERROR` and writes no
+response UPIU. So this is not PRDT/data alignment; the command does not
+reach a responsive device. The likely cause is the UniPro link state after
+LK: the MTK host's auto-hibernate (Linux sysfs shows `auto_hibern8=5000`
+us) can leave the link in HIBERN8 when XNU takes over.
+
+**Prepared, not flashed: UIC state + hibernate-exit probe (v3).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v3.img`,
 26,566,656 B, SHA256
-`a669f68e5641d3a8f24bf0fcdffbbd3502b166cc99fd98230a21a9841125e038`;
+`71002069fbb71e2cbb4a01951313874e956762a28b5f629cb7c488cdb73b6086`;
 predicted written partition
-`70b5a2a78be8b63b84d02337adf63248a7348a62f741770d926a061dca38eaa5`.
-Commit `ac5e987` makes `utrl`/`ucd` 4 KiB aligned (was 1 KiB/128 B) and
-captures the first 8 response-UPIU bytes. The record now encodes:
+`ce33e9494187ebf460064c3e543c83107bd327490201b742474c560dad127517`.
+Commit `1c3d7f1`: after claiming the list, `test_ufs()` records IS/HCS,
+clears IS, issues `DME_HIBERNATE_EXIT` (opcode 0x18) if HCS.UCRDY, polls
+`IS & 0x400` (UIC_COMMAND_COMPL) for 100 ms, then re-reads IS/ARG2/HCS
+before TUR. Record fields (loader diagnostics only overwrite STAGE/FAR/PC):
 
-- `esr` = stage (1 ready, 2 claimed, 3 TUR, 4 READ CAPACITY, 5 GPT scan)
-- `gicd` = TUR packed `rc | OCS<<8 | status<<16 | resp0<<24 |
-  resp6<<32 | resp7<<40`
-- `vtimer` = READ CAPACITY packed the same way
-- `fb` = READ CAPACITY last LBA, `dtb` = block size
-- The pre-test CAP/HCS/HCE snapshot is no longer in this record (measured
-  earlier: CAP 0x3587071f, HCS 0x10f, HCE 1).
+- `esr` = stage, `gicd` = TUR packed, `vtimer` = READ CAPACITY packed,
+  `fb` = last LBA, `dtb` = block size
+- `x0` = IS before, `x16` = IS after, `spsr` = UIC ARG2 (result in [7:0]),
+  `fault` = HCS after
+- IS bits: UIC_COMMAND_COMPL 0x400, UIC_HIBERNATE_EXIT 0x20,
+  UIC_HIBERNATE_ENTER 0x40. ARG2 low byte 0 = UIC success.
 
-OCS values (Linux `include/ufs/ufshci.h`): 0 success, 1 invalid cmd table,
-2 invalid PRDT, 3 mismatch data buffer size, 4 mismatch response UPIU size,
-5 peer comm failure, 6 aborted, 7 fatal error, 8 device fatal error.
-rc: 0 ok, 1 timeout, 2 OCS, 3 not a RESPONSE UPIU, 4 SCSI status.
+If IS before has 0x40 and the exit succeeds followed by TUR rc 0, the
+missing step is a link/hibernate wake before I/O. If ARG2 reports failure
+or the link was already active, the next step is the vendor host-reset +
+DME_LINK_STARTUP sequence (UIC opcodes 0x14/0x12/0x16).
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
