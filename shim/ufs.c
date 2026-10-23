@@ -65,6 +65,9 @@ static struct utrd utrl[32] __attribute__((aligned(1024)));
 static struct ucd ucd __attribute__((aligned(128)));
 static uint8_t data[8 * BLOCK] __attribute__((aligned(4096)));
 
+volatile uint64_t ufs_test_stage;
+volatile uint64_t ufs_test_info[4];
+
 static uint64_t ticks(void)
 {
 	uint64_t t;
@@ -304,16 +307,39 @@ static void list_partitions(void)
 	}
 }
 
+/* Put the bootloader's transfer list back so a following Linux/XNU boot sees
+ * the same host state LK left. Slot 0 is cleared first; UTRLCLR clears a slot
+ * by writing 0 to its doorbell bit. */
+static void
+restore_host(uint32_t ba, uint32_t bau, uint32_t rsr)
+{
+	ufs_wr(REG_UTRLCLR, ~1u);
+	ufs_wr(REG_UTRLRSR, 0);
+	ufs_wr(REG_UTRLBA, ba);
+	ufs_wr(REG_UTRLBAU, bau);
+	ufs_wr(REG_UTRLRSR, rsr & 1u);
+}
+
 void test_ufs(void)
 {
+	uint32_t orig_ba = ufs_rd(REG_UTRLBA), orig_bau = ufs_rd(REG_UTRLBAU);
+	uint32_t orig_rsr = ufs_rd(REG_UTRLRSR);
+
+	ufs_test_stage = 0;
+	for (int i = 0; i < 4; i++)
+		ufs_test_info[i] = 0;
 	con_str("UFS", "probe (read-only)");
 	uint32_t cap = ufs_rd(REG_CAP), hcs = ufs_rd(REG_HCS), hce = ufs_rd(REG_HCE);
 	con_hex2("UFS", "ver=", ufs_rd(REG_VER), "cap=", cap);
 	con_hex2("UFS", "hce=", hce, "hcs=", hcs);
-	con_hex2("UFS", "is=", ufs_rd(REG_IS), "rsr=", ufs_rd(REG_UTRLRSR));
-	con_hex2("UFS", "utrlba=", ufs_rd(REG_UTRLBA), "hi=", ufs_rd(REG_UTRLBAU));
+	con_hex2("UFS", "is=", ufs_rd(REG_IS), "rsr=", orig_rsr);
+	con_hex2("UFS", "utrlba=", orig_ba, "hi=", orig_bau);
 	con_hex2("UFS", "dbr=", ufs_rd(REG_UTRLDBR), "nutrs=", (cap & 0x1f) + 1);
 	con_hex2("UFS", "uccs=", (hcs & HCS_UCCS) >> 8, "base=", (uint32_t)ufs_base());
+	ufs_test_stage = 1;
+	ufs_test_info[0] = ((uint64_t)hcs << 32) | hce;
+	ufs_test_info[1] = ((uint64_t)orig_bau << 32) | orig_ba;
+	ufs_test_info[2] = ((uint64_t)ufs_rd(REG_UTRLDBR) << 32) | orig_rsr;
 
 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
 		con_str("UFS", "host not enabled/ready: stop");
@@ -326,8 +352,15 @@ void test_ufs(void)
 
 	int rc = claim_host();
 	con_hex2("UFS", "claim=", rc, "rsr=", ufs_rd(REG_UTRLRSR));
-	if (rc)
+	ufs_test_stage = 2;
+	ufs_test_info[0] = (uint64_t)rc;
+	ufs_test_info[1] = ufs_rd(REG_UTRLBA);
+	ufs_test_info[2] = ufs_rd(REG_UTRLBAU);
+	ufs_test_info[3] = ufs_rd(REG_UTRLRSR);
+	if (rc) {
+		restore_host(orig_ba, orig_bau, orig_rsr);
 		return;
+	}
 
 	uint32_t ocs = 0, st = 0;
 	static const uint8_t tur[6] = { 0x00 };
@@ -338,14 +371,24 @@ void test_ufs(void)
 		if (!rc)
 			break;
 	}
+	ufs_test_stage = 3;
+	ufs_test_info[0] = (uint64_t)rc;
+	ufs_test_info[1] = (uint64_t)ocs << 8 | st;
 
 	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */
 	rc = scsi(0, cap10, sizeof(cap10), data, 8, 1, &ocs, &st);
 	con_hex2("UFS CAP", "rc=", rc, "ocs/st=", ocs << 8 | st);
 	if (!rc)
 		con_hex2("UFS LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
+	ufs_test_stage = 4;
+	ufs_test_info[0] = (uint64_t)rc;
+	ufs_test_info[1] = (uint64_t)ocs << 8 | st;
+	ufs_test_info[2] = be32(data);
+	ufs_test_info[3] = be32(data + 4);
 
 	list_partitions();
+	ufs_test_stage = 5;
+	restore_host(orig_ba, orig_bau, orig_rsr);
 }
 
 int ufs_mark(const char *part, uint32_t block, const char *tag)

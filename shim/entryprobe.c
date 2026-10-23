@@ -11,6 +11,9 @@
 #if defined(ENTRY_LOADER_PROBE)
 #include "loader.h"
 #include "diag.h"
+#if defined(ENTRY_UFS_TEST)
+#include "ufs.h"
+#endif
 static char *loader_banner;
 
 void diag_stage(const char *name, uint64_t a, uint64_t b)
@@ -170,6 +173,24 @@ entryprobe_ufs_snapshot(char *banner)
 }
 #endif
 
+#ifdef ENTRY_UFS_TEST
+/* Run the shim's own low-memory-UTRL takeover, TUR, READ CAPACITY and GPT
+ * scan from the probe, then record the packed result. The XNU driver's UTRL
+ * sits above 4 GiB; this distinguishes an address problem from a host that
+ * stops processing commands after LK. The recorder fields are free at
+ * el1-load (no XNU jump, no exception). */
+static void
+entryprobe_ufs_test(char *banner)
+{
+	test_ufs();
+	field(banner, ENTRY_X0, ufs_test_info[0]);
+	field(banner, ENTRY_X16, ufs_test_info[1]);
+	field(banner, ENTRY_SPSR, ufs_test_info[2]);
+	field(banner, ENTRY_FAR, ufs_test_info[3]);
+	field(banner, ENTRY_ESR, ufs_test_stage);
+}
+#endif
+
 void entryprobe_display(uint64_t dtb, char *banner);
 #if defined(ENTRY_DISPLAY_KICK)
 void entryprobe_display_kick(uint64_t dtb, char *banner);
@@ -218,6 +239,9 @@ void entryprobe_board(uint64_t dtb, char *banner)
 		loader_banner = banner;
 #if defined(ENTRY_UFS_REGS)
 		entryprobe_ufs_snapshot(banner);
+#endif
+#if defined(ENTRY_UFS_TEST)
+		entryprobe_ufs_test(banner);
 #endif
 		const char *why = loader_boot(dtb);
 		con_str("LOADER", why);

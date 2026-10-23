@@ -4,6 +4,19 @@
 /* Probe the UFS host, print what it finds, and list the big GPT partitions. */
 void test_ufs(void);
 
+/*
+ * test_ufs() progress for building a compact, banner-readable result.
+ * stage: 0 before the readiness gate, 1 ready, 2 list claimed, 3 TUR done,
+ * 4 READ CAPACITY done, 5 partition scan done. info[] contents per stage:
+ *   1: CAP|VER implicit in HCS/HCE; [0]=HCS<<32|HCE, [1]=UTRLBAU<<32|UTRLBA,
+ *      [2]=UTRLDBR<<32|UTRLRSR
+ *   2: [0]=claim rc, [1]=UTRLBA, [2]=UTRLBAU, [3]=UTRLRSR
+ *   3: [0]=TUR rc, [1]=OCS<<8|status
+ *   4: [0]=READ CAPACITY rc, [1]=OCS<<8|status, [2]=last LBA, [3]=block size
+ */
+extern volatile uint64_t ufs_test_stage;
+extern volatile uint64_t ufs_test_info[4];
+
 /* 1 when the host is enabled, the link is up and no request is outstanding. */
 int ufs_ready(void);
 

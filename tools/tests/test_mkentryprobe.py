@@ -119,6 +119,14 @@ class ProbeLayoutTests(unittest.TestCase):
                 mkentryprobe.build(str(path), str(Path(tmp) / 'out.img'), None,
                                    'entry', ufs_regs=True)
 
+    def test_ufs_selftest_requires_load_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'boot.img'
+            path.write_bytes(template())
+            with self.assertRaisesRegex(ValueError, 'UFS selftest'):
+                mkentryprobe.build(str(path), str(Path(tmp) / 'out.img'), None,
+                                   'entry', ufs_test=True)
+
 
 if __name__ == '__main__':
     unittest.main()
