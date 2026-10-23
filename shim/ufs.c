@@ -197,6 +197,112 @@ scsi_ex(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf,
 	return *status_out ? 4 : 0;
 }
 
+static void
+wait_ms(unsigned ms)
+{
+	uint64_t f;
+	__asm__ volatile("isb; mrs %0, cntfrq_el0" : "=r"(f));
+	uint64_t s = ticks();
+	while (ticks() - s < f * ms / 1000)
+		__asm__ volatile("yield");
+}
+
+/*
+ * One UFS query request (UPIU type 0x16) in slot 0. opcode 0x01/0x02 read
+ * and write descriptors, 0x05 read flag. dir: 0 none, 1 device to host,
+ * 2 host to device. On success *value gets the response value field.
+ */
+static uint32_t
+query_ex(uint8_t opcode, uint8_t idn, uint8_t index, uint8_t selector,
+    void *buf, uint32_t len, int dir, uint32_t *value, uint32_t *status_out)
+{
+	static uint8_t tag;
+	zero(&utrl[0], sizeof(utrl[0]));
+	zero(&ucd, sizeof(ucd));
+
+	ucd.cmd[0] = 0x16;
+	ucd.cmd[3] = ++tag;
+	ucd.cmd[12] = opcode;
+	ucd.cmd[13] = idn;
+	ucd.cmd[14] = index;
+	ucd.cmd[15] = selector;
+
+	uintptr_t ucd_pa = (uintptr_t)&ucd;
+	uint32_t dd = dir == 1 ? 2u : dir == 2 ? 1u : 0u;
+	utrl[0].dw0 = (1u << 28) | (dd << 25) | (1u << 24);
+	utrl[0].dw2 = 0x0f;
+	utrl[0].ucdba = (uint32_t)ucd_pa;
+	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
+	utrl[0].resp = (512u / 4) << 16 | (512u / 4);
+	if (len) {
+		uintptr_t buf_pa = (uintptr_t)buf;
+		ucd.prdt[0].addr_lo = (uint32_t)buf_pa;
+		ucd.prdt[0].addr_hi = (uint32_t)(buf_pa >> 32);
+		ucd.prdt[0].dbc = len - 1;
+		utrl[0].prdt = (1024u / 4) << 16 | 1;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	ufs_wr(REG_UTRLDBR, 1);
+	uint64_t start = ticks();
+	uint64_t freq;
+	__asm__ volatile("isb; mrs %0, cntfrq_el0" : "=r"(freq));
+	while (ufs_rd(REG_UTRLDBR) & 1) {
+		if (ticks() - start > freq) {
+			ufs_wr(REG_UTRLCLR, ~1u);
+			return 1;
+		}
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	uint32_t ocs = utrl[0].dw2 & 0xff;
+	*status_out = ucd.resp[7];
+	*value = be32(&ucd.resp[24]);
+	if (ocs)
+		return 2;
+	if (ucd.resp[0] != 0x36)
+		return 3;
+	return (ucd.resp[6] || ucd.resp[7]) ? 4 : 0;
+}
+
+/*
+ * A UFS device asserts fDeviceInit after a reset; until the host writes the
+ * Configuration Descriptor back, the device answers most SCSI commands with
+ * a target failure. Linux does the same sequence in ufshcd_device_init().
+ * Returns 0 when the device reports init complete (or was already init).
+ */
+static uint32_t
+device_init(void)
+{
+	uint32_t v = 0, st = 0;
+
+	uint32_t rc = query_ex(0x05, 0x0b, 0, 0, 0, 0, 0, &v, &st);
+	if (rc)
+		return 0x10 | rc;
+	if (!(v & 1))
+		return 0;			/* already initialized */
+
+	zero(data, 512);
+	rc = query_ex(0x01, 0x01, 0, 0, data, 512, 1, &v, &st);
+	if (rc)
+		return 0x20 | rc;
+	uint32_t len = v ? v : 512;
+	if (len > 512)
+		len = 512;
+	if (data[0] < 0x10 || data[0] > len)
+		return 0x30;			/* implausible descriptor */
+	rc = query_ex(0x02, 0x01, 0, 0, data, len, 2, &v, &st);
+	if (rc)
+		return 0x40 | rc;
+	for (int i = 0; i < 20; i++) {
+		v = 0;
+		rc = query_ex(0x05, 0x0b, 0, 0, 0, 0, 0, &v, &st);
+		if (!rc && !(v & 1))
+			return 0;
+		wait_ms(1);
+	}
+	return 0x50;
+}
+
 static uint32_t
 scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
     int dir, uint32_t *ocs_out, uint32_t *status_out)
@@ -566,6 +672,9 @@ init_ufs_link(void)
 		__asm__ volatile("yield");
 	ufs_test_info[0] = ((uint64_t)ufs_rd(REG_HCS) << 32) | ufs_rd(REG_UTRLRSR);
 	ufs_test_stage = 3;
+
+	/* Finish device init (fDeviceInit) before XNU's driver arrives. */
+	ufs_test_info[5] = device_init();
 
 	/* The first command after a device reset returns CHECK CONDITION
 	 * (unit attention). XNU's polled driver retries the TUR without a
