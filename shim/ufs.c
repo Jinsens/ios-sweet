@@ -18,6 +18,7 @@
 #define REG_VER		0x08
 #define REG_IS		0x20
 #define REG_XOUFS_CTRL	0x140
+#define REG_REFCLK_CTRL	0x144
 #define REG_UIC_CMD	0x90
 #define REG_UIC_ARG1	0x94
 #define REG_UIC_ARG2	0x98
@@ -378,6 +379,25 @@ uic_cmd(uint32_t op)
 	return uic(op, 0, 0, 0, 0);
 }
 
+/* Request the UFS reference clock and wait for the ACK handshake
+ * (ufs_mtk_setup_ref_clk: REQUEST bit0, ACK bit1). Returns the final
+ * register value; bits [1:0] == 3 means requested and acked. */
+static uint32_t
+refclk_on(void)
+{
+	uint32_t v = ufs_rd(REG_REFCLK_CTRL);
+	if ((v & 3) == 3)
+		return v;
+	ufs_wr(REG_REFCLK_CTRL, v | 1u);
+	uint64_t start = ticks(), freq = tick_freq();
+	do {
+		v = ufs_rd(REG_REFCLK_CTRL);
+		if ((v & 3) == 3)
+			break;
+	} while (ticks() - start < freq / 10);
+	return v;
+}
+
 /* MediaTek pre-link: permit UniPro power down and disable deep stall. */
 static uint32_t
 mtk_pre_link(void)
@@ -429,6 +449,17 @@ mtk_host_reset(void)
 	return (ufs_rd(REG_HCS) & ready) == ready ? 0 : 1;
 }
 
+static uint32_t
+link_start(void)
+{
+	uint32_t ur = mtk_pre_link();
+	uint32_t ls = uic_cmd(0x16);	/* DME_LINK_STARTUP */
+	if (ls != 0xff)
+		ur = ls;		/* record link startup result */
+	claim_host();
+	return ur;
+}
+
 void test_ufs(void)
 {
 	uint32_t orig_ba = ufs_rd(REG_UTRLBA), orig_bau = ufs_rd(REG_UTRLBAU);
@@ -478,24 +509,29 @@ void test_ufs(void)
 	/* Try link wake strategies and one TUR after each. Result packing:
 	 * rc | OCS<<8 | status<<16 | resp0<<24 | resp6<<32 | resp7<<40 |
 	 * UIC result<<48 | post-HCS low nibble<<56.
-	 *   0 none (baseline), 1 DME_HIBERNATE_EXIT,
-	 *   2 MTK pre-link + DME_LINK_STARTUP,
-	 *   3 full MTK host reset + HCE cycle + pre-link + link startup. */
+	 *   0 baseline, 1 refclk + pre-link + link startup,
+	 *   2 refclk + host reset + refclk + pre-link + link startup,
+	 *   3 host reset + pre-link + link startup (no refclk request). */
+	uint32_t refclk = 0;
 	for (int s = 0; s < 4; s++) {
 		uint32_t ur = 0xff;
 		if (s == 1) {
-			ur = uic_cmd(0x18);		/* DME_HIBERNATE_EXIT */
-			claim_host();
-		} else if (s == 2 || s == 3) {
-			if (s == 3 && mtk_host_reset()) {
+			refclk = refclk_on();
+			ur = link_start();
+		} else if (s == 2) {
+			refclk = refclk_on();
+			if (mtk_host_reset()) {
 				ufs_test_info[s] = 0xfe;
 				continue;
 			}
-			ur = mtk_pre_link();
-			uint32_t ls = uic_cmd(0x16);	/* DME_LINK_STARTUP */
-			if (ls != 0xff)
-				ur = ls;		/* record link startup result */
-			claim_host();
+			refclk = refclk_on();
+			ur = link_start();
+		} else if (s == 3) {
+			if (mtk_host_reset()) {
+				ufs_test_info[s] = 0xfe;
+				continue;
+			}
+			ur = link_start();
 		}
 		uint32_t ocs = 0, st = 0;
 		static const uint8_t tur[6] = { 0x00 };
@@ -507,7 +543,7 @@ void test_ufs(void)
 		    (uint64_t)ufs_scsi_resp[7] << 40 |
 		    (uint64_t)ur << 48 | (uint64_t)(ufs_rd(REG_HCS) & 0xf) << 56;
 	}
-	ufs_test_info[6] = ufs_rd(REG_IS);
+	ufs_test_info[6] = refclk;		/* refclk ctrl, [1:0]==3 = acked */
 	ufs_test_info[7] = ufs_rd(REG_HCS);
 
 	list_partitions();
