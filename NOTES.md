@@ -853,6 +853,13 @@ after the MTK HCE cycle, so `ufs_host_reset` always timed out and
 returned ENXIO (x0=6). Fixed in `0086` (commit `97cd5b2`); CI run for
 `97cd5b2` dispatched (0085 still disabled).
 
+**Prepared: UCRDY-fix hybrid checkpoint.** Kernel
+`xnu/out/ci-39959703617/kernel.development.sweet` SHA `9394c4b9...`;
+same function/caller VAs, rtcfast +0x3e0, error BRK. Image
+`entryprobe-el1-xnu-hybrid3-ufs-error-brk.img`, SHA `0e0ff01c...`,
+predicted partition `d6c6240a...`. x0: 0 success, 5 EIO (TUR/UA),
+6 ENXIO (link startup).
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
