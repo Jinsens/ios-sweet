@@ -733,6 +733,26 @@ status is 0, the UA is clear and the XNU EIO is a high-DMA/command issue;
 if status 2, the device still reports unit attention (needs a different
 sense/clear or the driver's retry logic).
 
+**HARDWARE RESULT (2026-10-23): UA persists after SENSE.** el1-load
+UA image `98fa8264...` (partition `8acb824a...`) returned in 30.7 s;
+banner `x0=0x21020004`: second TUR rc4, OCS0, **status 2** (CHECK
+CONDITION), response UPIU 0x21. So the REQUEST SENSE did not clear the
+unit attention. `x16=0x100000000` again confirms the high UTRL base.
+
+**Likely cause: wrong SMC ID.** The shim used `0x82000276`, the SMC32
+form; the vendor arm64 ID is
+`ARM_SMCCC_CALL_VAL(FAST_CALL, SMC_64, OWNER_SIP, 0x276)=0xc2000276`.
+`mtk_device_reset` now tries 0xc2 first, falls back to 0x82, and records
+the first a0 in `ufs_test_info[4]`.
+
+**Prepared, not flashed: SMC64 reset + UA check.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-preinit-smc64.img`,
+26,570,752 B, SHA256
+`51f0be0a98879e80b34900ebc88238f1c3cc77cb63bfd771563a99511f28180e`;
+predicted partition `d299b125...`. el1-load only; banner
+`x16`=first SMC a0 (0 = 0xc2 accepted), `x0`=second TUR
+(`0x21000000` = GOOD, `0x21020004` = still CHECK CONDITION).
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not

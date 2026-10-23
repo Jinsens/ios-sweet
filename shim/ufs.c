@@ -433,14 +433,23 @@ static uint32_t
 mtk_device_reset(void)
 {
 	uint64_t start, freq = tick_freq();
-	smc3(0x82000276u, 2, 0);
+	/* ARM_SMCCC_CALL_VAL(FAST_CALL, SMC_64, OWNER_SIP, 0x276) is
+	 * 0xc2000276; the SMC32 form 0x82000276 was used earlier and may
+	 * be an unimplemented call. Try the arm64 ID first, fall back. */
+	uint64_t id = 0xc2000276ull;
+	uint64_t first = smc3(id, 2, 0);
+	if (first != 0) {
+		id = 0x82000276ull;
+		smc3(id, 2, 0);
+	}
 	start = ticks();
 	while (ticks() - start < freq / 100000)	/* >=10 us */
 		__asm__ volatile("yield");
-	uint64_t r = smc3(0x82000276u, 2, 1);
+	uint64_t r = smc3(id, 2, 1);
 	start = ticks();
 	while (ticks() - start < freq / 100)	/* 10 ms */
 		__asm__ volatile("yield");
+	ufs_test_info[4] = first;		/* 0 = 0xc2 accepted */
 	return (uint32_t)r;
 }
 
