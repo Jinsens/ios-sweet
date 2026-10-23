@@ -165,7 +165,7 @@
 +	for (int i = 0; i < 100000 && !(ufs_rd(REG_HCS) & HCS_UCRDY); i++) {
 +		delay(1);
 +	}
-+	return (ufs_rd(REG_HCS) & HCS_UCRDY) ? 0 : ENXIO;
++	return (ufs_rd(REG_HCS) & HCS_UCRDY) ? 0 : 0x106;
 +}
 +
 +static void
@@ -208,7 +208,7 @@
 +	if (ls != 0) {
 +		printf("SWEET UFS: link startup failed (%u, hcs 0x%x)\n",
 +		    ls, ufs_rd(REG_HCS));
-+		return ENXIO;
++		return 0x107;
 +	}
 +
  	ufs_wr(REG_IE, 0);                      /* polled operation */
@@ -220,7 +220,7 @@
  	}
 +	if (!(ufs_rd(REG_HCS) & HCS_DP) || !(ufs_rd(REG_HCS) & HCS_UTRLRDY)) {
 +		printf("SWEET UFS: host not ready after reset (hcs 0x%x)\n", ufs_rd(REG_HCS));
-+		return ENXIO;
++		return 0x108;
 +	}
  	return 0;
  }
