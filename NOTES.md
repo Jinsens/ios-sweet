@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS CT bug found; CT=0 selftest prepared <<<
+## >>> ACTIVE 2026-10-23: UFS CT=0 gets OCS 7; detailed selftest v2 prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -220,19 +220,46 @@ MTK host fails the transfer with `OCS_PEER_COMM_FAILURE` (5). Commit
 `fd8d369` fixes the shim (`dw0 = (dd << 25) | (1 << 24)`); the kernel needs
 the same one-line change plus a CI rebuild (patch 0086, not yet written).
 
-**Prepared, not flashed: CT=0 shim selftest.**
+**HARDWARE RESULT (2026-10-23): CT=0 changes OCS 5 -> 7.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0.img`,
-26,566,656 B, SHA256
-`fb2e4338f77d00991210a672742227c436f9a60a7c265af34c52921fbaacd9dd`;
-same payload/level/options, predicted written partition
-`8f829d297c938a771577f84327e6115f1083e76423e1a4605fd74e6d600fc9ee`.
-If TUR and READ CAPACITY return rc 0 with this image, the CT fix is
-proven and the remaining kernel timeout is the above-4-GiB UTRL/UCD.
+SHA256 `fb2e4338...`, written partition `8f829d29...`; device returned in
+30.7 s (no SCSI timeouts) and `boot_a` was restored/verified. Record:
 
-Decode (unchanged): `esr` = stage (1 ready, 2 claimed, 3 TUR, 4 READ
-CAPACITY, 5 GPT scan); stage 3/4 `x0` = rc, `x16` = OCS<<8 | status;
-stage 4 `spsr` = last LBA. rc: 0 ok, 1 timeout, 2 OCS, 3 no RESPONSE UPIU,
-4 SCSI status.
+```
+esr=0000000000000005  -> stage 5 (GPT scan returned)
+x0=0000000000000002   -> READ CAPACITY rc 2 (OCS set)
+x16=0000000000000700  -> OCS 7 (OCS_FATAL_ERROR), status 0
+spsr=0                -> last LBA 0
+```
+
+So CT=0 makes the host complete the command instead of reporting
+`OCS_PEER_COMM_FAILURE` (5). The first **data** command (READ CAPACITY,
+8 bytes) now ends in `OCS_FATAL_ERROR` (7). The TUR result is overwritten in
+this encoding, so it is not yet known whether the no-data TUR succeeded.
+Likely remaining suspects: the UCD/PRDT alignment (the shim's UCD was only
+128-byte aligned), the PRDT/data descriptor, or the response UPIU.
+
+**Prepared, not flashed: CT=0 v2 with detailed capture.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v2.img`,
+26,566,656 B, SHA256
+`a669f68e5641d3a8f24bf0fcdffbbd3502b166cc99fd98230a21a9841125e038`;
+predicted written partition
+`70b5a2a78be8b63b84d02337adf63248a7348a62f741770d926a061dca38eaa5`.
+Commit `ac5e987` makes `utrl`/`ucd` 4 KiB aligned (was 1 KiB/128 B) and
+captures the first 8 response-UPIU bytes. The record now encodes:
+
+- `esr` = stage (1 ready, 2 claimed, 3 TUR, 4 READ CAPACITY, 5 GPT scan)
+- `gicd` = TUR packed `rc | OCS<<8 | status<<16 | resp0<<24 |
+  resp6<<32 | resp7<<40`
+- `vtimer` = READ CAPACITY packed the same way
+- `fb` = READ CAPACITY last LBA, `dtb` = block size
+- The pre-test CAP/HCS/HCE snapshot is no longer in this record (measured
+  earlier: CAP 0x3587071f, HCS 0x10f, HCE 1).
+
+OCS values (Linux `include/ufs/ufshci.h`): 0 success, 1 invalid cmd table,
+2 invalid PRDT, 3 mismatch data buffer size, 4 mismatch response UPIU size,
+5 peer comm failure, 6 aborted, 7 fatal error, 8 device fatal error.
+rc: 0 ok, 1 timeout, 2 OCS, 3 not a RESPONSE UPIU, 4 SCSI status.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
