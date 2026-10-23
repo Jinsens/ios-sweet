@@ -921,6 +921,14 @@ predicted `fb8460fc...`. x0: 0x8xxx = device-init stage failure
 write, 0x8500 poll), 0x402 UA, 0x401 flag-clear-but-target-failure,
 0 = TUR/GPT passed.
 
+**DMA cache bug.** The kernel's UTRD/UCD live in cached `kmem_alloc_contig`
+memory, but `su.cache` defaults to false (boot arg `ufscache=1`), so the
+driver never cleans/invalidates them: the host can read stale command data
+and the CPU can read stale responses. The earlier ENXIO/EIO/0x401/0x81fe
+results are suspect until this is fixed. Image with `ufscache=1`:
+`entryprobe-el1-xnu-hybrid6-cache-ufs-preinit-error-brk.img` SHA
+`84b5771e...`, predicted `ee745558...`; same query-init kernel.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
