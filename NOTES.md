@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS resumed; 0084+rtcfast entry checkpoint prepared <<<
+## >>> ACTIVE 2026-10-23: UFS root entry PASS; full-init checkpoint prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -36,7 +36,7 @@ be separated from UFS. The rtcfast patches (10 bytes at VAs
 `0xfffffe00079ad070`, `0xfffffe0007a41e70`, `0xfffffe0007a41eb4`) are present
 only in the proven 0084 payload.
 
-**Prepared, not flashed: 0084 + rtcfast + UFS ADT + entry BRK.**
+**HARDWARE PASS (2026-10-23): `_sweet_ufs_rootdev` entry reached.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-rtcfast-entry-brk.img`,
 26,562,560 B, SHA256
 `f9ceaf53a4663aea422e5f1a316d321e445a72ca7f6879bd0fc2228048367a3a`;
@@ -46,16 +46,44 @@ payload `matisse-xnu-0084-ufs-entry-brk.payload`, 16,605,888 B, SHA256
 `... rd=ufsroot0 ufsrw=0 ... serial=0`). Selective vectors, clean range
 `[0x100000000,0x108000000)`, TTBR0 restore `0x10117c000`, standard offsets
 `0xb78` / `-0x4488`. BRK word verified at payload offset `0x4e4480`
-(PA `0x1014e8090`); all three rtcfast words verified. Predicted written
-partition SHA256 `73392f038083c938478dcd6180850b25fef77d34702a604e01df26112cf61c2b`.
-Expected same-boot record: `stage=87 fault=1 esr=f2005357 pc=fffffe00074e8090`.
-After the BRK returns, the relay boots the stock Linux Image and Recovery
-prints the record; the whole cycle should take seconds, not 60 s.
+(PA `0x1014e8090`); all three rtcfast words verified. Written-partition
+SHA256 `73392f038083c938478dcd6180850b25fef77d34702a604e01df26112cf61c2b`
+matched the full readback. Same-boot record (recovery `dmesg`, one line):
 
-The UFS host takeover remains unproven; a missed entry BRK at 60 s is not
-evidence against `ufs_take_over_host()`. No `userdata` write was made. The
-current `boot_a` was re-verified read-only as `2931647a...` before this
-preparation; each `boot_a` write still needs explicit approval.
+```
+SWEET-ENTRY v1 ... stage=0000000000000087 fault=0000000000000001
+esr=00000000f2005357 far=fffffe30bb9bc000 pc=fffffe00074e8090
+... x0=fffffe0007c03938 x16=ffffffffffffffff spsr=0000000060400204
+```
+
+The device was online again 30.7 s after `adb reboot recovery`. The full
+original `boot_a` was rewritten and verified as `2931647a...` (the restore dd
+succeeded; one adb pull failed transiently, and the re-pull of the on-device
+`/tmp/ufs-readback.img` matched). **Conclusion:** with the UFS ADT and
+`rd=ufsroot0`, XNU parses the root device and calls `_sweet_ufs_rootdev`; the
+earlier entry-BRK "miss" was the unpatched 60 s of RTC/IOMedia waits (and/or
+the 0085 kernel), not a pre-UFS hang. This says nothing yet about
+`ufs_take_over_host()`.
+
+**Prepared, not flashed: checkpoint after full UFS init.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-init-done-brk.img`,
+26,562,560 B, SHA256
+`0c946c92453ef7adb6c91e78e82f9f51860d0ca3268ef51c1503b37f4fc72f5f`;
+payload `matisse-xnu-0084-ufs-init-done-brk.payload`, 16,605,888 B, SHA256
+`1fb92fa405d3b470ded408323efc611c1d0ad62d258394667cdaca8b2f78d761`.
+Same rtcfast words, BRK at VA `0xfffffe00074e86c4` (payload offset `0x4e4ab4`,
+PA `0x1014e86c4`), replacing `bl printf` (`0x97f98462`) immediately after
+`su.ready = true`. It is reached only if `ufs_take_over_host()`, the three
+TURs, `ufs_find_partition()` (GPT), `bdevsw_add`, `cdevsw_add_with_bdev` and
+both `devfs_make_node` calls all succeed. Predicted written partition SHA256
+`729936dfd5ba8bc7b7dfc2ca8fd9e3a0221860cd3818c5ccabdab822a4b42ce1`.
+Expected record: `esr=f2005357 pc=fffffe00074e86c4`. If it misses, the next
+bisect point is just after the inlined `ufs_take_over_host` (before the first
+`ufs_scsi` TUR), then the TUR loop and the GPT read.
+
+No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
+`2931647a...` (verified after restore). Each `boot_a` write still needs
+explicit approval.
 
 ## Summary at pause (handoff for the next session)
 
