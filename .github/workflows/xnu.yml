@@ -105,9 +105,15 @@ jobs:
           # produces a kernel that does not boot.
           mkdir -p linklibs
           find dxb -name 'libfirehose_kernel.a' -exec cp {} linklibs/ \; || true
-          find /Applications/Xcode_*.app -path '*/usr/lib/clang/*/lib/darwin/libcc_kext.a' \
-            -exec cp {} linklibs/ \; || true
+          # The -lcc_kext that XNU links is the toolchain's usr/lib/libcc_kext.a,
+          # not the clang resource-dir libclang_rt.cc_kext.a. Copy both plus the
+          # toolchain ld/strip so local links can match the CI toolchain.
+          find /Applications/Xcode_*.app -name 'libcc_kext.a' -exec cp {} linklibs/ \; || true
+          find /Applications/Xcode_*.app -name 'libclang_rt.cc_kext.a' -exec cp {} linklibs/ \; || true
           find dxb -name 'libclang_rt.cc_kext.a' -exec cp {} linklibs/ \; || true
+          XC=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain
+          cp "$XC/usr/bin/ld" linklibs/ld-xcode 2>/dev/null || true
+          cp "$XC/usr/bin/strip" linklibs/strip-xcode 2>/dev/null || true
           cp dxb/fakeroot/usr/local/bin/ctfconvert dxb/fakeroot/usr/local/bin/ctfmerge linklibs/ 2>/dev/null || true
           ls -la linklibs
           tar czf linklibs.tgz -C linklibs .
