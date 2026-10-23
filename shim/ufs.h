@@ -11,8 +11,10 @@ void test_ufs(void);
  *   1: CAP|VER implicit in HCS/HCE; [0]=HCS<<32|HCE, [1]=UTRLBAU<<32|UTRLBA,
  *      [2]=UTRLDBR<<32|UTRLRSR
  *   2: [0]=claim rc, [1]=UTRLBA, [2]=UTRLBAU, [3]=UTRLRSR
- *   3: [0]=TUR rc, [1]=OCS<<8|status
- *   4: [0]=READ CAPACITY rc, [1]=OCS<<8|status, [2]=last LBA, [3]=block size
+ *   3: [0]=TUR result packed as rc | OCS<<8 | status<<16 |
+ *      response[0]<<24 | response[6]<<32 | response[7]<<40
+ *   4: [1]=READ CAPACITY result with the same packing, [2]=last LBA,
+ *      [3]=block size
  */
 extern volatile uint64_t ufs_test_stage;
 extern volatile uint64_t ufs_test_info[4];

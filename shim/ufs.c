@@ -61,12 +61,13 @@ struct ucd {
 	} prdt[1];
 };
 
-static struct utrd utrl[32] __attribute__((aligned(1024)));
-static struct ucd ucd __attribute__((aligned(128)));
+static struct utrd utrl[32] __attribute__((aligned(4096)));
+static struct ucd ucd __attribute__((aligned(4096)));
 static uint8_t data[8 * BLOCK] __attribute__((aligned(4096)));
 
 volatile uint64_t ufs_test_stage;
 volatile uint64_t ufs_test_info[4];
+volatile uint8_t ufs_scsi_resp[8];
 
 static uint64_t ticks(void)
 {
@@ -156,12 +157,16 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	while (ufs_rd(REG_UTRLDBR) & 1) {
 		if (ticks() - start > freq) {		/* 1 s at the real CNTFRQ */
 			ufs_wr(REG_UTRLCLR, ~1u);	/* clear slot 0 (write 0 to the bit) */
+			for (int i = 0; i < 8; i++)
+				ufs_scsi_resp[i] = 0;
 			return 1;			/* timeout */
 		}
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
 	*ocs_out = utrl[0].dw2 & 0xff;
 	*status_out = ucd.resp[7];		/* SCSI status in the response UPIU */
+	for (int i = 0; i < 8; i++)
+		ufs_scsi_resp[i] = ucd.resp[i];
 	if (*ocs_out)
 		return 2;
 	if (ucd.resp[0] != 0x21)		/* RESPONSE UPIU */
@@ -374,8 +379,9 @@ void test_ufs(void)
 			break;
 	}
 	ufs_test_stage = 3;
-	ufs_test_info[0] = (uint64_t)rc;
-	ufs_test_info[1] = (uint64_t)ocs << 8 | st;
+	ufs_test_info[0] = (uint64_t)rc | (uint64_t)ocs << 8 | (uint64_t)st << 16 |
+	    (uint64_t)ufs_scsi_resp[0] << 24 | (uint64_t)ufs_scsi_resp[6] << 32 |
+	    (uint64_t)ufs_scsi_resp[7] << 40;
 
 	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */
 	rc = scsi(0, cap10, sizeof(cap10), data, 8, 1, &ocs, &st);
@@ -383,8 +389,9 @@ void test_ufs(void)
 	if (!rc)
 		con_hex2("UFS LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
 	ufs_test_stage = 4;
-	ufs_test_info[0] = (uint64_t)rc;
-	ufs_test_info[1] = (uint64_t)ocs << 8 | st;
+	ufs_test_info[1] = (uint64_t)rc | (uint64_t)ocs << 8 | (uint64_t)st << 16 |
+	    (uint64_t)ufs_scsi_resp[0] << 24 | (uint64_t)ufs_scsi_resp[6] << 32 |
+	    (uint64_t)ufs_scsi_resp[7] << 40;
 	ufs_test_info[2] = be32(data);
 	ufs_test_info[3] = be32(data + 4);
 

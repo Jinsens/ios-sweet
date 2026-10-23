@@ -183,10 +183,13 @@ static void
 entryprobe_ufs_test(char *banner)
 {
 	test_ufs();
-	field(banner, ENTRY_X0, ufs_test_info[0]);
-	field(banner, ENTRY_X16, ufs_test_info[1]);
-	field(banner, ENTRY_SPSR, ufs_test_info[2]);
-	field(banner, ENTRY_FAR, ufs_test_info[3]);
+	/* The test results replace the pre-test snapshot fields. TUR and READ
+	 * CAPACITY are packed as rc | OCS<<8 | status<<16 | resp0<<24 |
+	 * resp6<<32 | resp7<<40. */
+	field(banner, ENTRY_GICD, ufs_test_info[0]);
+	field(banner, ENTRY_VTIMER, ufs_test_info[1]);
+	field(banner, ENTRY_FB, ufs_test_info[2]);
+	field(banner, ENTRY_DTB, ufs_test_info[3]);
 	field(banner, ENTRY_ESR, ufs_test_stage);
 }
 #endif
