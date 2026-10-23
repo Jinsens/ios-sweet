@@ -70,7 +70,7 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, board="sweet"):
+def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
@@ -87,7 +87,10 @@ def build(seed=None, qemu=False, highmem=False, board="sweet"):
     if board == 'matisse':
         # Measured on this 8 GiB matisse only, NOT a daumier/generic-MTK
         # profile. Keep every known reserved region outside XNU's window.
-        phys_base, mem_size = 0x100000000, 0x12e000000
+        # --low-mem is a bring-up test window: 0x80000000..0x8f800000 is
+        # free (first low-bank carve-out is consys at 0x8f800000) and
+        # keeps the UFS driver's contiguous DMA below 4 GiB.
+        phys_base, mem_size = (0x80000000, 0x0f800000) if lowmem else (0x100000000, 0x12e000000)
         gicd, gicd_size = 0x0c400000, 0x40000
         gicr, gicr_size = 0x0c440000, 0x200000
         timebase, timer_intid = 13000000, 27
@@ -275,9 +278,10 @@ if __name__ == '__main__':
     ap.add_argument('--qemu', action='store_true')
     ap.add_argument('--highmem', action='store_true')
     ap.add_argument('--board', choices=('sweet', 'matisse'), default='sweet')
+    ap.add_argument('--low-mem', action='store_true', help='matisse: use the free low 248 MiB window (bring-up test)')
     a = ap.parse_args()
     try:
-        root = build(qemu=a.qemu, highmem=a.highmem, board=a.board)
+        root = build(qemu=a.qemu, highmem=a.highmem, board=a.board, lowmem=a.low_mem)
     except ValueError as e:
         ap.error(str(e))
     if a.board == 'matisse':

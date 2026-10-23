@@ -698,6 +698,23 @@ predicted partition `7c92190b...`. Unpatched 0084 kernel, BRK after
 set up ufsroot0; 2 = ENOENT (partition name/read); 5 = TUR still fails.
 `spsr`/banner `pc` carries the shim's own TUR result.
 
+**Prepared, not flashed: low-RAM XNU checkpoint (UFS DMA below 4 GiB).**
+`research/matisse/20261023-ufs/entryprobe-el1-xnu-ufs-lowmem-error-brk.img`,
+26,570,752 B, SHA256
+`a91ca8eb5e8017dd4432ca11358723cacd928413ae8bfc704d4bd89ea4a02236`;
+predicted partition `6408aa5a...`. `tools/mkadt.py --low-mem` (board
+matisse) emits `dram-base=0x80000000`, `dram-size=0xf800000` (the free
+248 MiB before the first low-bank carve-out, consys at 0x8f800000).
+Payload `matisse-xnu-0084-ufs-lowmem-error-brk.payload` (SHA
+`1c5884a3...`) is the same 0084 kernel with rtcfast + the error BRK,
+rebuilt with the low ADT and the same cmdline. Image flags use
+`--xnu-clean-limit 0x8f800000` and `--xnu-restore-ttbr0 0x8117c000`
+(0x117c000 offset from the new base; the high-mem value was
+0x10117c000). With the UFS DMA allocation now below 4 GiB, the driver's
+UTRLBAU is 0 and the UA was cleared by the shim; the error checkpoint
+should reach x0=0. Risk: 248 MiB may be below XNU's minimum, and the
+TTBR0 offset is inferred, so the checkpoint may miss.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
