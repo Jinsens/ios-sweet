@@ -15,9 +15,11 @@ void test_ufs(void);
  *      response[0]<<24 | response[6]<<32 | response[7]<<40
  *   4: [1]=READ CAPACITY result with the same packing, [2]=last LBA,
  *      [3]=block size
+ *   4: [4]=IS before the DME_HIBERNATE_EXIT, [5]=IS after,
+ *      [6]=UIC ARG2 (result in [7:0]), [7]=HCS after
  */
 extern volatile uint64_t ufs_test_stage;
-extern volatile uint64_t ufs_test_info[4];
+extern volatile uint64_t ufs_test_info[8];
 
 /* 1 when the host is enabled, the link is up and no request is outstanding. */
 int ufs_ready(void);

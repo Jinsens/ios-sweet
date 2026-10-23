@@ -190,6 +190,10 @@ entryprobe_ufs_test(char *banner)
 	field(banner, ENTRY_VTIMER, ufs_test_info[1]);
 	field(banner, ENTRY_FB, ufs_test_info[2]);
 	field(banner, ENTRY_DTB, ufs_test_info[3]);
+	field(banner, ENTRY_X0, ufs_test_info[4]);
+	field(banner, ENTRY_X16, ufs_test_info[5]);
+	field(banner, ENTRY_SPSR, ufs_test_info[6]);
+	field(banner, ENTRY_FAULT, ufs_test_info[7]);
 	field(banner, ENTRY_ESR, ufs_test_stage);
 }
 #endif

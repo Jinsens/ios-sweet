@@ -17,6 +17,10 @@
 #define REG_CAP		0x00
 #define REG_VER		0x08
 #define REG_IS		0x20
+#define REG_UIC_CMD	0x90
+#define REG_UIC_ARG1	0x94
+#define REG_UIC_ARG2	0x98
+#define REG_UIC_ARG3	0x9c
 #define REG_HCS		0x30
 #define REG_HCE		0x34
 #define REG_UTRLBA	0x50
@@ -66,7 +70,7 @@ static struct ucd ucd __attribute__((aligned(4096)));
 static uint8_t data[8 * BLOCK] __attribute__((aligned(4096)));
 
 volatile uint64_t ufs_test_stage;
-volatile uint64_t ufs_test_info[4];
+volatile uint64_t ufs_test_info[8];
 volatile uint8_t ufs_scsi_resp[8];
 
 static uint64_t ticks(void)
@@ -333,7 +337,7 @@ void test_ufs(void)
 	uint32_t orig_rsr = ufs_rd(REG_UTRLRSR);
 
 	ufs_test_stage = 0;
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < 8; i++)
 		ufs_test_info[i] = 0;
 	con_str("UFS", "probe (read-only)");
 	uint32_t cap = ufs_rd(REG_CAP), hcs = ufs_rd(REG_HCS), hce = ufs_rd(REG_HCE);
@@ -368,6 +372,27 @@ void test_ufs(void)
 		restore_host(orig_ba, orig_bau, orig_rsr);
 		return;
 	}
+
+	/* The MTK link can be in HIBERN8 after the bootloader. Exit it with a
+	 * bounded UIC command and record the UIC/link status; UIC_COMMAND_COMPL
+	 * is IS bit 10 (0x400), HIBERNATE_EXIT is bit 5 (0x20). */
+	uint32_t is_before = ufs_rd(REG_IS);
+	uint32_t hcs_before = ufs_rd(REG_HCS);
+	ufs_wr(REG_UIC_ARG1, 0);
+	ufs_wr(REG_UIC_ARG2, 0);
+	ufs_wr(REG_UIC_ARG3, 0);
+	ufs_wr(REG_IS, is_before);
+	if (hcs_before & HCS_UCRDY) {
+		ufs_wr(REG_UIC_CMD, 0x18);	/* DME_HIBERNATE_EXIT */
+		uint64_t start = ticks(), freq;
+		__asm__ volatile("isb; mrs %0, cntfrq_el0" : "=r"(freq));
+		while (!(ufs_rd(REG_IS) & 0x400) && ticks() - start < freq / 10)
+			__asm__ volatile("yield");
+	}
+	ufs_test_info[4] = is_before;
+	ufs_test_info[5] = ufs_rd(REG_IS);
+	ufs_test_info[6] = ufs_rd(REG_UIC_ARG2);	/* UIC result in [7:0] */
+	ufs_test_info[7] = ufs_rd(REG_HCS);
 
 	uint32_t ocs = 0, st = 0;
 	static const uint8_t tur[6] = { 0x00 };
