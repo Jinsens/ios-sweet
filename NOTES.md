@@ -809,6 +809,19 @@ driver runs the MTK host reset, SMC64 device reset, refclock, pre-link,
 link startup and takeover itself, then the BRK records x0. Without
 rtcfast the boot waits ~60 s; allow 180 s.
 
+**HYBRID KERNEL (2026-10-23): 0084+0086, no 0085.** CI run
+39956168337 built with `0085-matisse-video-console-refresh.patch`
+renamed to `.disabled`; kernel SHA256 `217659ff...`, 17,222,848 B.
+`sweet_ufs.o` is the 0086 build (host reset/link strings). Function
+`_sweet_ufs_rootdev` at `0xfffffe00074e8090`, caller `0xfffffe0007a42864`
+(`cbnz w0` at `+4`). rtcfast sites shifted +0x3e0:
+`0x79ad450` (`0x94005459`), `0x7a42250` (`0x97fe0ab8`), `0x7a42294`
+(`0x340000e9`); error BRK at `0x7a42868`. Image
+`entryprobe-el1-xnu-hybrid-ufs-error-brk.img`, SHA256
+`25335318...`, predicted partition `805c96e0...`. No shim `--ufs-init`;
+the 0086 driver does the full MTK init. x0 after rootdev: 0 success,
+5 EIO, 2 ENOENT, 6 ENXIO.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
