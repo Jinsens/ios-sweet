@@ -137,7 +137,7 @@ def prepare(template, level=None):
 def build(template_path, out_path, toolchain, level, max_image_size=None, payload_path=None,
           xnu_vector_offset=None, xnu_high_vector_offset=None, xnu_clean=False,
           xnu_clean_limit=None, xnu_restore_ttbr0=None, xnu_selective=False,
-          xnu_el0_syscall=None, ufs_regs=False, ufs_test=False):
+          xnu_el0_syscall=None, ufs_regs=False, ufs_test=False, ufs_init=False):
     template = Path(template_path).read_bytes()
     header, image, ramdisk, banner_at, offsets, old_banner = prepare(template, level)
     image_size = PREFIX_SIZE + max(len(image), struct.unpack_from('<Q', image, 16)[0])
@@ -148,6 +148,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
         raise ValueError('UFS register snapshot requires el1-xnu or el1-load')
     if ufs_test and level != 'el1-load':
         raise ValueError('UFS selftest requires el1-load (it claims the host)')
+    if ufs_init and level not in ('el1-xnu', 'el1-load'):
+        raise ValueError('UFS pre-init requires el1-xnu or el1-load')
     vector_pa = None
     if xnu_vector_offset is not None:
         if level != 'el1-xnu':
@@ -242,6 +244,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
             config += '#define ENTRY_UFS_REGS 1\n'
         if ufs_test:
             config += '#define ENTRY_UFS_TEST 1\n'
+        if ufs_init:
+            config += '#define ENTRY_UFS_INIT 1\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         linker = '''ENTRY(_head)
 SECTIONS {
@@ -283,7 +287,7 @@ SECTIONS {
             sources += ['display.c']
         if level in ('xnu', 'el1-xnu', 'el1-load'):
             sources += ['loader.c']
-        if ufs_test:
+        if ufs_test or ufs_init:
             sources += ['ufs.c']
         objects = []
         flags = ['--target=aarch64-none-elf', '-O2', '-ffreestanding', '-nostdlib',
@@ -332,6 +336,7 @@ SECTIONS {
         'xnu_el0_syscall': xnu_el0_syscall,
         'ufs_regs': ufs_regs,
         'ufs_test': ufs_test,
+        'ufs_init': ufs_init,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,
@@ -365,6 +370,8 @@ def main():
                     help='read-only UFSHCI snapshot into the board fields before the XNU jump')
     ap.add_argument('--ufs-test', action='store_true',
                     help='run the shim UFS tie-over/TUR/GPT selftest from low memory (el1-load)')
+    ap.add_argument('--ufs-init', action='store_true',
+                    help='reset host/device and start the UFS link before the XNU jump (el1-xnu/el1-load)')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')
@@ -373,7 +380,7 @@ def main():
         build(a.template, a.out, a.toolchain, a.level, a.max_image_size, a.payload,
               a.xnu_vector_offset, a.xnu_high_vector_offset, a.xnu_clean, a.xnu_clean_limit,
               a.xnu_restore_ttbr0, a.xnu_selective, a.el0_syscall, a.ufs_regs,
-              a.ufs_test)
+              a.ufs_test, a.ufs_init)
     except (ValueError, OSError) as e:
         ap.error(str(e))
 

@@ -600,6 +600,29 @@ uses CT=1. Root mount still needs the iOS root image on hardware; the
 local Mac has no iOS root image (it is on the Linux host), so the
 partition/GPT + TUR proof is the limit of this session.
 
+**Prepared, not flashed: XNU UFS pre-init image (no CI needed).**
+`research/matisse/20261023-ufs/entryprobe-el1-xnu-ufs-init.img`,
+26,570,752 B, SHA256
+`74ee0eb7c049a0140e8132a3bc321790a48766da7119163200f3cb810c2cf3d4`;
+predicted written partition
+`3e0f1e59802afcd89fe7ebbf52910647abfa8c6110fd2ebf71867c8866aa16d7`.
+This boots the **unpatched 0084 XNU kernel** (payload `matisse-xnu-0084-
+ufs-rtcfast.payload`, SHA `755ae110...`) and runs the new shim
+`--ufs-init` before the jump: host reset, SMC device reset, refclock,
+pre-link, link startup, then programs the shim's low UTRL and RSR=1.
+The 0084 `sweet_ufs` driver already uses CT=1 and low-DMA, and its
+takeover check sees DP|UTRLRDY; it then replaces the list and issues the
+TUR. `--ufs-init` (commit in `tools/mkentryprobe.py`, `shim/ufs.c`,
+`shim/entryprobe.c`) requires el1-xnu/el1-load; 47 tools tests pass.
+This avoids the CI push blocker (GitHub user Jinsens has no write access
+to dipa-studio/ios-sweet; remote main does not contain our commits).
+
+Success criteria: XNU console prints
+`SWEET UFS: "userdata" on LUN 0: first block ...` and proceeds; the
+persistent log (if written) lives in the UFS partition, which is itself
+proof the read/write path works. Observe the panel; restore `boot_a`
+after the test as usual.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not

@@ -4,6 +4,11 @@
 /* Probe the UFS host, print what it finds, and list the big GPT partitions. */
 void test_ufs(void);
 
+/* Reset host/device and start the UniPro link before the XNU jump. Leaves
+ * the host claimed with the shim's UTRL so XNU's driver passes its
+ * readiness check and then takes the list over. */
+void init_ufs_link(void);
+
 /*
  * test_ufs() progress for building a compact, banner-readable result.
  * stage: 0 before the readiness gate, 1 ready, 2 list claimed, 3 TUR done,

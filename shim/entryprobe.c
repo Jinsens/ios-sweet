@@ -11,7 +11,7 @@
 #if defined(ENTRY_LOADER_PROBE)
 #include "loader.h"
 #include "diag.h"
-#if defined(ENTRY_UFS_TEST)
+#if defined(ENTRY_UFS_TEST) || defined(ENTRY_UFS_INIT)
 #include "ufs.h"
 #endif
 static char *loader_banner;
@@ -173,6 +173,17 @@ entryprobe_ufs_snapshot(char *banner)
 }
 #endif
 
+#ifdef ENTRY_UFS_INIT
+static void
+entryprobe_ufs_init(char *banner)
+{
+	init_ufs_link();
+	field(banner, ENTRY_STAGE, 0x79);
+	field(banner, ENTRY_ESR, ufs_test_stage);
+	field(banner, ENTRY_FAR, ufs_test_info[0]);
+}
+#endif
+
 #ifdef ENTRY_UFS_TEST
 /* Run the shim's own low-memory-UTRL takeover, TUR, READ CAPACITY and GPT
  * scan from the probe, then record the packed result. The XNU driver's UTRL
@@ -249,6 +260,9 @@ void entryprobe_board(uint64_t dtb, char *banner)
 #endif
 #if defined(ENTRY_UFS_TEST)
 		entryprobe_ufs_test(banner);
+#endif
+#if defined(ENTRY_UFS_INIT)
+		entryprobe_ufs_init(banner);
 #endif
 		const char *why = loader_boot(dtb);
 		con_str("LOADER", why);

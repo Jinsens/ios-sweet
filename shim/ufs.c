@@ -506,6 +506,42 @@ link_start(void)
 	return ur;
 }
 
+/* Bring the UniPro link up and leave the host usable for XNU's own driver.
+ * LK hands over with the host registers clocked but the link and device
+ * powered down; the vendor probe order (host reset, SMC device reset, ref
+ * clock, pre-link, link startup) is required before the kernel can issue
+ * its first TUR. The request list is left programmed with the shim's
+ * low-memory list and RSR=1 so XNU's takeover sees UTRLRDY; XNU replaces
+ * the list before ringing any doorbell. */
+void
+init_ufs_link(void)
+{
+	ufs_test_stage = 0;
+	ufs_test_info[0] = 0;
+	if (mtk_host_reset()) {
+		ufs_test_stage = 1;
+		return;
+	}
+	mtk_device_reset();
+	refclk_on();
+	mtk_pre_link();
+	uint32_t ls = uic_cmd(0x16);		/* DME_LINK_STARTUP */
+	if (ls != 0) {
+		ufs_test_stage = 2;
+		return;
+	}
+	uintptr_t list = (uintptr_t)utrl;
+	ufs_wr(REG_UTRLRSR, 0);
+	ufs_wr(REG_UTRLBA, (uint32_t)list);
+	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
+	ufs_wr(REG_UTRLRSR, 1);
+	uint64_t start = ticks(), freq = tick_freq();
+	while (!(ufs_rd(REG_HCS) & HCS_UTRLRDY) && ticks() - start < freq / 100)
+		__asm__ volatile("yield");
+	ufs_test_info[0] = ((uint64_t)ufs_rd(REG_HCS) << 32) | ufs_rd(REG_UTRLRSR);
+	ufs_test_stage = 3;
+}
+
 void test_ufs(void)
 {
 	uint32_t orig_ba = ufs_rd(REG_UTRLBA), orig_bau = ufs_rd(REG_UTRLBAU);
