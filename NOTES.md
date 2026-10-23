@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS host takeover-ready; error-code checkpoint prepared <<<
+## >>> ACTIVE 2026-10-23: UFS SCSI times out; low-memory selftest prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -169,9 +169,58 @@ Predicted written partition
 The test can take up to ~15 s of SCSI timeouts; the relay returns to Recovery
 in the same boot.
 
+**HARDWARE RESULT (2026-10-23): `sweet_ufs_rootdev` returns ETIMEDOUT.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-error-brk.img`,
+SHA256 `f7fb157e0d009191ec544026db126d9156b55f462a7ba83328782b5f1ac0d532`,
+written partition `094d6c7d...`; device returned in 40.9 s and `boot_a` was
+restored/verified. Same-boot record:
+
+```
+pc=fffffe0007a42488 esr=f2005357 x0=000000000000003c
+gicd=3587071f00000200 vtimer=0000010f00000001 fb=0000000051254400
+dtb=0000000000000001
+```
+
+`x0 = 0x3c` is **ETIMEDOUT (60)** from `ufs_scsi()`: the UTRL doorbell bit 0
+never cleared before the 5 s deadline, three TUR attempts. This proves
+`ufs_take_over_host()` succeeded (UTRLBA/UTRLBAU/UTRLRSR readback passed);
+the host accepted the kernel's transfer list but never processed slot 0.
+The extra ~10 s over the baseline (`online after 40.9 s`) is the SCSI
+timeout budget. The host's own CAP/HCS/HCE/UTRL state was takeover-ready
+(previous snapshot), so the remaining differences are the kernel's
+**above-4-GiB UTRL/DMA address** and any MTK-specific host handoff.
+
+**Prepared, not flashed: shim low-memory UFS selftest.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest.img`,
+26,566,656 B, SHA256
+`823cd38fe71d04bef8e9b1cfac6729d6d8504ea7e2d9171b8dbab16b6ebf94d3`;
+payload `matisse-xnu-0084-ufs-rtcfast.payload` SHA256
+`755ae110f814e67245ea8d1f1c0b7694e65ca8b312e5316db7a39b5d8b4a1478`;
+level `el1-load`, `--ufs-regs --ufs-test`, predicted written partition
+`a8698232a87020f7a6fbbd7dd5b48b7d79c45a8f41ee1fc80c79cce05790b9aa`.
+`test_ufs()` now claims the host using the probe's **low-memory** static
+UTRL/UCD and runs TUR -> READ CAPACITY -> GPT scan, then restores LK's
+UTRLBA/BAU/RSR. It records `ufs_test_stage/info[]` into the free record
+fields (`x0`, `x16`, `spsr`, `far`, `esr`); the pre-test snapshot stays in
+`gicd`/`vtimer`/`fb`/`dtb`. Decode:
+
+- `esr` = stage: 1 ready, 2 list claimed, 3 TUR returned, 4 READ CAPACITY
+  returned, 5 GPT scan returned.
+- stage 2: `x0` claim rc (0 ok, 1 not ready, 2 readback mismatch),
+  `x16`=UTRLBA, `spsr`=UTRLBAU, `far`=UTRLRSR.
+- stage 3: `x0` TUR rc (0 ok, 1 timeout, 2 OCS set, 3 not a RESPONSE UPIU,
+  4 SCSI status), `x16` = OCS<<8 | status.
+- stage 4: `x0` READ CAPACITY rc, `x16` = OCS<<8 | status,
+  `spsr` = last LBA, `far` = block size.
+
+If the low-memory test gets TUR rc 0, the kernel's above-4-GiB UTRL/DMA is
+the failing difference (fix: allocate the UTRL/UCD/bounce below 4 GiB, or
+re-enable HCE after programming UTRLBA). If it also times out, the MTK host
+stops processing commands after LK irrespective of address and needs the
+vendor host-reset/link-startup sequence.
+
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
-`2931647a...` (verified after restore). Each `boot_a` write still needs
-explicit approval.
+`2931647a...` (verified). Each `boot_a` write still needs explicit approval.
 
 ## Summary at pause (handoff for the next session)
 
