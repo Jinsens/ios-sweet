@@ -886,6 +886,13 @@ is required. Instrumented `ufs_scsi` failure codes in 0086 (commit
 `841ec85`): 0x2xx OCS, 0x300 bad UPIU, 0x4xx SCSI status, 0x5xx sense.
 CI run for `841ec85` dispatched.
 
+**Prepared: SCSI-code pre-init checkpoint.** Kernel
+`xnu/out/ci-39963150738/kernel.development.sweet` SHA `a945461b...`;
+caller 0x7a428a4 (+0x20), rtcfast 0x79ad490/0x7a42290/0x7a422d4, BRK
+0x7a428a8. Image `entryprobe-el1-xnu-hybrid5-ufs-preinit-error-brk.img`
+SHA `9325913d...`, predicted `5fcdbe95...`. x0: 0x2xx OCS, 0x300 UPIU,
+0x4xx SCSI status (0x402 UA), 0x5xx sense.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
