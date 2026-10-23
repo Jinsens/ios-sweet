@@ -780,6 +780,18 @@ QUERY, power mode, or a REQUEST SENSE that is known to work). A proper
 low-DMA path (reserved low region in the ADT or a low `max_pnum`
 allocation with low pages actually managed) is still unproven.
 
+**CI ACCESS SOLVED (2026-10-23).** The user's fork is
+`https://github.com/Jinsens/ios-sweet`; the local `fork` remote points
+there and `main` was fast-forwarded `58f7c2c..7cecd9b`. A plain push did
+not trigger `xnu.yml` because `xnu/patches/0086` was already in the
+fork's history (paths filter), so the workflow was started with
+`workflow_dispatch` (API, run **39953360175**, commit `7cecd9b`).
+Artifacts `xnu-kernel`/`xnu-buildtree` are downloaded to
+`xnu/out/ci-39953360175/` by `/tmp/watch_ci.py` (uses the git credential
+token, never prints it). The 0086 kernel needs a fresh payload
+(`mkpayload.py` with the UFS ADT and the usual cmdline); rtcfast/BRK
+binary patches are 0084-specific and are **not** applied to 0086.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
