@@ -929,6 +929,13 @@ results are suspect until this is fixed. Image with `ufscache=1`:
 `entryprobe-el1-xnu-hybrid6-cache-ufs-preinit-error-brk.img` SHA
 `84b5771e...`, predicted `ee745558...`; same query-init kernel.
 
+**Low-DMA test.** `ufscache=1` did not change x0 (0x81fe), so cache alone is
+not it. The driver's DMA block now maps 0x40080000 (free window inside the
+2 MiB probe prefix; code/BSS end <0x80000, stock image at 0x40200000;
+block 0x40080000-0x40184000). Test-only: commit `9ee9d4b`; CI dispatched.
+If the low-DMA TUR gets status 2 (UA) or 0, the >4 GiB UCD/UTRL address is
+the failure; if unchanged, the UPIU/device state is.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
