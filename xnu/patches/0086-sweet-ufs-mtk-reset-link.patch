@@ -4,7 +4,7 @@
  
  #define HCS_DP          (1u << 0)
  #define HCS_UTRLRDY     (1u << 1)
-+#define HCS_UCRDY       (1u << 2)
++#define HCS_UCRDY       (1u << 3)
  #define CAP_64AS        (1u << 24)              /* 64-bit DMA addressing */
  
 +/* MediaTek UIC / reset / clock registers (same window as the host). */
