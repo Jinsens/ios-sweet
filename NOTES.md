@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS link UP after SMC reset; UTRD header bug fixed <<<
+## >>> ACTIVE 2026-10-23: UFS FULLY WORKS in shim; XNU patch 0086 in CI <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -560,6 +560,45 @@ predicted written partition
 `scsi()` now passes ctype 1; the NOP response check accepts 0x20. Success
 for strategy 3: NOP rc0/OCS0, TUR rc0/OCS0/status0, post-HCS 0xf,
 `spsr` = 3 (smc 0, NOP 0, refclk 3).
+
+**HARDWARE PASS (2026-10-23): UFS SCSI works on hardware.** v16 image
+`beab6bc7...`, partition `146c0206...`; returned in 31.7 s, `boot_a`
+restored/verified. `spsr=3` (smc a0=0, NOP rc0/OCS0, refclk 3) and
+`dtb=0x0f00020121020004` decodes as strategy 3: TUR **rc 4 (CHECK
+CONDITION)**, **OCS 0**, status **0x02**, resp UPIU **0x21**, UIC **0**,
+post-HCS **0xf**. That is a complete UPIU round trip: the link is up,
+the NOP OUT and the SCSI TUR both complete, and the device returns a
+unit-attention status (normal after reset). The earlier OCS 7 was
+because SCSI was sent with CT=0; for UFSHCI 2.0 (`VER=0x200`) the vendor
+uses `UTP_CMD_TYPE_UFS_STORAGE` (CT=1) for SCSI too.
+
+**Proven on-hardware sequence (shim, `shim/ufs.c`):**
+1. `mtk_host_reset`: syscon assert/deassert UniPro/HCI/crypto, XOUFS
+   (0x140) |= 0x80, UTRLRSR=0, HCE 1->0->1, wait UCRDY.
+2. SMC device reset: `arm_smccc_smc(0x82000276, 2, 0)`, >=10 us,
+   `(..., 2, 1)`, 10 ms. (Vendor arm64 ID is 0xC2000276; the SMC32
+   form worked. XNU tries 0xC2 then falls back to 0x82.)
+3. Ref clock: `REG_REFCLK_CTRL` (0x144) REQUEST bit0, wait ACK bit1.
+4. MTK pre-link: DME_SET 0xD0A8=0; clear bit6 of 0xD0A6 if set.
+5. `DME_LINK_STARTUP` (0x16); UIC result 0.
+6. Program UTRL base/RSR, check DP|UTRLRDY.
+7. NOP OUT (CT=1, UPIU 0x00) then SCSI TUR (CT=1, UPIU 0x01).
+
+**XNU port: `xnu/patches/0086-sweet-ufs-mtk-reset-link.patch`**
+(commit pending CI). It adds the syscon mappings (`0x112b8000`,
+`0x112bc000`), SMC device reset, refclock, pre-link, host reset, UIC
+helper, and rewrites `ufs_take_over_host` to run the sequence before
+taking the request list. `sweet_ufs.c` passes the local XNU compile
+check (`tools/xnu-cc.py` with the CI buildtree, 0 failures). The
+existing TUR retry loop covers the unit-attention status. CI build is
+triggered by the push; then build the boot image with the new kernel and
+test `rd=ufsroot0` on hardware (approval + full restore as usual).
+
+**Open items.** Confirm the correct SMC ID on the next boot (`0xC2` vs
+`0x82`); the driver falls back automatically. The XNU `ufs_scsi` already
+uses CT=1. Root mount still needs the iOS root image on hardware; the
+local Mac has no iOS root image (it is on the Linux host), so the
+partition/GPT + TUR proof is the limit of this session.
 
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's

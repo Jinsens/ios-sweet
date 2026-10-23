@@ -1,0 +1,235 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -67,8 +67,28 @@
+ 
+ #define HCS_DP          (1u << 0)
+ #define HCS_UTRLRDY     (1u << 1)
++#define HCS_UCRDY       (1u << 2)
+ #define CAP_64AS        (1u << 24)              /* 64-bit DMA addressing */
+ 
++/* MediaTek UIC / reset / clock registers (same window as the host). */
++#define REG_UIC_CMD     0x90
++#define REG_UIC_ARG1    0x94
++#define REG_UIC_ARG2    0x98
++#define REG_UIC_ARG3    0x9c
++#define REG_XOUFS_CTRL  0x140
++#define REG_REFCLK_CTRL 0x144
++#define IS_UIC_COMPL    (1u << 10)              /* IS.UIC_COMMAND_COMPL */
++
++/* ti,syscon-reset windows for UniPro/HCI/crypto on matisse. */
++#define MTK_UFS_AO_PA   0x112b8000ull
++#define MTK_UFS_PDN_PA  0x112bc000ull
++
++/* MTK SIP UFS control: FAST_CALL|SMC64|OWNER_SIP|0x276; the SMC32 form
++ * (0x82000276) is what some bootloaders accept, so try both. */
++#define MTK_SIP_UFS_CONTROL64 0xc2000276ull
++#define MTK_SIP_UFS_CONTROL32 0x82000276ull
++#define UFS_SIP_DEVICE_RESET  2ull
++
+ #define UFS_BLOCK       4096u
+ #define BOUNCE_SIZE     (1u << 20)
+ #define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
+@@ -100,6 +120,7 @@
+ 
+ static struct {
+ 	vm_offset_t regs;
++	vm_offset_t ao, pdn;                    /* syscon reset windows */
+ 	vm_offset_t dma;                        /* kernel VA of the DMA allocation */
+ 	uint64_t dma_pa;
+ 	uint8_t lun;
+@@ -129,7 +150,133 @@
+ 	*(volatile uint32_t *)(su.regs + off) = v;
+ }
+ 
++/* Read-modify-write one 32-bit syscon register and publish it. */
++static void
++mmio_bits(vm_offset_t base, uint32_t off, uint32_t mask, uint32_t value)
++{
++	volatile uint32_t *p = (volatile uint32_t *)(base + off);
++	*p = (*p & ~mask) | (value & mask);
++	__builtin_arm_dsb(0xf);
++}
++
++static uint64_t
++ufs_smc(uint64_t a0, uint64_t a1, uint64_t a2)
++{
++	register uint64_t x0 __asm__("x0") = a0;
++	register uint64_t x1 __asm__("x1") = a1;
++	register uint64_t x2 __asm__("x2") = a2;
++	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2)
++	    : : "x3", "x4", "x5", "x6", "x7", "memory");
++	return x0;
++}
++
++/*
++ * Reset the UFS device through the secure monitor (vendor
++ * ufs_mtk_device_reset): RST_n is active low, keep it low >=10 us, then
++ * release and give the device 10 ms.
++ */
+ static void
++ufs_device_reset(void)
++{
++	uint64_t id = MTK_SIP_UFS_CONTROL64;
++	if (ufs_smc(id, UFS_SIP_DEVICE_RESET, 0) != 0) {
++		id = MTK_SIP_UFS_CONTROL32;
++		ufs_smc(id, UFS_SIP_DEVICE_RESET, 0);
++	}
++	delay(10);
++	ufs_smc(id, UFS_SIP_DEVICE_RESET, 1);
++	delay(10000);
++}
++
++/* ufs_mtk_setup_ref_clk: REQUEST bit0, ACK bit1. */
++static uint32_t
++ufs_refclk_on(void)
++{
++	uint32_t v = ufs_rd(REG_REFCLK_CTRL);
++	if ((v & 3) == 3) {
++		return v;
++	}
++	ufs_wr(REG_REFCLK_CTRL, v | 1u);
++	for (int i = 0; i < 100000; i++) {
++		v = ufs_rd(REG_REFCLK_CTRL);
++		if ((v & 3) == 3) {
++			break;
++		}
++		delay(1);
++	}
++	return v;
++}
++
++/*
++ * One UIC command (DME_GET/DME_SET/LINK_STARTUP). Returns 0xff on timeout,
++ * otherwise the UIC result byte (0 = success).
++ */
++static uint32_t
++ufs_uic(uint32_t op, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t *out3)
++{
++	uint32_t is = ufs_rd(REG_IS);
++	ufs_wr(REG_UIC_ARG1, a1);
++	ufs_wr(REG_UIC_ARG2, a2);
++	ufs_wr(REG_UIC_ARG3, a3);
++	ufs_wr(REG_IS, is);                     /* W1C */
++	ufs_wr(REG_UIC_CMD, op);
++	for (int i = 0; i < 500000; i++) {       /* 500 ms */
++		if (ufs_rd(REG_IS) & IS_UIC_COMPL) {
++			break;
++		}
++		delay(1);
++	}
++	if (out3) {
++		*out3 = ufs_rd(REG_UIC_ARG3);
++	}
++	if (!(ufs_rd(REG_IS) & IS_UIC_COMPL)) {
++		return 0xff;
++	}
++	return ufs_rd(REG_UIC_ARG2) & 0xff;
++}
++
++/* Vendor ufs_mtk_pre_link: allow UniPro power down, clear deep stall. */
++static void
++ufs_pre_link(void)
++{
++	uint32_t v = 0;
++	(void)ufs_uic(0x02, 0xd0a8u << 16, 0, 0, NULL);
++	if (ufs_uic(0x01, 0xd0a6u << 16, 0, 0, &v) == 0 && (v & (1u << 6))) {
++		(void)ufs_uic(0x02, 0xd0a6u << 16, 0, v & ~(1u << 6), NULL);
++	}
++}
++
++/*
++ * Vendor ufs_mtk_host_reset: assert UniPro/HCI/crypto resets, set the
++ * XOUFS workaround bit, then cycle HCE. Only UCRDY is expected here;
++ * UTRLRDY comes after the request list is programmed and DP after link
++ * startup.
++ */
++static int
++ufs_host_reset(void)
++{
++	mmio_bits(su.pdn, 0x44, 1u << 1, 1u << 1);
++	mmio_bits(su.pdn, 0x44, 1u << 0, 1u << 0);
++	mmio_bits(su.ao, 0x44, 1u << 1, 1u << 1);
++	delay(100);
++	mmio_bits(su.ao, 0x48, 1u << 1, 1u << 1);
++	mmio_bits(su.pdn, 0x48, 1u << 0, 1u << 0);
++	mmio_bits(su.pdn, 0x48, 1u << 1, 1u << 1);
++
++	ufs_wr(REG_XOUFS_CTRL, ufs_rd(REG_XOUFS_CTRL) | 0x80);
++	ufs_wr(REG_UTRLRSR, 0);
++	ufs_wr(REG_HCE, 0);
++	for (int i = 0; i < 10000 && (ufs_rd(REG_HCE) & 1); i++) {
++		delay(1);
++	}
++	ufs_wr(REG_HCE, 1);
++	for (int i = 0; i < 100000 && !(ufs_rd(REG_HCS) & HCS_UCRDY); i++) {
++		delay(1);
++	}
++	return (ufs_rd(REG_HCS) & HCS_UCRDY) ? 0 : ENXIO;
++}
++
++static void
+ dma_sync(uint32_t off, uint32_t len)
+ {
+ 	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
+@@ -356,11 +503,6 @@
+ static int
+ ufs_take_over_host(void)
+ {
+-	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
+-	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
+-		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
+-		return ENXIO;
+-	}
+ 	if (ufs_rd(REG_UTRLDBR)) {
+ 		printf("SWEET UFS: requests outstanding from the bootloader\n");
+ 		return EBUSY;
+@@ -371,6 +513,29 @@
+ 		    su.dma_pa);
+ 		return ENXIO;
+ 	}
++
++	/*
++	 * The bootloader leaves the host registers accessible but the UniPro
++	 * link and the device powered down, so reuse of its state cannot
++	 * work. Reproduce the vendor probe order: host reset, device reset
++	 * through the secure monitor, reference clock, UniPro pre-link, then
++	 * link startup and only then our request list.
++	 */
++	int error = ufs_host_reset();
++	if (error) {
++		printf("SWEET UFS: host reset failed (hcs 0x%x)\n", ufs_rd(REG_HCS));
++		return error;
++	}
++	ufs_device_reset();
++	(void)ufs_refclk_on();
++	ufs_pre_link();
++	uint32_t ls = ufs_uic(0x16, 0, 0, 0, NULL);     /* DME_LINK_STARTUP */
++	if (ls != 0) {
++		printf("SWEET UFS: link startup failed (%u, hcs 0x%x)\n",
++		    ls, ufs_rd(REG_HCS));
++		return ENXIO;
++	}
++
+ 	ufs_wr(REG_IE, 0);                      /* polled operation */
+ 	ufs_wr(REG_IS, ufs_rd(REG_IS));
+ 	ufs_wr(REG_UTRLRSR, 0);
+@@ -384,6 +549,10 @@
+ 		printf("SWEET UFS: host did not take our request list\n");
+ 		return EIO;
+ 	}
++	if (!(ufs_rd(REG_HCS) & HCS_DP) || !(ufs_rd(REG_HCS) & HCS_UTRLRDY)) {
++		printf("SWEET UFS: host not ready after reset (hcs 0x%x)\n", ufs_rd(REG_HCS));
++		return ENXIO;
++	}
+ 	return 0;
+ }
+ 
+@@ -608,6 +777,8 @@
+ 	su.wait = (wait == 1);
+ 
+ 	su.regs = ml_io_map(reg[0], reg[1]);
++	su.ao = ml_io_map(MTK_UFS_AO_PA, 0x1000);
++	su.pdn = ml_io_map(MTK_UFS_PDN_PA, 0x1000);
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET UFS: no contiguous DMA memory\n");
