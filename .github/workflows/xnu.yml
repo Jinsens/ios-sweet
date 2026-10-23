@@ -96,6 +96,29 @@ jobs:
           path: buildtree.tgz
           retention-days: 7
 
+      - name: Package local link libs
+        if: always()
+        run: |
+          # The buildtree excludes *.a. A local relink needs the real
+          # libfirehose_kernel and Xcode's kernel compiler-rt (cc_kext);
+          # substituting CLT libclang_rt.cc_kext.a plus firehose stubs
+          # produces a kernel that does not boot.
+          mkdir -p linklibs
+          find dxb -name 'libfirehose_kernel.a' -exec cp {} linklibs/ \; || true
+          find /Applications/Xcode_*.app -path '*/usr/lib/clang/*/lib/darwin/libcc_kext.a' \
+            -exec cp {} linklibs/ \; || true
+          find dxb -name 'libclang_rt.cc_kext.a' -exec cp {} linklibs/ \; || true
+          cp dxb/fakeroot/usr/local/bin/ctfconvert dxb/fakeroot/usr/local/bin/ctfmerge linklibs/ 2>/dev/null || true
+          ls -la linklibs
+          tar czf linklibs.tgz -C linklibs .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-linklibs
+          path: linklibs.tgz
+          retention-days: 7
+
       - name: Inspect closed KDK support libs
         if: always()
         run: |
