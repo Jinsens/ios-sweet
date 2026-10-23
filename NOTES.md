@@ -1033,6 +1033,20 @@ worked. Next investigation is offline: capture the full query response
 JEDEC; consider dropping QUERY and handling the post-reset unit attention
 with SCSI REQUEST SENSE/retry instead.
 
+**ROOT CAUSE of the 0xfe query response (commit `0c37b5c`).** Linux
+`ufshcd_compose_upiu` puts the query function in UPIU header byte 1:
+0x01 standard read, 0x81 standard write. Our query left byte 1 zero, so
+the device rejected every query (response UPIU byte 6 = 0xfe). Also:
+- `QUERY_FLAG_IDN_FDEVICEINIT` is **0x01**, not 0x0B (0x0B is
+  PERMANENTLY_DISABLE_FW_UPDATE).
+- `struct utp_upiu_query` has `length` at bytes 18-19 and `value` at
+  bytes 20-23; we read value at 24.
+- Linux init is `SET_FLAG fDeviceInit` (query func 0x81, opcode 0x06)
+  then poll `READ_FLAG` (0x05, IDN 0x01) until cleared, not a
+  configuration-descriptor write.
+Fixed in the kernel and the shim pre-init. CI dispatched for `0c37b5c`;
+next test is the same error checkpoint with `--ufs-init`.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
