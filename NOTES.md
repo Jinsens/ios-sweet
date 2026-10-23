@@ -623,6 +623,19 @@ persistent log (if written) lives in the UFS partition, which is itself
 proof the read/write path works. Observe the panel; restore `boot_a`
 after the test as usual.
 
+**HARDWARE RESULT (2026-10-23): XNU pre-init image hangs at logo.**
+Image `74ee0eb7...` (full XNU) and checkpoint image `a85ca565...`
+(partition `6de8ff11...`) both never returned; the user saw the logo
+reboot loop. `boot_a` was restored through fastboot (trim `fe6e8fbf...`,
+Recovery up in 26.4 s, full `2931647a...` verified). The shim pre-init
+or the XNU path hung before any checkpoint. Next isolation:
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-preinit.img`, SHA256
+`f4758deb...`, predicted `7e547768...`: runs `--ufs-init` at el1-load
+(no XNU jump) and records stage/HCS in the banner. `esr` = init stage
+(1 host reset failed, 2 link startup failed, 3 ready), `far` =
+HCS<<32|UTRLRSR. This tells whether `init_ufs_link` itself hangs/fails
+at the XNU call site.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
