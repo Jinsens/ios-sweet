@@ -536,6 +536,31 @@ packs smc (bits32-39), NOP OCS (bits16-23), NOP rc (bits8-15), refclk
 (bits0-7). If NOP is rc0/OCS0 and the TUR is still OCS 7, the failure is
 SCSI/UPIU-specific; if NOP is also OCS 7, the UTP path is not ready.
 
+**HARDWARE RESULT (2026-10-23): NOP OUT succeeds; SCSI OCS 7 is a
+command-type bug.** v15 image `fcde69be...`, partition `218621a1...`;
+returned in 31.7 s, `boot_a` restored/verified. `spsr=0x303` decodes as
+smc a0=0, NOP OCS=0, NOP rc=3, refclk=3. rc 3 was our check expecting a
+RESPONSE (0x21) for a NOP; the NOP IN UPIU is 0x20, so the **NOP OUT
+completed successfully (OCS 0)** and the UTP/link path is proven.
+
+The vendor `ufshcd_comp_scsi_upiu` selects the command type by version:
+`ufs_version <= 1.1` -> `UTP_CMD_TYPE_SCSI` (0), otherwise
+`UTP_CMD_TYPE_UFS_STORAGE` (1). Our controller reports VER=0x200 (2.0),
+so **SCSI commands must also use CT=1**. The TUR was sent with CT=0 and
+the host rejected it with OCS 7 (fatal) while the CT=1 NOP succeeded.
+This also explains why the earlier "CT=1 -> CT=0" change looked useful
+when the link was down: it was not the cause then, but CT=1 is correct.
+
+**Prepared, not flashed: CT=1 SCSI (v16).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v16.img`,
+26,570,752 B, SHA256
+`beab6bc7067b5a01511420f6e5576cd65f7fe77adfe3ef4ac703d8cac83465c0`;
+predicted written partition
+`146c02062c9bae00dcc90b734230d6ca02169151004dab3aa87f9552a28a312d`.
+`scsi()` now passes ctype 1; the NOP response check accepts 0x20. Success
+for strategy 3: NOP rc0/OCS0, TUR rc0/OCS0/status0, post-HCS 0xf,
+`spsr` = 3 (smc 0, NOP 0, refclk 3).
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not

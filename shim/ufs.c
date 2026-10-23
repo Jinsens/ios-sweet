@@ -191,7 +191,8 @@ scsi_ex(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf,
 		ufs_scsi_resp[i] = ucd.resp[i];
 	if (*ocs_out)
 		return 2;
-	if (ucd.resp[0] != 0x21)		/* RESPONSE UPIU */
+	uint8_t expect = upiu_type == 0x00 ? 0x20 : 0x21;  /* NOP IN / RESPONSE */
+	if (ucd.resp[0] != expect)
 		return 3;
 	return *status_out ? 4 : 0;
 }
@@ -200,7 +201,9 @@ static uint32_t
 scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
     int dir, uint32_t *ocs_out, uint32_t *status_out)
 {
-	return scsi_ex(lun, cdb, cdb_len, buf, len, dir, 0x01, 0, ocs_out, status_out);
+	/* Vendor ufshcd_comp_scsi_upiu: UFSHCI > 1.1 (ours is 2.0)
+	 * uses UTP_CMD_TYPE_UFS_STORAGE, not UTP_CMD_TYPE_SCSI. */
+	return scsi_ex(lun, cdb, cdb_len, buf, len, dir, 0x01, 1, ocs_out, status_out);
 }
 
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
