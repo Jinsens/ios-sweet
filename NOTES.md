@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS TUR OCS 7; UIC hibernate-exit probe prepared <<<
+## >>> ACTIVE 2026-10-23: UFS link not hibernated; 4 wake strategies prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -259,28 +259,46 @@ reach a responsive device. The likely cause is the UniPro link state after
 LK: the MTK host's auto-hibernate (Linux sysfs shows `auto_hibern8=5000`
 us) can leave the link in HIBERN8 when XNU takes over.
 
-**Prepared, not flashed: UIC state + hibernate-exit probe (v3).**
+**HARDWARE RESULT (2026-10-23): link is not hibernated; hibernate exit fails.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v3.img`,
+SHA256 `71002069...`, written partition `ce33e949...`; returned in 30.7 s,
+`boot_a` restored/verified. Record:
+
+```
+fault=0x10f      -> HCS after = 0x10f (DP|UTRLRDY|UCCS=1|UCRDY)
+x0=0             -> IS before = 0 (no pending UIC/hibernate/link-lost bits)
+x16=0x400        -> IS after = UIC_COMMAND_COMPL only (no 0x20 exit bit)
+spsr=0x1         -> UIC ARG2 result 1 (failure)
+gicd=0x702 vtimer=0x702 -> TUR and READ CAPACITY still OCS 7
+```
+
+So the link is **not** in HIBERN8 (`IS` had neither 0x40 enter nor 0x20
+exit), and `DME_HIBERNATE_EXIT` is rejected with result 1. Hibernation wake
+is not the missing step. The probe's UTRL is at PA **0x40020000**: the
+stock Linux Image's `Kernel code` in `/proc/iomem` starts at 0x40200000 and
+the probe prefix is 2 MiB before it, so this selftest really did use
+low-memory, 4 KiB-aligned descriptors. (The kernel's own UTRL above 4 GiB
+is still a separate, unproven difference; it timed out rather than
+completing with OCS.)
+
+**Prepared, not flashed: four link-wake strategies in one selftest (v5).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v5.img`,
 26,566,656 B, SHA256
-`71002069fbb71e2cbb4a01951313874e956762a28b5f629cb7c488cdb73b6086`;
+`5f023d2915c87eed4550c47cd122c1a4bb8fb1e82623aea5c85e9acccb5c438e`;
 predicted written partition
-`ce33e9494187ebf460064c3e543c83107bd327490201b742474c560dad127517`.
-Commit `1c3d7f1`: after claiming the list, `test_ufs()` records IS/HCS,
-clears IS, issues `DME_HIBERNATE_EXIT` (opcode 0x18) if HCS.UCRDY, polls
-`IS & 0x400` (UIC_COMMAND_COMPL) for 100 ms, then re-reads IS/ARG2/HCS
-before TUR. Record fields (loader diagnostics only overwrite STAGE/FAR/PC):
-
-- `esr` = stage, `gicd` = TUR packed, `vtimer` = READ CAPACITY packed,
-  `fb` = last LBA, `dtb` = block size
-- `x0` = IS before, `x16` = IS after, `spsr` = UIC ARG2 (result in [7:0]),
-  `fault` = HCS after
-- IS bits: UIC_COMMAND_COMPL 0x400, UIC_HIBERNATE_EXIT 0x20,
-  UIC_HIBERNATE_ENTER 0x40. ARG2 low byte 0 = UIC success.
-
-If IS before has 0x40 and the exit succeeds followed by TUR rc 0, the
-missing step is a link/hibernate wake before I/O. If ARG2 reports failure
-or the link was already active, the next step is the vendor host-reset +
-DME_LINK_STARTUP sequence (UIC opcodes 0x14/0x12/0x16).
+`2dac484c1527fd0538c335186e51a46fe5213f161bd509050fa8da9d4bc0433b`.
+Commit `dc66c02` runs one TUR after each of: 0 baseline; 1
+`DME_HIBERNATE_EXIT` (0x18); 2 `DME_LINK_STARTUP` (0x16); 3 UFSHCI host
+enable cycle (UTRLRSR=0, HCE 0->1, wait DP|UTRLRDY|UCRDY) followed by
+`DME_LINK_STARTUP`; re-claims the list after any UIC/link change. Each
+strategy result is packed `rc | OCS<<8 | status<<16 | resp0<<24 |
+resp6<<32 | resp7<<40 | UIC result<<48 | post-HCS low nibble<<56`.
+Markers: `rc=0xfe` host reset failed, `rc=0xfd` list re-claim failed.
+Record map: `gicd`/`vtimer`/`fb`/`dtb` = strategies 0-3,
+`x0`=IS before, `x16`=HCS before, `spsr`=IS after, `fault`=HCS after,
+`esr`=5. If any strategy gets TUR rc=0, port that sequence to
+`bsd/dev/sweet_ufs.c`; if 3 fails, the MTK vendor host needs its own
+reset/link-startup sequence (compare the vendor `ufs-mediatek.c`).
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
