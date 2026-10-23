@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS root entry PASS; full-init checkpoint prepared <<<
+## >>> ACTIVE 2026-10-23: UFS root entry PASS; init-done missed; snapshot prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -65,21 +65,63 @@ earlier entry-BRK "miss" was the unpatched 60 s of RTC/IOMedia waits (and/or
 the 0085 kernel), not a pre-UFS hang. This says nothing yet about
 `ufs_take_over_host()`.
 
-**Prepared, not flashed: checkpoint after full UFS init.**
+**HARDWARE FAILURE (2026-10-23): full-init checkpoint missed; panic/reboot.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-init-done-brk.img`,
 26,562,560 B, SHA256
 `0c946c92453ef7adb6c91e78e82f9f51860d0ca3268ef51c1503b37f4fc72f5f`;
-payload `matisse-xnu-0084-ufs-init-done-brk.payload`, 16,605,888 B, SHA256
-`1fb92fa405d3b470ded408323efc611c1d0ad62d258394667cdaca8b2f78d761`.
-Same rtcfast words, BRK at VA `0xfffffe00074e86c4` (payload offset `0x4e4ab4`,
-PA `0x1014e86c4`), replacing `bl printf` (`0x97f98462`) immediately after
-`su.ready = true`. It is reached only if `ufs_take_over_host()`, the three
-TURs, `ufs_find_partition()` (GPT), `bdevsw_add`, `cdevsw_add_with_bdev` and
-both `devfs_make_node` calls all succeed. Predicted written partition SHA256
-`729936dfd5ba8bc7b7dfc2ca8fd9e3a0221860cd3818c5ccabdab822a4b42ce1`.
-Expected record: `esr=f2005357 pc=fffffe00074e86c4`. If it misses, the next
-bisect point is just after the inlined `ufs_take_over_host` (before the first
-`ufs_scsi` TUR), then the TUR loop and the GPT read.
+payload SHA256 `1fb92fa405d3b470ded408323efc611c1d0ad62d258394667cdaca8b2f78d761`.
+BRK at VA `0xfffffe00074e86c4` (payload offset `0x4e4ab4`, PA `0x1014e86c4`),
+replacing `bl printf` (`0x97f98462`) immediately after `su.ready = true`.
+Written-partition SHA256
+`729936dfd5ba8bc7b7dfc2ca8fd9e3a0221860cd3818c5ccabdab822a4b42ce1`
+matched the full readback. The device did **not** return; the user observed a
+logo reboot loop. No SWEET-ENTRY record. Recovery: the user entered fastboot;
+`fastboot flash boot_a backup/boot_a-stock-trim.img` (`fe6e8fbf...`) OKAY,
+Recovery online in 26 s, then the full 67,108,864-byte original was written
+and the on-device SHA256 verified as `2931647a...`. (One `adb push` dropped
+mid-copy and left `d86975b2...`; re-pushing and checking the file hash on the
+device before `dd` fixed it. Always verify `/tmp` and the partition.)
+
+A miss at `0x74e86c4` means one of `ufs_take_over_host()`, the TURs,
+`ufs_find_partition()` (GPT), or the devfs/bdevsw registration failed and
+`IOFindBSDRoot` panicked. It does **not** yet say which. In the 0084 build the
+first TUR `bl ufs_scsi` is at VA `0xfffffe00074e83b4`; reaching it proves the
+inlined `ufs_take_over_host()` succeeded. The likely early gates are CAP bit
+24 (64AS) with DMA above 4 GiB, HCE bit 0 / HCS DP+UTRLRDY, or an
+outstanding UTRLDBR.
+
+**New probe feature (commit `deaa731`): read-only UFSHCI snapshot.**
+`tools/mkentryprobe.py --ufs-regs` (levels `el1-xnu`/`el1-load`) calls
+`entryprobe_ufs_snapshot()` before the XNU jump and encodes eight registers
+into fields the EL1-XNU record does not otherwise use:
+`gicd = CAP<<32|VER`, `vtimer = HCS<<32|HCE`,
+`fb = UTRLBAU<<32|UTRLBA`, `dtb = UTRLDBR<<32|UTRLRSR`. CAP bit 24 is 64AS.
+No register is written. The function was checked in the built ELF
+(`ldr` from one base at offsets 0, 8, 0x30, 0x34, 0x50, 0x54, 0x58, 0x60,
+then the four `field()` calls at banner offsets 0x103/0x11b/0x12f/0x6a).
+45 tools tests pass (one new validation test).
+
+**Prepared, not flashed (safe snapshot):**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-regs.img`,
+26,562,560 B, SHA256
+`ba1ed1c41c5ae2052d2fb2a7a7bf0e78e28f2104a8bf2c06601ebae2173797b6`;
+level `el1-load` (copies the payload, never jumps to XNU), `--ufs-regs`,
+payload `matisse-xnu-0084-ufs-rtcfast.payload` SHA256
+`755ae110f814e67245ea8d1f1c0b7694e65ca8b312e5316db7a39b5d8b4a1478`.
+It must return to stock Linux in the same boot regardless of UFS state.
+Predicted written partition
+`75c514ba0f382b96596f386a8245b06d8fec3fcb5700f136144392582a61309c`.
+
+**Prepared, not flashed (takeover checkpoint):**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-takeover-brk.img`,
+26,562,560 B, SHA256
+`6e0eb654887b9b7a1e310579c9a24765a4ce9c9c541bb290dc8ceffe18507fd5`;
+payload SHA256 `de5d62c6d1bb38a845151d0b9b9a182f0a4e9c9c93b8402388999b4bb9f3317c`;
+rtcfast + `--ufs-regs`, BRK at VA `0xfffffe00074e83b4` (payload offset
+`0x4e47a4`, PA `0x1014e83b4`), replacing the first TUR `bl ufs_scsi`
+(`0x940000f7`). A hit proves host takeover succeeded and also carries the
+pre-XNU register snapshot. Predicted written partition
+`789468272a2e190ec69a762b185c8a47834124510f8e3d2bf79af90b249e25b7`.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified after restore). Each `boot_a` write still needs
