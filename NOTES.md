@@ -1053,6 +1053,22 @@ next test is the same error checkpoint with `--ufs-init`.
 predicted `989b55d7...`. x0: 0 rootdev success; 0x810x-0x830x device-init
 failures (SET/READ/poll); 0x4xx TUR status; 0x2xx OCS.
 
+**STOPPED 2026-10-24 at user request.** Device is in Recovery;
+`boot_a` verified `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+No test image is flashed. User's uncommitted `shim/build.sh`/`shim/shim.c`
+were not touched; the temporary shim variant was reverted.
+
+Last state: query UPIU bugs fixed in `0c37b5c`/`0fb9293` (header byte 1 =
+0x01 read / 0x81 write, fDeviceInit flag IDN 0x01, value at response byte
+20, read-first + SET/poll). CI kernel `21ceb868` (run 39985645667) with
+checkpoint `0983addf` still logo-reboots before the checkpoint, as did the
+SET-first kernel `61be134c`. The hang is therefore in the new device-init
+queries (shim pre-init and/or driver SET), not proven to be link/PHY.
+Next (offline first): isolate with an `el1-load --ufs-init` image that
+records the shim's `ufs_test_info[5]` and does NOT run device_init, then
+add only READ_FLAG, then SET_FLAG. Do not resume device tests without a
+concrete isolation plan.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
