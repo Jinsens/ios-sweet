@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS SCSI times out; low-memory selftest prepared <<<
+## >>> ACTIVE 2026-10-23: UFS CT bug found; CT=0 selftest prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -190,34 +190,49 @@ timeout budget. The host's own CAP/HCS/HCE/UTRL state was takeover-ready
 (previous snapshot), so the remaining differences are the kernel's
 **above-4-GiB UTRL/DMA address** and any MTK-specific host handoff.
 
-**Prepared, not flashed: shim low-memory UFS selftest.**
+**HARDWARE RESULT (2026-10-23): low-memory selftest processed; OCS 5.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest.img`,
+26,566,656 B, written partition
+`a8698232a87020f7a6fbbd7dd5b48b7d79c45a8f41ee1fc80c79cce05790b9aa`;
+device returned in 34.7 s and `boot_a` was restored/verified. Record:
+
+```
+esr=0000000000000005  -> test stage 5 (GPT scan returned)
+x0=0000000000000001   -> READ CAPACITY rc 1 (timeout)
+x16=0000000000000500  -> OCS 5, SCSI status 0
+gicd=3587071f00000200 vtimer=0000010f00000001
+fb=0000000051254400   dtb=0000000000000001
+```
+
+The low-memory UTRL **is** processed (the doorbell clears), unlike the
+kernel's above-4-GiB list. `x16` is stale from the last completed TUR
+because a timed-out `scsi()` does not update OCS/status; OCS 5 is
+`OCS_PEER_COMM_FAILURE` in Linux `include/ufs/ufshci.h` (not "invalid
+header"). `spsr` (last LBA) is 0. `far` (block size) is overwritten by
+`loader_boot`'s `diag_stage`; use only `esr`/`x0`/`x16`/`spsr` for the test.
+
+**Root cause found: SCSI CDBs were submitted as native UFS commands.**
+Linux `include/ufs/ufshci.h` defines `UTP_CMD_TYPE_SCSI = 0x0`,
+`UTP_CMD_TYPE_UFS = 0x1`, `UTP_CMD_TYPE_DEV_MANAGE = 0x2`. Both
+`shim/ufs.c` and `bsd/dev/sweet_ufs.c` set `dw0 |= 1 << 28` (**CT=1**,
+native UFS) for a SCSI CDB UPIU. The sweet/Qualcomm host tolerated it; the
+MTK host fails the transfer with `OCS_PEER_COMM_FAILURE` (5). Commit
+`fd8d369` fixes the shim (`dw0 = (dd << 25) | (1 << 24)`); the kernel needs
+the same one-line change plus a CI rebuild (patch 0086, not yet written).
+
+**Prepared, not flashed: CT=0 shim selftest.**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0.img`,
 26,566,656 B, SHA256
-`823cd38fe71d04bef8e9b1cfac6729d6d8504ea7e2d9171b8dbab16b6ebf94d3`;
-payload `matisse-xnu-0084-ufs-rtcfast.payload` SHA256
-`755ae110f814e67245ea8d1f1c0b7694e65ca8b312e5316db7a39b5d8b4a1478`;
-level `el1-load`, `--ufs-regs --ufs-test`, predicted written partition
-`a8698232a87020f7a6fbbd7dd5b48b7d79c45a8f41ee1fc80c79cce05790b9aa`.
-`test_ufs()` now claims the host using the probe's **low-memory** static
-UTRL/UCD and runs TUR -> READ CAPACITY -> GPT scan, then restores LK's
-UTRLBA/BAU/RSR. It records `ufs_test_stage/info[]` into the free record
-fields (`x0`, `x16`, `spsr`, `far`, `esr`); the pre-test snapshot stays in
-`gicd`/`vtimer`/`fb`/`dtb`. Decode:
+`fb2e4338f77d00991210a672742227c436f9a60a7c265af34c52921fbaacd9dd`;
+same payload/level/options, predicted written partition
+`8f829d297c938a771577f84327e6115f1083e76423e1a4605fd74e6d600fc9ee`.
+If TUR and READ CAPACITY return rc 0 with this image, the CT fix is
+proven and the remaining kernel timeout is the above-4-GiB UTRL/UCD.
 
-- `esr` = stage: 1 ready, 2 list claimed, 3 TUR returned, 4 READ CAPACITY
-  returned, 5 GPT scan returned.
-- stage 2: `x0` claim rc (0 ok, 1 not ready, 2 readback mismatch),
-  `x16`=UTRLBA, `spsr`=UTRLBAU, `far`=UTRLRSR.
-- stage 3: `x0` TUR rc (0 ok, 1 timeout, 2 OCS set, 3 not a RESPONSE UPIU,
-  4 SCSI status), `x16` = OCS<<8 | status.
-- stage 4: `x0` READ CAPACITY rc, `x16` = OCS<<8 | status,
-  `spsr` = last LBA, `far` = block size.
-
-If the low-memory test gets TUR rc 0, the kernel's above-4-GiB UTRL/DMA is
-the failing difference (fix: allocate the UTRL/UCD/bounce below 4 GiB, or
-re-enable HCE after programming UTRLBA). If it also times out, the MTK host
-stops processing commands after LK irrespective of address and needs the
-vendor host-reset/link-startup sequence.
+Decode (unchanged): `esr` = stage (1 ready, 2 claimed, 3 TUR, 4 READ
+CAPACITY, 5 GPT scan); stage 3/4 `x0` = rc, `x16` = OCS<<8 | status;
+stage 4 `spsr` = last LBA. rc: 0 ok, 1 timeout, 2 OCS, 3 no RESPONSE UPIU,
+4 SCSI status.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
