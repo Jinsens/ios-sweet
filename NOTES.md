@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS clock-gate write hung device; RESTORE PENDING <<<
+## >>> ACTIVE 2026-10-23: UFS clock-gate write hung; device restored <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -410,7 +410,7 @@ HCE sequence.
 SHA256 `6b21ef53...`, written partition `b19b53dc...` (verified). After
 `adb reboot recovery` the device never returned within 100 s; it is stuck
 at the logo/reboot loop, `adb` and `fastboot` both see nothing.
-`boot_a` **still contains the v11 image** and the full backup was not
+`boot_a` **contained the v11 image** and the full backup was not
 restored. The last action was `mtk_clocks_on()` clearing pdn bits in the
 topckgen `CLK_CFG_*_CLR` registers (UFS clocks); that write is the prime
 suspect (the clock/power-domain handshake via the CLR/UPDATE registers
@@ -418,7 +418,12 @@ is not safe while the UFS power domain is in its handoff state). The shim
 function is now **read-only** (commit after `ffebf76`) so no future build
 repeats the write.
 
-**Recovery (needs the user physically):**
+**Recovered 2026-10-23:** user entered fastboot; `fastboot flash boot_a
+backup/boot_a-stock-trim.img` (SHA `fe6e8fbf...`) OK, Recovery came back
+in 26.4 s, the full `boot_a-live-20261021.img` was pushed, `dd`-ed and
+the partition verified `2931647a...`. Device is in Recovery, slot `_a`.
+
+**Recovery steps (for reference):**
 1. Power+VolumeDown -> fastboot.
 2. `fastboot flash boot_a backup/boot_a-stock-trim.img`
    (20,873,216 B, SHA `fe6e8fbf...`).
