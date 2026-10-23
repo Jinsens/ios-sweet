@@ -936,6 +936,18 @@ block 0x40080000-0x40184000). Test-only: commit `9ee9d4b`; CI dispatched.
 If the low-DMA TUR gets status 2 (UA) or 0, the >4 GiB UCD/UTRL address is
 the failure; if unchanged, the UPIU/device state is.
 
+**Local kernel builds work.** Without Xcode, the CI archive + buildtree are
+enough: extract `kernel.development.sweet.a` (1098 objects), compile
+`sweet_ufs.c` with the CI compile flags rewired to the local buildtree,
+compile `xnu/libsa/nonlto.c`, stub the five `__firehose_*` symbols, and
+link with `clang++` + `linkarguments` + `libclang_rt.cc_kext.a` (CLT).
+`strip -S` gives a kernel whose `__TEXT_EXEC` base matches; only object
+placement after `sweet_ufs.o` shifts (local `_sweet_ufs_rootdev`
+0xfffffe00074e7090, caller `bl` 0x7a41c64, `cbnz` 0x7a41c68). No CTF.
+Local test image `entryprobe-el1-xnu-local-ufs-lowdma-query.img` SHA
+`f41d0b57...`, predicted `8f8ae8cf...`; kernel includes low DMA at
+0x40080000 + kernel QUERY init, shim pre-init, BRK at 0x7a41c68.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
