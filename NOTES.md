@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS link not hibernated; 4 wake strategies prepared <<<
+## >>> ACTIVE 2026-10-23: UFS link startup fails; MTK pre-link test prepared <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -281,24 +281,49 @@ low-memory, 4 KiB-aligned descriptors. (The kernel's own UTRL above 4 GiB
 is still a separate, unproven difference; it timed out rather than
 completing with OCS.)
 
-**Prepared, not flashed: four link-wake strategies in one selftest (v5).**
+**HARDWARE RESULT (2026-10-23): wake strategies fail; vendor pre-link needed.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v5.img`,
-26,566,656 B, SHA256
-`5f023d2915c87eed4550c47cd122c1a4bb8fb1e82623aea5c85e9acccb5c438e`;
+SHA256 `5f023d29...`, written partition `2dac484c...`; returned in 31.7 s,
+`boot_a` restored/verified. Record:
+
+```
+gicd=0fff000000000702 -> strategy 0 baseline: TUR rc 2, OCS 7, HCS 0xf
+vtimer=0f01000000000702 -> strategy 1 hibernate exit: OCS 7, UIC result 1
+fb=0f01000000000702     -> strategy 2 DME_LINK_STARTUP: OCS 7, UIC result 1
+dtb=00000000000000fe    -> strategy 3 HCE reset failed; HCS after = 0x8
+x0=0 x16=0x10f spsr=0 fault=0x8
+```
+
+A bare `DME_LINK_STARTUP` (0x16) fails with UIC result 1, and toggling
+HCE alone leaves HCS 0x8 (device not present / lists not ready).
+`/proc/iomem` on Recovery gives `Kernel code 0x40200000`; the probe prefix
+is 2 MiB below it, so the shim UTRL was at PA 0x40020000: genuinely
+low-memory and 4 KiB aligned. The shim's OCS 7 is therefore not the
+above-4-GiB issue (that remains specific to the XNU driver's timeout).
+
+**Vendor sequence found (MiCode rubens-s-oss, `drivers/scsi/ufs/ufs-mediatek.c`).**
+MediaTek's `pre_link` runs before every `DME_LINK_STARTUP`:
+`DME_SET VS_UNIPROPOWERDOWNCONTROL (0xD0A8) = 0`, then clears bit 6 of
+`VS_SAVEPOWERCONTROL (0xD0A6)` (disable deep stall); `hce_enable_notify`
+also asserts the UniPro/HCI/crypto resets and sets
+`REG_UFS_XOUFS_CTRL (0x140) |= 0x80`. A bare link startup without this
+fails, matching the result.
+
+**Prepared, not flashed: MTK pre-link + link startup (v6).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v6.img`,
+26,570,752 B, SHA256
+`0d367d5a81a047d3b8924467f34c29ca781803ca597af386f11d62160700431b`;
 predicted written partition
-`2dac484c1527fd0538c335186e51a46fe5213f161bd509050fa8da9d4bc0433b`.
-Commit `dc66c02` runs one TUR after each of: 0 baseline; 1
-`DME_HIBERNATE_EXIT` (0x18); 2 `DME_LINK_STARTUP` (0x16); 3 UFSHCI host
-enable cycle (UTRLRSR=0, HCE 0->1, wait DP|UTRLRDY|UCRDY) followed by
-`DME_LINK_STARTUP`; re-claims the list after any UIC/link change. Each
-strategy result is packed `rc | OCS<<8 | status<<16 | resp0<<24 |
-resp6<<32 | resp7<<40 | UIC result<<48 | post-HCS low nibble<<56`.
-Markers: `rc=0xfe` host reset failed, `rc=0xfd` list re-claim failed.
-Record map: `gicd`/`vtimer`/`fb`/`dtb` = strategies 0-3,
-`x0`=IS before, `x16`=HCS before, `spsr`=IS after, `fault`=HCS after,
-`esr`=5. If any strategy gets TUR rc=0, port that sequence to
-`bsd/dev/sweet_ufs.c`; if 3 fails, the MTK vendor host needs its own
-reset/link-startup sequence (compare the vendor `ufs-mediatek.c`).
+`18c9a00c4f5c45c0cf6502c1cc260ceced9f9d0789ec157710a5849877bc5706`.
+Commit `b64152a` adds DME_SET/DME_GET UIC helpers (500 ms timeout) and
+MTK pre-link. Strategies: 0 baseline, 1 hibernate exit, 2 MTK pre-link +
+`DME_LINK_STARTUP`, 3 MTK pre-link + `DME_ENABLE` (0x12) +
+`DME_LINK_STARTUP`. Record packing unchanged (`gicd`..`dtb` = strategies
+0-3; `x0`=IS before, `x16`=HCS before, `spsr`=IS after, `fault`=HCS
+after, `esr`=5). A strategy with TUR rc 0 and UIC result 0 identifies the
+sequence to port to `bsd/dev/sweet_ufs.c`. If both 2 and 3 still fail,
+the full vendor `ufs_mtk_host_reset` (UniPro/HCI/crypto reset controls +
+XOUFS bit) is the next step.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
