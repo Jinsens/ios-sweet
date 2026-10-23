@@ -1047,6 +1047,12 @@ the device rejected every query (response UPIU byte 6 = 0xfe). Also:
 Fixed in the kernel and the shim pre-init. CI dispatched for `0c37b5c`;
 next test is the same error checkpoint with `--ufs-init`.
 
+**Prepared: query-fix checkpoint.** Kernel `ci-39980826816` SHA
+`61be134c...`; caller `0x7a42b44`, BRK `0x7a42b48`. Image
+`entryprobe-el1-xnu-queryfix-ufs-preinit.img` SHA `8606be22...`,
+predicted `989b55d7...`. x0: 0 rootdev success; 0x810x-0x830x device-init
+failures (SET/READ/poll); 0x4xx TUR status; 0x2xx OCS.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
