@@ -17,6 +17,7 @@
 #define REG_CAP		0x00
 #define REG_VER		0x08
 #define REG_IS		0x20
+#define REG_XOUFS_CTRL	0x140
 #define REG_UIC_CMD	0x90
 #define REG_UIC_ARG1	0x94
 #define REG_UIC_ARG2	0x98
@@ -43,6 +44,16 @@ static uint64_t ufs_base(void)
 
 static inline uint32_t ufs_rd(uint32_t off) { return *(volatile uint32_t *)(ufs_base() + off); }
 static inline void ufs_wr(uint32_t off, uint32_t v) { *(volatile uint32_t *)(ufs_base() + off) = v; }
+
+/* ti,syscon-reset write: change only the masked bits (like regmap_write_bits). */
+static void
+mmio_bits(uintptr_t base, uint32_t off, uint32_t mask, uint32_t value)
+{
+	volatile uint32_t *p = (volatile uint32_t *)(base + off);
+	uint32_t v = *p;
+	*p = (v & ~mask) | (value & mask);
+	__asm__ volatile("dsb sy" ::: "memory");
+}
 
 /* UTP transfer request descriptor (32 bytes). */
 struct utrd {
@@ -378,6 +389,43 @@ mtk_pre_link(void)
 	return r;
 }
 
+/* MediaTek full host reset (vendor ufs_mtk_host_reset + hce_enable_notify).
+ * The reset controller is ti,syscon-reset on ufs_ao_cfg (UFS base + 0x8000)
+ * and ufs_pdn_cfg (+0xC000); live FDT ti,reset-bits:
+ *   unipro (ao 0): assert 0x44 bit 1, deassert 0x48 bit 1
+ *   crypto (pdn 0): assert 0x44 bit 0, deassert 0x48 bit 0
+ *   hci    (pdn 1): assert 0x44 bit 1, deassert 0x48 bit 1
+ * Then XOUFS_CTRL (0x140) |= 0x80 and the standard HCE enable cycle. */
+static int
+mtk_host_reset(void)
+{
+	uintptr_t ao = ufs_base() + 0x8000, pdn = ufs_base() + 0xc000;
+	uint64_t start, freq = tick_freq();
+	const uint32_t ready = HCS_DP | HCS_UTRLRDY | HCS_UCRDY;
+
+	mmio_bits(pdn, 0x44, 1u << 1, 1u << 1);
+	mmio_bits(pdn, 0x44, 1u << 0, 1u << 0);
+	mmio_bits(ao, 0x44, 1u << 1, 1u << 1);
+	start = ticks();
+	while (ticks() - start < freq / 10000)	/* ~100 us */
+		__asm__ volatile("yield");
+	mmio_bits(ao, 0x48, 1u << 1, 1u << 1);
+	mmio_bits(pdn, 0x48, 1u << 0, 1u << 0);
+	mmio_bits(pdn, 0x48, 1u << 1, 1u << 1);
+
+	ufs_wr(REG_XOUFS_CTRL, ufs_rd(REG_XOUFS_CTRL) | 0x80);
+	ufs_wr(REG_UTRLRSR, 0);
+	ufs_wr(REG_HCE, 0);
+	start = ticks();
+	while ((ufs_rd(REG_HCE) & 1) && ticks() - start < freq / 100)
+		__asm__ volatile("yield");
+	ufs_wr(REG_HCE, 1);
+	start = ticks();
+	while ((ufs_rd(REG_HCS) & ready) != ready && ticks() - start < freq / 10)
+		__asm__ volatile("yield");
+	return (ufs_rd(REG_HCS) & ready) == ready ? 0 : 1;
+}
+
 void test_ufs(void)
 {
 	uint32_t orig_ba = ufs_rd(REG_UTRLBA), orig_bau = ufs_rd(REG_UTRLBAU);
@@ -429,16 +477,18 @@ void test_ufs(void)
 	 * UIC result<<48 | post-HCS low nibble<<56.
 	 *   0 none (baseline), 1 DME_HIBERNATE_EXIT,
 	 *   2 MTK pre-link + DME_LINK_STARTUP,
-	 *   3 MTK pre-link + DME_ENABLE + DME_LINK_STARTUP. */
+	 *   3 full MTK host reset + HCE cycle + pre-link + link startup. */
 	for (int s = 0; s < 4; s++) {
 		uint32_t ur = 0xff;
 		if (s == 1) {
 			ur = uic_cmd(0x18);		/* DME_HIBERNATE_EXIT */
 			claim_host();
 		} else if (s == 2 || s == 3) {
+			if (s == 3 && mtk_host_reset()) {
+				ufs_test_info[s] = 0xfe;
+				continue;
+			}
 			ur = mtk_pre_link();
-			if (s == 3)
-				uic_cmd(0x12);		/* DME_ENABLE */
 			uint32_t ls = uic_cmd(0x16);	/* DME_LINK_STARTUP */
 			if (ls != 0xff)
 				ur = ls;		/* record link startup result */
