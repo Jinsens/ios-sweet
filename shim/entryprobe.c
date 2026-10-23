@@ -181,9 +181,8 @@ entryprobe_ufs_init(char *banner)
 	field(banner, ENTRY_STAGE, 0x79);
 	field(banner, ENTRY_ESR, ufs_test_stage);
 	field(banner, ENTRY_FAR, ufs_test_info[0]);
-	field(banner, ENTRY_X0, ufs_test_info[1]);
-	field(banner, ENTRY_X16, ufs_test_info[2]);
-	field(banner, ENTRY_PC, ufs_test_info[3]);
+	field(banner, ENTRY_X0, ufs_test_info[3]);	/* post-sense TUR */
+	field(banner, ENTRY_X16, ufs_test_info[1]);	/* high UTRL readback */
 }
 #endif
 

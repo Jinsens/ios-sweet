@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS FULLY WORKS in shim; XNU patch 0086 in CI <<<
+## >>> ACTIVE 2026-10-23: UFS works in shim; XNU driver EIO; low-RAM hangs <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -714,6 +714,24 @@ rebuilt with the low ADT and the same cmdline. Image flags use
 UTRLBAU is 0 and the UA was cleared by the shim; the error checkpoint
 should reach x0=0. Risk: 248 MiB may be below XNU's minimum, and the
 TTBR0 offset is inferred, so the checkpoint may miss.
+
+**HARDWARE FAILURE (2026-10-23): low-RAM XNU hangs before the checkpoint.**
+Image `a91ca8eb...` (partition `6408aa5a...`) never returned in 120 s;
+logo reboot loop. Recovery: fastboot trim `fe6e8fbf...`, Recovery in
+26.5 s, full `2931647a...` restored/verified. So the 248 MiB low window
+(0x80000000-0x8f800000) is not enough for XNU's bootstrap, or the
+inferred bootstrap TTBR0 0x8117c000 / clean limit is wrong. Do not
+repeat this image. The low-bank carve-outs (consys at 0x8f800000, md at
+0xd0000000, fb 0xfcb3f000, ...) mean a larger low window needs explicit
+reserved-memory nodes in the ADT.
+
+**Open question: does the shim's UA clear work?** The XNU driver's first
+TUR after the pre-init still returns EIO. Test at el1-load with
+`--ufs-init`: banner x0 = `info[3]` = second TUR packed
+`rc | OCS<<8 | status<<16 | resp0<<24`; x16 = high UTRL readback. If
+status is 0, the UA is clear and the XNU EIO is a high-DMA/command issue;
+if status 2, the device still reports unit attention (needs a different
+sense/clear or the driver's retry logic).
 
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
