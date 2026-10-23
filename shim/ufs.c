@@ -398,28 +398,34 @@ refclk_on(void)
 	return v;
 }
 
-/* TopCKGEN gates for the five UFS clocks (mt6983-clk.h IDs 247/174/175/
- * 176/192). Read-only: clearing a pdn bit hung the device on 2026-10-23
- * (v11 image 6b21ef53), so this only records which gates are down.
- * Returns [15:8] = gated mask, [7:0] = same mask (kept for decode
- * compatibility); bits 0:ufs_hd_haxi 1:aes_ufsfde 2:ufs 3:ufs_mbist
- * 4:ufs_hf_fmem. */
-static uint32_t
-mtk_clocks_on(void)
+/* MediaTek UFS device reset via the secure monitor:
+ * arm_smccc_smc(MTK_SIP_UFS_CONTROL=0x82000276, UFS_MTK_SIP_DEVICE_RESET=2,
+ * high). The reset line is active low: 0 asserts, 1 releases. Linux holds
+ * it low >=10 us and waits 10-15 ms after release. Returns the SMC a0. */
+static uint64_t
+smc3(uint64_t a0, uint64_t a1, uint64_t a2)
 {
-	uintptr_t tc = 0x10000000;	/* topckgen@10000000 */
-	static const struct { uint32_t cfg, mask; } g[] = {
-		{ 0x10, 1u << 23 },	/* ufs_hd_haxi  (CLK_CFG_0) */
-		{ 0xe0, 1u << 31 },	/* aes_ufsfde   (CLK_CFG_13) */
-		{ 0xf0, 1u << 7 },	/* ufs          (CLK_CFG_14) */
-		{ 0xf0, 1u << 15 },	/* ufs_mbist    (CLK_CFG_14) */
-		{ 0x130, 1u << 15 },	/* ufs_hf_fmem  (CLK_CFG_18) */
-	};
-	uint32_t masked = 0;
-	for (unsigned i = 0; i < sizeof(g) / sizeof(g[0]); i++)
-		if (ufs_rd(tc + g[i].cfg) & g[i].mask)
-			masked |= 1u << i;
-	return (masked << 8) | masked;
+	register uint64_t x0 asm("x0") = a0;
+	register uint64_t x1 asm("x1") = a1;
+	register uint64_t x2 asm("x2") = a2;
+	asm volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2)
+	    : : "x3", "x4", "x5", "x6", "x7", "memory");
+	return x0;
+}
+
+static uint32_t
+mtk_device_reset(void)
+{
+	uint64_t start, freq = tick_freq();
+	smc3(0x82000276u, 2, 0);
+	start = ticks();
+	while (ticks() - start < freq / 100000)	/* >=10 us */
+		__asm__ volatile("yield");
+	uint64_t r = smc3(0x82000276u, 2, 1);
+	start = ticks();
+	while (ticks() - start < freq / 100)	/* 10 ms */
+		__asm__ volatile("yield");
+	return (uint32_t)r;
 }
 
 /* MediaTek pre-link: permit UniPro power down and disable deep stall. */
@@ -533,10 +539,10 @@ void test_ufs(void)
 	/* Try link wake strategies and one TUR after each. Result packing:
 	 * rc | OCS<<8 | status<<16 | resp0<<24 | resp6<<32 | resp7<<40 |
 	 * UIC result<<48 | post-HCS low nibble<<56.
-	 *   0 baseline, 1 clocks + refclk + pre-link + link startup,
-	 *   2 clocks + refclk + reset + refclk + pre-link + link startup,
-	 *   3 clocks + reset + pre-link + link startup. */
-	uint32_t refclk = 0, clk = mtk_clocks_on();
+	 *   0 baseline, 1 refclk + pre-link + link startup,
+	 *   2 refclk + host reset + refclk + pre-link + link startup,
+	 *   3 host reset + device reset (SMC) + refclk + pre-link + link. */
+	uint32_t refclk = 0, smc = 0;
 	for (int s = 0; s < 4; s++) {
 		uint32_t ur = 0xff;
 		if (s == 1) {
@@ -555,6 +561,8 @@ void test_ufs(void)
 				ufs_test_info[s] = 0xfe;
 				continue;
 			}
+			smc = mtk_device_reset();
+			refclk = refclk_on();
 			ur = link_start();
 		}
 		uint32_t ocs = 0, st = 0;
@@ -567,7 +575,7 @@ void test_ufs(void)
 		    (uint64_t)ufs_scsi_resp[7] << 40 |
 		    (uint64_t)ur << 48 | (uint64_t)(ufs_rd(REG_HCS) & 0xf) << 56;
 	}
-	ufs_test_info[6] = (uint64_t)refclk << 16 | clk;	/* clocks + refclk */
+	ufs_test_info[6] = (uint64_t)(smc & 0xffff) << 16 | refclk;  /* smc + refclk */
 	ufs_test_info[7] = ufs_rd(REG_HCS);
 
 	list_partitions();

@@ -452,6 +452,24 @@ the before/after masks in `spsr` bits [15:0] (bit per clock). `spsr`
 already on and the power-domain/regulator path is next; if a gate was
 set and the link now starts, the XNU port needs this clock step too.
 
+**Prepared, not flashed: UFS device reset via SMC (v13).**
+`research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v13.img`,
+26,570,752 B, SHA256
+`28f690d2ebc96efc0a63ba3ae93969c9b05ddcb7d1f2329874f7a72e94054798`;
+predicted written partition
+`948ee259fd4bc1a71af595c14ccb8a53f427a15df678e43f66cfaf0d01b2adb3`.
+Linux Recovery shows `ufs0` power domain **off** and the UFS controller
+suspended even while `ufs_hd_haxi_sel`/`ufs_hf_fmem_sel` clocks are on
+(`ufs_sel`/`ufs_mbist_sel`/`aes_ufsfde_sel` off). The vendor resets the
+**device** (not just the host) through the secure monitor:
+`arm_smccc_smc(MTK_SIP_UFS_CONTROL=0x82000276,
+UFS_MTK_SIP_DEVICE_RESET=BIT(1)=2, high)`, holding the active-low line
+low >=10 us then releasing and waiting 10-15 ms
+(`ufs_mtk_device_reset`). v13 strategy 3: host reset -> SMC device reset
+(assert/release) -> refclk -> pre-link -> link startup. `spsr` bits
+[31:16] are the SMC a0 result, [1:0] the refclk ACK. A hang is possible
+if the monitor rejects the call; recovery is the trim-prefix path.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
