@@ -867,6 +867,17 @@ error BRK at 0x7a42888. Image `entryprobe-el1-xnu-hybrid4-ufs-error-brk.img`,
 SHA `bfa5505d...`, predicted `3b55186a...`. x0: 0x106 host reset,
 0x107 link startup, 0x108 not-ready, 0 success.
 
+**STAGE RESULT: x0=0x107 = link startup fails in XNU.** The UCRDY fix
+(host reset now passes) leaves `DME_LINK_STARTUP` failing. The shim runs
+the same sequence successfully at EL1 before XNU; the likely difference
+is that the kernel's `smc #0` is trapped/no-op (XNU/EL2 or monitor
+state), so the UFS device is never reset. Testing the same kernel with
+the shim `--ufs-init` (device reset + link before the jump):
+image `entryprobe-el1-xnu-hybrid4-ufs-preinit-error-brk.img`, SHA
+`b9413b49...`, predicted `1421a6f4...`. If the driver's link startup
+then succeeds, x0=5 (TUR/UA) or 0; if 0x107 again, the kernel's host
+reset itself breaks the link.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
