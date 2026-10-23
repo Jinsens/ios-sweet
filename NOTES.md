@@ -860,6 +860,13 @@ same function/caller VAs, rtcfast +0x3e0, error BRK. Image
 predicted partition `d6c6240a...`. x0: 0 success, 5 EIO (TUR/UA),
 6 ENXIO (link startup).
 
+**Prepared: stage-code hybrid checkpoint.** Kernel
+`xnu/out/ci-39961292229/kernel.development.sweet` SHA `cc87d449...`;
+caller moved +0x20 (0x7a42884); rtcfast at 0x79ad470/0x7a42270/0x7a422b4;
+error BRK at 0x7a42888. Image `entryprobe-el1-xnu-hybrid4-ufs-error-brk.img`,
+SHA `bfa5505d...`, predicted `3b55186a...`. x0: 0x106 host reset,
+0x107 link startup, 0x108 not-ready, 0 success.
+
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
 `mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
