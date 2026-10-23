@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS works in shim; XNU driver EIO; low-RAM hangs <<<
+## >>> ACTIVE 2026-10-23: UFS link/commands work in shim; XNU EIO remains <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -752,6 +752,33 @@ the first a0 in `ufs_test_info[4]`.
 predicted partition `d299b125...`. el1-load only; banner
 `x16`=first SMC a0 (0 = 0xc2 accepted), `x0`=second TUR
 (`0x21000000` = GOOD, `0x21020004` = still CHECK CONDITION).
+
+**HARDWARE RESULT (2026-10-23): SMC64 ID accepted; UA still persists.**
+SMC64 image `51f0be0a...` (partition `d299b125...`) returned in 30.7 s;
+banner `x16=0` = `0xc2000276` accepted (a0=0), `x0=0x21020004` = second
+TUR still OCS 0, **status 2 (CHECK CONDITION)**, RESPONSE UPIU 0x21.
+So the reset ID is fixed (the kernel patch 0086 already prefers 0xc2),
+but the device keeps reporting unit attention / not-ready after TUR ->
+REQUEST SENSE -> TUR. The sense command may itself be failing, or the
+device needs the vendor's QUERY/power-mode init (Linux runs NOP OUT,
+QUERY device/geometry/unit descriptors, and a power mode change before
+SCSI). This is a kernel-driver task, not a shim one.
+
+**Session status.** Shim UFS is proven end-to-end: link startup (host
+reset + SMC64 device reset + refclock + pre-link), NOP OUT, SCSI TUR with
+CT=1, RESPONSE UPIU 0x21, OCS 0. XNU's unpatched 0084 driver takes over
+the live link but its first TUR returns EIO; the low-RAM ADT test hung
+before its checkpoint (do not repeat). Device restored, `boot_a`
+`2931647a...` verified, slot `_a`, Recovery online.
+
+**Remaining work (needs CI or push access).** The GitHub credential on
+this Mac is `Jinsens`, which gets 403 on `dipa-studio/ios-sweet`; remote
+main does not contain our commits. Once `xnu/patches/0086` is on main,
+the CI build can test a kernel that (a) runs the MTK reset/link sequence
+itself and (b) implements the device init/UA handling (e.g., NOP OUT,
+QUERY, power mode, or a REQUEST SENSE that is known to work). A proper
+low-DMA path (reserved low region in the ADT or a low `max_pnum`
+allocation with low pages actually managed) is still unproven.
 
 **Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
 and the power-domain state (or find how LK leaves the link); the shim's
