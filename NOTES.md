@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-23: UFS link startup still fails; refclk test prepared <<<
+## >>> ACTIVE 2026-10-23: UFS link/PHY init is the remaining blocker <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
 67,108,864-byte `boot_a` was restored from
@@ -376,20 +376,43 @@ the M-PHY/regulators. Note `REG_UFS_MTK_HW_VER` is 0x2240, outside the ADT
 node's 0x1000 `reg` size (the live node is 0x2300); any driver access there
 needs a larger mapping.
 
-**Prepared, not flashed: ref-clock strategies (v10).**
+**HARDWARE RESULT (2026-10-23): ref clock is acked; link still fails.**
 `research/matisse/20261023-ufs/entryprobe-el1-ufs-selftest-ct0-v10.img`,
-26,570,752 B, SHA256
-`2f26cdb7c025b2c2565e6281f1086f72bef107d54367cb8fe8a445cde8e7fd70`;
-predicted written partition
-`9f02fdba5ac6738768b065e9f1fabe96a50547e421a07a16150150c0a54dae6d`.
-Commit `14eb628` adds `refclk_on()` (read 0x144, set REQUEST, wait for
-ACK) and strategies: 0 baseline; 1 refclk + pre-link + link startup;
-2 refclk + reset + refclk + pre-link + link startup; 3 reset + pre-link +
-link startup (no refclk request). `spsr` now records the final refclk
-control (`[1:0]==3` = requested+acked), `fault` records post-HCS. If
-strategy 2 succeeds, the remaining port to XNU is: CT=0, low DMA, syscon
-reset, XOUFS bit, HCE, pre-link, refclk, link startup. If refclk is
-already acked and 2 fails, the M-PHY/clock/regulator init is required.
+SHA256 `2f26cdb7...`, written partition `9f02fdba...`; returned in 33.7 s,
+`boot_a` restored/verified (`2931647a...`). Record:
+
+```
+gicd = 0x0fff000000000702  strategy 0 baseline: OCS 7, HCS 0xf
+vtimer=0x0f01000000000702 strategy 1 refclk + pre-link + link: OCS 7,
+                            UIC 1, HCS 0xf
+fb    =0x0801000000000001  strategy 2 refclk + reset + refclk + pre-link +
+                            link: rc 1 (timeout), OCS 0, UIC 1, HCS 0x8
+dtb   =0x0801000000000001  strategy 3 reset + pre-link + link (no refclk):
+                            rc 1, OCS 0, UIC 1, HCS 0x8
+spsr  =3                   refclk ctrl [1:0]=3: REQUEST set and ACK received
+fault =0x8                 post-HCS: UCRDY only
+```
+
+The reference clock handshake succeeds (the vendor's `setup_ref_clk`
+precondition is met), so the remaining missing piece is the **UniPro /
+M-PHY / link clock and power-domain init** that Linux performs at probe,
+not just the ref clock. `DME_LINK_STARTUP` returns UIC result 1 and raises
+`UIC_ERROR` even before any reset, so the link is not carrying commands
+at handoff; LK evidently leaves the link/PHY powered down or unconfigured.
+The `ufs_mtk_mphy_power_on` path is optional per DT (`phys` absent in the
+live FDT), which leaves `ufs_mtk_setup_clocks`/`setup_regulators` and the
+power-domain state as the suspects. Porting those needs the vendor clock
+gate/power-domain register map; they are not reachable by a simple UIC or
+HCE sequence.
+
+**Next action.** Port the vendor `ufs_mtk_setup_clocks`/`setup_regulators`
+and the power-domain state (or find how LK leaves the link); the shim's
+`mtk_host_reset` + `refclk_on` + pre-link sequence is correct but not
+sufficient. The kernel-side fixes already proven necessary: CT=0
+(`UTP_CMD_TYPE_SCSI`), low-DMA UTRL/UCD, syscon reset sequence, XOUFS bit
+0x80, HCE restart, pre-link MIB writes, refclk request. Do not patch the
+kernel until the link starts in the shim; the XNU init path will fail the
+same way.
 
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
