@@ -12,6 +12,16 @@ its char device, and returned success before the HFS mount is reached.
 Stock `boot_a` was restored immediately after and verified `2931647a...`.
 Log: `research/matisse/20261024-ufs-wdt/flash-0088-lunscan.log`.
 
+**Next blocker: `userdata` has no HFS volume.** `userdata` is `/dev/block/sdc86`
+(223,281,088 512-byte sectors = 114.3 GB) and its first bytes are
+high-entropy (Android metadata-encrypted filesystem; no `H+` at 1024, no
+`EFI`/`HFS` strings in the first 4 MiB). No `ios16-root-*.img`/`.simg` exists
+on this Mac (`/Volumes` scan found none; the old images lived on the Linux
+host at `/run/media/dipa/android/ios-sweet-ipsw/`). So a `rd=ufsroot0` boot
+would reach `vfs_mountroot` and fail to find HFS. Moving on needs either a
+minimal HFS+ test volume written into the start of `userdata` (destroys the
+Android userdata filesystem) or the real iOS root image copied over.
+
 **Device (verified after test 2): root ADB in Recovery, slot `_a`, `boot_a`
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.**
 Both probe boots were followed by a stock restore; the last one reflashed
