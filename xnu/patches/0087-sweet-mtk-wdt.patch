@@ -1,0 +1,59 @@
+diff --git a/iokit/Kernel/arm/SweetWatchdog.cpp b/iokit/Kernel/arm/SweetWatchdog.cpp
+index 8f53742..1123bad 100644
+--- a/iokit/Kernel/arm/SweetWatchdog.cpp
++++ b/iokit/Kernel/arm/SweetWatchdog.cpp
+@@ -22,8 +22,46 @@
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOMemoryDescriptor.h>
++#include <kern/thread.h>
+ #include <sys/proc.h>
+ 
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++/* mainline mt6895.dtsi watchdog@1c007000 (the older MTK blocks are at 0x10007000). */
++#define MTK_WDT_PA      0x1c007000UL
++#define MTK_WDT_MODE    0x00
++#define MTK_WDT_LENGTH  0x04
++#define MTK_WDT_RESTART 0x08
++#define MTK_WDT_STATUS  0x0c
++#define MTK_WDT_KEY     0x1971
++
++static volatile uint32_t *sweet_mtk_wdt;
++
++static void
++sweet_mtk_wdt_feed(void *arg __unused, wait_result_t result __unused)
++{
++	while (true) {
++		sweet_mtk_wdt[MTK_WDT_RESTART / 4] = MTK_WDT_KEY;
++		IOSleep(1000);
++	}
++}
++
++static void
++sweet_mtk_wdt_start(void)
++{
++	thread_t thread;
++
++	sweet_mtk_wdt = (volatile uint32_t *)ml_io_map(MTK_WDT_PA, 0x1000);
++	IOLog("SWEET WDT: MTK WDT mode=0x%08x length=0x%x status=0x%08x\n",
++	    sweet_mtk_wdt[MTK_WDT_MODE / 4], sweet_mtk_wdt[MTK_WDT_LENGTH / 4],
++	    sweet_mtk_wdt[MTK_WDT_STATUS / 4]);
++	if (kernel_thread_start(sweet_mtk_wdt_feed, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		IOLog("SWEET WDT: MTK WDT feed thread failed\n");
++	}
++}
++
+ class IOWatchdog : public IOService {
+ 	OSDeclareDefaultStructors(IOWatchdog);
+ 
+@@ -50,6 +88,7 @@ IOWatchdog::start(IOService *provider)
+ 	setProperty("IOPMUPrimary", 1ULL, 32);
+ 	registerService();
+ 	IOLog("SWEET WDT: IOWatchdog registered (accepts check-ins, never fires)\n");
++	sweet_mtk_wdt_start();
+ 	return true;
+ }
+ 

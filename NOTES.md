@@ -1,5 +1,48 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-24: 0086 SET-fix verified in binary; MTK WDT driver added <<<
+
+**Device (verified): Recovery, slot `_a`, `boot_a`
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.**
+No test image is flashed. The 0086 SET-fix probe
+(`entryprobe-el1-xnu-0086-setfix-ufs-preinit-error-brk.img`, SHA256
+`b988da3f...`, payload `b9ccd87d...`) hung at the logo with no banner and
+`boot_a` was restored/verified afterwards. Whether the relay, a kernel halt,
+or a reset caused the hang is unproven.
+
+**0086 build verified; the ufs_query arity question is closed.** CI run
+40101113289 (`9a19655`) built kernel `aa765f0d...` from the 7-argument
+`ufs_query` source, but both call sites pass constant
+`idn/index/selector/len` = 1/0/0/0, so clang specializes the static
+function: `_ufs_query` receives `w0=opcode, w1=write, x2=&value` and
+hardcodes cmd[13..15] = 1/0/0. The compiled `ufs_device_init` at
+`0xfffffe00074e8798` does SET_FLAG (0x06) then READ_FLAG (0x05) with a
+1000 x 1 ms poll, so the intended fix is in the binary. The "3-argument"
+reading was constant propagation, not a stale build. The exact patched
+source is in `xnu/out/ci-40101113289/xnu-buildtree/buildtree.tgz`
+(`xnu/bsd/dev/sweet_ufs.c:426/524`).
+
+**HFS registration checked; no fix needed.** xnu-8796.141.3 and hfs-627
+contain no `PEARL_HFS` or `NABU_HFS`; this build path is `SWEET_HFS`. The CI
+buildtree has `bsd/kern/bsd_init.c:700` = `#if SWEET_HFS ...
+sweet_hfs_register();`, `bsd/conf/files` lists the `optional sweet_hfs`
+objects, and the kernel contains `_sweet_hfs_register` (0x77d12e4),
+`_hfs_vfsops` (0x7220200) and `_hfs_init_zones` (0x77c3d44). HFS is
+registered before `vfs_mountroot`; do not add a second hook.
+
+**MTK watchdog driver (patch `0087-sweet-mtk-wdt.patch`).**
+`iokit/Kernel/arm/SweetWatchdog.cpp` now maps 0x1c007000
+(`mediatek,mt6983-wdt`, not the older 0x10007000), prints MODE/LENGTH/STATUS
+once at IOWatchdog start, and starts a kernel thread that writes RESTART
+(0x08) = 0x1971 every second. The service still does not enable the
+watchdog and keeps its no-op check-in/PMU behaviour. Tested with
+`patch -p1` against the post-0045 file; not compiled or booted yet (needs a
+CI run). 48 unit tests pass.
+
+**Next.** Commit and let CI build 0087; package a kernel payload without the
+0084 rtcfast words; prefer a self-returning `el1-load` probe before any
+further XNU boot. Each `boot_a` write still needs explicit approval.
+
 ## >>> ACTIVE 2026-10-23: UFS link/commands work in shim; XNU EIO remains <<<
 
 **Current device (verified): Recovery, root, slot `_a`.** The full
