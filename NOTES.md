@@ -1,16 +1,30 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-24: 0087 WDT kernel verified; UFS probe image ready, awaiting flash approval <<<
+## >>> ACTIVE 2026-10-24: 0087 probe works; rootdev returns ENXIO; branch bisect prepared <<<
 
-**Device (verified 14:47Z): root ADB in Recovery, slot `_a`, `boot_a`
+**Device (verified 15:16Z): root ADB in Recovery, slot `_a`, `boot_a`
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.**
-No test image is flashed. The 0086 SET-fix probe
-(`entryprobe-el1-xnu-0086-setfix-ufs-preinit-error-brk.img`, SHA256
-`b988da3f...`, payload `b9ccd87d...`) hung at the logo with no banner and
-`boot_a` was restored/verified afterwards. Whether the relay, a kernel halt,
-or a reset caused the hang is unproven; the observation window was only
-~198 s, while the BRK site is reachable only after the 30 s RTC wait and the
-up-to-10 x 60 s `waitForService` retries in `IOFindBSDRoot`.
+The 0087 probe was flashed and booted, then the stock `boot_a` was restored
+and verified (15:16Z). The 0086 probe (`b988da3f...`) had hung at the logo;
+with 0087's watchdog feed the same BRK is now reached and relayed in ~50 s,
+so that hang was most likely a watchdog reset during the XNU waits.
+
+**First hardware result: `sweet_ufs_rootdev` returns ENXIO (6).** Recovery
+dmesg banner (`ufs-0087-wdt-dmesg.txt`):
+`SWEET-ENTRY v1 el=1 fault=1 esr=f2005357 pc=fffffe0007a42b68 x0=6
+x16=0200000110000640 spsr=60400204`, stage `0x87` (loader checkpoint S7
+"jump", so payload and loader stages all completed). The EL1 BRK fired at the
+`cbnz w0` after `bl _sweet_ufs_rootdev` with `w0=6`. UFS/SCSI failures would
+return `0x2xx`..`0x5xx`, `0x8xxx` or ETIMEDOUT and a missing partition name
+returns ENOENT, so ENXIO narrows it to: missing `/sweet-ufs` node, the 64AS
+DMA check (ruled out: CAP was 0x3587071f, bit 24 set), the GPT signature /
+entry-table / bounds checks, or `bdevsw_add` / `cdevsw_add`.
+
+**Fastboot note.** After the aborted first attempts the bootloader's
+fastboot state was wedged (`fastboot flash` sat before "Sending",
+`usb_write failed e00002d9`); `fastboot reboot-bootloader` cleared it and the
+same command then flashed in 0.9 s. Stale `fastboot` processes must be killed
+before retrying.
 
 **0087 built and verified in CI.** Run 40103653699 (`1ef6f0e`) succeeded in
 13m34s. Kernel `xnu/out/ci-40103653699/xnu-kernel/kernel.development.sweet`,
@@ -31,17 +45,25 @@ loop at 0x...7c0.
 0x10117c000), `_IOFindBSDRoot` 0xfffffe0007a424b4, BRK site (the `cbnz w0`
 after `bl _sweet_ufs_rootdev`) 0xfffffe0007a42b68 = payload offset 0x5b66e0.
 
-**Probe image ready (NOT flashed).**
+**Probe image (flashed and tested).**
 `research/matisse/20261024-ufs-wdt/entryprobe-el1-xnu-0087-wdt-ufs-brk.img`,
 26,570,752 B, SHA256
 `76b55890cff1bb3cc6b8c28383ecaf1c680bb38f4588ac26f62550c8cac71546`; payload
-`8e75de9f...` (0087 kernel + BRK 0x350032c0→0xd42a6ae0). Built with the proven
-recipe: `backup/boot_a-stock.img`, `--xnu-vector-offset 0xb78`,
-`--xnu-high-vector-offset=-0x4488`, `--xnu-clean --xnu-clean-limit
-0x108000000`, `--xnu-restore-ttbr0 0x10117c000`, `--xnu-selective`,
-`--ufs-init --ufs-query full`, `--max-image-size 67108864`, NDK 28.2.13676358.
-Verified inside the gzip kernel: `SWEETAPP` at 48947200, payload SHA matches,
-BRK word at file offset 10743640.
+`8e75de9f...`. Recipe: `backup/boot_a-stock.img`,
+`--xnu-vector-offset 0xb78`, `--xnu-high-vector-offset=-0x4488`,
+`--xnu-clean --xnu-clean-limit 0x108000000`, `--xnu-restore-ttbr0
+0x10117c000`, `--xnu-selective`, `--ufs-init --ufs-query full`,
+`--max-image-size 67108864`, NDK 28.2.13676358.
+
+**Branch bisect prepared (NOT flashed).**
+`research/matisse/20261024-ufs-wdt/entryprobe-el1-xnu-0087-wdt-multibrk.img`,
+SHA256 `2d3b3e74...`, payload `ff750159...`: the same 0087 kernel with seven
+BRKs so one boot identifies the failing branch by `pc` in the banner.
+`sweet_ufs_init` is inlined into `sweet_ufs_rootdev`; the mapped sites are
+DT-node printf 0xfffffe00074e8260, DMA printf setup 0x...8330, GPT no
+signature 0x...88c4, GPT bad entries 0x...88f4, GPT last<first 0x...8a14,
+shared ENXIO tail (bdev/cdev registration) 0x...8264, and the post-call
+`cbnz` 0xfffffe0007a42b68 (hit means w0=0, success).
 
 **0086 build verified; the ufs_query arity question is closed.** CI run
 40101113289 (`9a19655`) built kernel `aa765f0d...` from the 7-argument
@@ -69,16 +91,17 @@ registered before `vfs_mountroot`; do not add a second hook.
 once at IOWatchdog start, and starts a kernel thread that writes RESTART
 (0x08) = 0x1971 every second. The service still does not enable the
 watchdog and keeps its no-op check-in/PMU behaviour. Compiled in run
-40103653699 (see above); not booted yet.
+40103653699 and booted in the 0087 probe; the probe relayed back to recovery,
+so the feed prevented the resets that killed the 0086 test.
 
-**Next.** Needs explicit approval to write `boot_a` for the prepared image.
-Plan: flash, watch >=6 min for the SWEET banner/BRK record (the WDT feed
-should stop the 31 s AP watchdog from resetting during the long
-`IOFindBSDRoot` waits), then restore
+**Next.** Needs explicit approval to write `boot_a` for the multi-BRK image.
+Plan: flash, boot recovery, read the banner `pc`/`x0`, restore
 `backup/recovery-20261021/boot_a-live-20261021.img` and verify
-`2931647a...`. If no banner appears even then, the block is independent of
-`_sweet_ufs_rootdev` returning, and the next probe should move the BRK
-earlier (e.g. at `IOFindBSDRoot` entry) to find how far boot gets.
+`2931647a...`. Then fix the identified branch: if it is the GPT signature,
+check the read path/cache coherence and the LBA (userdata should still hold
+the Android GPT); if it is the shared ENXIO tail, `x0` holds the failing
+`bdevsw_add`/`cdevsw_add` result. If the post-call BRK fires with `x0=0`,
+UFS is up and the next task is mounting HFS from it.
 
 ## >>> ACTIVE 2026-10-23: UFS link/commands work in shim; XNU EIO remains <<<
 
