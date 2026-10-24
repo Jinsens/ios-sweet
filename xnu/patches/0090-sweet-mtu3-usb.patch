@@ -1582,16 +1582,16 @@
 +	printf("SWEET MTU3: DEV_CAP 0x%08x PW_CTRL2 0x%08x PW_STS1 0x%08x PW_STS2 0x%08x OTG 0x%08x\n",
 +	    mt_ird(IPPC_DEV_CAP), mt_ird(IPPC_PW_CTRL2), mt_ird(IPPC_PW_STS1),
 +	    mt_ird(IPPC_PW_STS2), mt_ird(IPPC_OTG_STS));
-+	printf("SWEET MTU3: DEVICE_CONF 0x%08x EP0CSR 0x%08x MISC 0x%08x PM 0x%08x\n",
-+	    mt_rd(MAC_DEVICE_CONF), mt_rd(MAC_EP0CSR), mt_rd(MAC_MISC_CTRL),
-+	    mt_rd(MAC_POWER_MANAGEMENT));
-+	printf("SWEET MTU3: CAP ep0 %u tx %u rx %u bytes\n",
-+	    mt_rd(MAC_CAP_EP0FFSZ), mt_rd(MAC_CAP_EPNTXFFSZ), mt_rd(MAC_CAP_EPNRXFFSZ));
 +
 +	if (!mt_powered()) {
 +		printf("SWEET MTU3: refusing to touch the MAC until it is powered\n");
 +		return 1;
 +	}
++	printf("SWEET MTU3: DEVICE_CONF 0x%08x EP0CSR 0x%08x MISC 0x%08x PM 0x%08x\n",
++	    mt_rd(MAC_DEVICE_CONF), mt_rd(MAC_EP0CSR), mt_rd(MAC_MISC_CTRL),
++	    mt_rd(MAC_POWER_MANAGEMENT));
++	printf("SWEET MTU3: CAP ep0 %u tx %u rx %u bytes\n",
++	    mt_rd(MAC_CAP_EP0FFSZ), mt_rd(MAC_CAP_EPNTXFFSZ), mt_rd(MAC_CAP_EPNRXFFSZ));
 +	if (enabled < 2) {
 +		printf("SWEET MTU3: sweetusb=1, controller not started\n");
 +		return 1;
