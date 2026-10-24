@@ -135,6 +135,14 @@ class ProbeLayoutTests(unittest.TestCase):
                 mkentryprobe.build(str(path), str(Path(tmp) / 'out.img'), None,
                                    'entry', ufs_test=True)
 
+    def test_ufs_query_mode_requires_init(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'boot.img'
+            path.write_bytes(template())
+            with self.assertRaisesRegex(ValueError, 'UFS query mode'):
+                mkentryprobe.build(str(path), str(Path(tmp) / 'out.img'), None,
+                                   'entry', ufs_query='read')
+
 
 if __name__ == '__main__':
     unittest.main()

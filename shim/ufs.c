@@ -217,16 +217,24 @@ query_ex(uint8_t opcode, uint8_t idn, uint8_t index, uint8_t selector,
     void *buf, uint32_t len, int dir, uint32_t *value, uint32_t *status_out)
 {
 	static uint8_t tag;
+	uint32_t rc = 0, ocs = 0xff;
+	uint8_t function = dir == 2 ? 0x81 : 0x01;
 	zero(&utrl[0], sizeof(utrl[0]));
 	zero(&ucd, sizeof(ucd));
 
 	ucd.cmd[0] = 0x16;
-	ucd.cmd[1] = dir == 2 ? 0x81 : 0x01;	/* standard write/read request */
+	ucd.cmd[1] = function;
 	ucd.cmd[3] = ++tag;
 	ucd.cmd[12] = opcode;
 	ucd.cmd[13] = idn;
 	ucd.cmd[14] = index;
 	ucd.cmd[15] = selector;
+	if (dir == 2 && !len) {
+		ucd.cmd[20] = *value >> 24;
+		ucd.cmd[21] = *value >> 16;
+		ucd.cmd[22] = *value >> 8;
+		ucd.cmd[23] = *value;
+	}
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
 	uint32_t dd = len ? (dir == 1 ? 2u : dir == 2 ? 1u : 0u) : 0u;
@@ -251,40 +259,50 @@ query_ex(uint8_t opcode, uint8_t idn, uint8_t index, uint8_t selector,
 	while (ufs_rd(REG_UTRLDBR) & 1) {
 		if (ticks() - start > freq) {
 			ufs_wr(REG_UTRLCLR, ~1u);
-			return 1;
+			rc = 1;
+			goto out;
 		}
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
-	uint32_t ocs = utrl[0].dw2 & 0xff;
+	ocs = utrl[0].dw2 & 0xff;
 	*status_out = ucd.resp[7];
-	*value = be32(&ucd.resp[20]);	/* utp_upiu_query.value */
+	*value = be32(&ucd.resp[20]);
 	if (ocs)
-		return 2;
-	if (ucd.resp[0] != 0x36)
-		return 3;
-	return (ucd.resp[6] || ucd.resp[7]) ? 4 : 0;
+		rc = 2;
+	else if (ucd.resp[0] != 0x36)
+		rc = 3;
+	else if (ucd.resp[6] || ucd.resp[7])
+		rc = 4;
+out:
+	for (int i = 0; i < 4; i++)
+		ufs_test_info[7] = (ufs_test_info[7] << 8) | ucd.resp[12 + i];
+	for (int i = 0; i < 4; i++)
+		ufs_test_info[7] = (ufs_test_info[7] << 8) | ucd.resp[20 + i];
+	ufs_test_info[6] = (uint64_t)rc | (uint64_t)ocs << 8 |
+	    (uint64_t)ucd.resp[0] << 16 | (uint64_t)ucd.resp[6] << 24 |
+	    (uint64_t)ucd.resp[7] << 32 | (uint64_t)(*value & 0xff) << 40 |
+	    (uint64_t)opcode << 48 | (uint64_t)function << 56;
+	return rc;
 }
 
-/*
- * A UFS device asserts fDeviceInit after a reset; until the host writes the
- * Configuration Descriptor back, the device answers most SCSI commands with
- * a target failure. Linux does the same sequence in ufshcd_device_init().
- * Returns 0 when the device reports init complete (or was already init).
- */
 static uint32_t
-device_init(void)
+device_init(unsigned mode)
 {
 	uint32_t v = 0, st = 0;
 
-	/* Flag IDN 0x01; 0 means the device already finished init. */
-	uint32_t rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);	/* READ_FLAG */
+	if (mode == UFS_QUERY_NONE)
+		return 0;
+	uint32_t rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);
 	if (rc)
 		return 0x10 | rc;
-	if (!(v & 1))
+	if (mode == UFS_QUERY_READ || !(v & 1))
 		return 0;
-	rc = query_ex(0x06, 0x01, 0, 0, 0, 0, 2, &v, &st);		/* SET_FLAG */
+	v = 1;
+	rc = query_ex(0x06, 0x01, 0, 0, 0, 0, 2, &v, &st);
 	if (rc)
 		return 0x20 | rc;
+	if (mode == UFS_QUERY_SET)
+		return 0;
 	for (int i = 0; i < 1000; i++) {
 		v = 0;
 		rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);
@@ -624,10 +642,11 @@ link_start(void)
  * low-memory list and RSR=1 so XNU's takeover sees UTRLRDY; XNU replaces
  * the list before ringing any doorbell. */
 void
-init_ufs_link(void)
+init_ufs_link(unsigned query_mode)
 {
 	ufs_test_stage = 0;
-	ufs_test_info[0] = 0;
+	for (int i = 0; i < 8; i++)
+		ufs_test_info[i] = 0;
 	if (mtk_host_reset()) {
 		ufs_test_stage = 1;
 		return;
@@ -667,8 +686,7 @@ init_ufs_link(void)
 	ufs_test_info[0] = ((uint64_t)ufs_rd(REG_HCS) << 32) | ufs_rd(REG_UTRLRSR);
 	ufs_test_stage = 3;
 
-	/* Finish device init (fDeviceInit) before XNU's driver arrives. */
-	ufs_test_info[5] = device_init();
+	ufs_test_info[5] = device_init(query_mode);
 
 	/* The first command after a device reset returns CHECK CONDITION
 	 * (unit attention). XNU's polled driver retries the TUR without a

@@ -177,12 +177,15 @@ entryprobe_ufs_snapshot(char *banner)
 static void
 entryprobe_ufs_init(char *banner)
 {
-	init_ufs_link();
+	init_ufs_link(ENTRY_UFS_QUERY_MODE);
 	field(banner, ENTRY_STAGE, 0x79);
 	field(banner, ENTRY_ESR, ufs_test_stage);
 	field(banner, ENTRY_FAR, ufs_test_info[0]);
 	field(banner, ENTRY_X0, ufs_test_info[3]);	/* post-sense TUR */
 	field(banner, ENTRY_X16, ufs_test_info[4]);	/* first SMC a0 */
+	field(banner, ENTRY_DTB, ufs_test_info[5]);	/* device-init stage */
+	field(banner, ENTRY_GICD, ufs_test_info[6]);	/* last query result */
+	field(banner, ENTRY_VTIMER, ufs_test_info[7]);	/* query IDN/index/value */
 }
 #endif
 

@@ -4,10 +4,15 @@
 /* Probe the UFS host, print what it finds, and list the big GPT partitions. */
 void test_ufs(void);
 
+#define UFS_QUERY_FULL	0
+#define UFS_QUERY_NONE	1
+#define UFS_QUERY_READ	2
+#define UFS_QUERY_SET	3
+
 /* Reset host/device and start the UniPro link before the XNU jump. Leaves
  * the host claimed with the shim's UTRL so XNU's driver passes its
  * readiness check and then takes the list over. */
-void init_ufs_link(void);
+void init_ufs_link(unsigned query_mode);
 
 /*
  * test_ufs() progress for building a compact, banner-readable result.
