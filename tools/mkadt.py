@@ -156,24 +156,35 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         # with CSR_ALLOW_UNRESTRICTED_FS (vm_unix.c shared region checks).
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
-    # The SWEET SMP profile uses all eight cores of one homogeneous cluster;
-    # the kernel starts those not marked "running" via PSCI CPU_ON and uses
-    # cpus=N to select an initial prefix (N <= 8).
+    # The SWEET SMP profile uses all eight cores; matisse groups them into the
+    # ADT's two performance levels (E: A510, P: A710/X2) so XNU measures and
+    # reports both cache geometries. The kernel still runs one pset, so cores
+    # not marked "running" start via PSCI CPU_ON and cpus=N selects a prefix.
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
     cpu_nodes = []
     for core in range(cpu_count):
+        if board == 'matisse':
+            cluster_id = 0 if core < 4 else 1
+            cluster_type = ord('E') if core < 4 else ord('P')
+            # Private L2: A510 256K, A710 512K, X2 1M; DSU L3 is shared.
+            l2_cache_size = 0x40000 if core < 4 else (0x100000 if core == 7 else 0x80000)
+            cache_props = [('l2-cache-size', u32(l2_cache_size)),
+                           ('l3-cache-size', u32(0x800000))]
+        else:
+            cluster_id, cluster_type, cache_props = 0, 0, []
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
             ('compatible', cpu_compatible(core)),
             ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
-            ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
-            ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
-            ('die-cluster-id', u32(0)),
+            ('cluster-id', u32(cluster_id)),  # descriptive; see ml_parse_cpu_topology
+            ('cluster-type', u32(cluster_type)),  # E/P on matisse, SMP elsewhere
+            ('die-cluster-id', u32(cluster_id)),
             ('cluster-core-id', u32(core)),
             ('l2-cache-id', u32(core)),  # distinct per-core L2 nodes in live FDT
             ('l3-cache-id', u32(0)),     # shared L3
+            *cache_props,
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
             ('clock-frequency', u32(2000000000 if board == 'matisse' else

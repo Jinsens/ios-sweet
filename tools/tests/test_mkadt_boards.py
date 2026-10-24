@@ -31,11 +31,17 @@ class BoardProfileTests(unittest.TestCase):
         self.assertEqual(len(cpus), 8)
         self.assertEqual([words(c.prop('reg'), 32)[0] for c in cpus],
                          [core << 8 for core in range(8)])
+        l2_sizes = [0x40000] * 4 + [0x80000] * 3 + [0x100000]
         for core, cpu in enumerate(cpus):
             compat = cpu.prop('compatible')
             self.assertTrue(compat.startswith(b'qcom,kryo470\0'))
             self.assertIn(b'arm,cortex-a55\0' if core < 4 else b'arm,cortex-a78\0', compat)
             self.assertEqual(cpu.prop('state'), b'running\0' if core == 0 else b'stopped\0')
+            self.assertEqual(words(cpu.prop('cluster-id'), 32), (0 if core < 4 else 1,))
+            self.assertEqual(words(cpu.prop('cluster-type'), 32),
+                             (ord('E') if core < 4 else ord('P'),))
+            self.assertEqual(words(cpu.prop('l2-cache-size'), 32), (l2_sizes[core],))
+            self.assertEqual(words(cpu.prop('l3-cache-size'), 32), (0x800000,))
         self.assertEqual(words(cpus[0].prop('timebase-frequency'), 32), (13000000,))
         gic = child(child(root, 'arm-io'), 'gic')
         self.assertEqual(words(gic.prop('virtual-timer-intid'), 32), (27,))
@@ -84,7 +90,12 @@ class BoardProfileTests(unittest.TestCase):
 
     def test_sweet_defaults_unchanged(self):
         root = self.build()
-        self.assertEqual(len(child(root, 'cpus').children), 8)
+        cpus = child(root, 'cpus').children
+        self.assertEqual(len(cpus), 8)
+        self.assertEqual(words(cpus[0].prop('cluster-type'), 32), (0,))
+        self.assertEqual(words(cpus[0].prop('cluster-id'), 32), (0,))
+        for prop in ('l2-cache-size', 'l3-cache-size'):
+            self.assertNotIn(prop, [name for name, _, _ in cpus[0].props])
         self.assertEqual(words(child(root, 'sweet-ufs').prop('reg')), (0x1d84000, 0x3000))
         gic = child(child(root, 'arm-io'), 'gic')
         self.assertEqual(words(gic.prop('virtual-timer-intid'), 32), (19,))

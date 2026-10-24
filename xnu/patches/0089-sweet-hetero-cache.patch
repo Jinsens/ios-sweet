@@ -1,0 +1,171 @@
+--- a/osfmk/arm/cpuid.c
++++ b/osfmk/arm/cpuid.c
+@@ -298,12 +298,31 @@
+ 	cluster_type_t cluster_type = ml_get_topology_info()->cpus[ml_get_cpu_number_local()].cluster_type;
+ 	uint8_t prev_cpuid_cache_info_bitmap = os_atomic_or_orig(&cpuid_cache_info_bitmap,
+ 	    (uint8_t)(1 << cluster_type), acq_rel);
++
++	cache_info_t *cpuid_cache_info_p = &cpuid_cache_info[cluster_type];
++
+ 	if (prev_cpuid_cache_info_bitmap & (1 << cluster_type)) {
++#if defined(SWEET)
++		/*
++		 * One cluster type can contain cores with different private L2
++		 * sizes (A710 512K, X2 1M), so sample every core and keep the
++		 * largest for hw.perflevel reporting. The L3 is measured once.
++		 */
++		arm_cache_clidr_info.value = machine_read_clidr();
++		if ((arm_cache_clidr_info.bits.Ctype2 == 0x4) ||
++		    (arm_cache_clidr_info.bits.Ctype2 == 0x2) ||
++		    (arm_cache_clidr_info.bits.Ctype3 == 0x4)) {
++			machine_write_csselr(CSSELR_L2, CSSELR_DATA_UNIFIED);
++			arm_cache_ccsidr_info.value = machine_read_ccsidr();
++			uint32_t linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
++			uint32_t size = (arm_cache_ccsidr_info.bits.NumSets + 1) * linesz *
++			    (arm_cache_ccsidr_info.bits.Assoc + 1);
++			os_atomic_max(&cpuid_cache_info_p->c_priv_l2size, size, relaxed);
++		}
++#endif /* SWEET */
+ 		return;
+ 	}
+ 
+-	cache_info_t *cpuid_cache_info_p = &cpuid_cache_info[cluster_type];
+-
+ 	arm_cache_clidr_info.value = machine_read_clidr();
+ 
+ 	/*
+@@ -350,7 +369,17 @@
+ 
+ 	if ((arm_cache_clidr_info.bits.Ctype3 == 0x4) ||
+ 	    (arm_cache_clidr_info.bits.Ctype2 == 0x4) || (arm_cache_clidr_info.bits.Ctype2 == 0x2)) {
++		uint32_t linesz, assoc;
++
+ 		if (arm_cache_clidr_info.bits.Ctype3 == 0x4) {
++			/* Sample the private L2 before selecting the L3 (LLC). */
++			machine_write_csselr(CSSELR_L2, CSSELR_DATA_UNIFIED);
++			arm_cache_ccsidr_info.value = machine_read_ccsidr();
++			linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
++			assoc = arm_cache_ccsidr_info.bits.Assoc + 1;
++			cpuid_cache_info_p->c_priv_l2size = (arm_cache_ccsidr_info.bits.NumSets + 1) *
++			    linesz * assoc;
++
+ 			/* Select L3 (LLC) if the SoC is new enough to have that.
+ 			 * This will be the second-level cache for the highest-performing ACC. */
+ 			machine_write_csselr(CSSELR_L3, CSSELR_DATA_UNIFIED);
+@@ -360,9 +389,16 @@
+ 		}
+ 		arm_cache_ccsidr_info.value = machine_read_ccsidr();
+ 
+-		cpuid_cache_info_p->c_linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
+-		cpuid_cache_info_p->c_assoc = (arm_cache_ccsidr_info.bits.Assoc + 1);
+-		cpuid_cache_info_p->c_l2size = (arm_cache_ccsidr_info.bits.NumSets + 1) * cpuid_cache_info_p->c_linesz * cpuid_cache_info_p->c_assoc;
++		linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
++		assoc = arm_cache_ccsidr_info.bits.Assoc + 1;
++		cpuid_cache_info_p->c_linesz = linesz;
++		cpuid_cache_info_p->c_assoc = assoc;
++		cpuid_cache_info_p->c_l2size = (arm_cache_ccsidr_info.bits.NumSets + 1) * linesz * assoc;
++		if (arm_cache_clidr_info.bits.Ctype3 == 0x4) {
++			cpuid_cache_info_p->c_l3size = cpuid_cache_info_p->c_l2size;
++		} else {
++			cpuid_cache_info_p->c_priv_l2size = cpuid_cache_info_p->c_l2size;
++		}
+ 		cpuid_cache_info_p->c_inner_cache_size = cpuid_cache_info_p->c_dsize;
+ 		cpuid_cache_info_p->c_bulksize_op = cpuid_cache_info_p->c_l2size;
+ 
+@@ -384,6 +420,8 @@
+ 		kprintf(" vm_cache_geometry_colors: %d\n", vm_cache_geometry_colors);
+ 	} else {
+ 		cpuid_cache_info_p->c_l2size = 0;
++		cpuid_cache_info_p->c_priv_l2size = 0;
++		cpuid_cache_info_p->c_l3size = 0;
+ 
+ 		cpuid_cache_info_p->c_inner_cache_size = cpuid_cache_info_p->c_dsize;
+ 		cpuid_cache_info_p->c_bulksize_op = cpuid_cache_info_p->c_dsize;
+--- a/osfmk/arm/cpuid.h
++++ b/osfmk/arm/cpuid.h
+@@ -220,6 +220,8 @@
+ 	uint32_t     c_l2size;           /* L2 size, if present */
+ 	uint32_t     c_bulksize_op;      /* bulk operation size limit. 0 if disabled */
+ 	uint32_t     c_inner_cache_size; /* inner dache size */
++	uint32_t     c_priv_l2size;      /* private L2 size, even when an L3 is present */
++	uint32_t     c_l3size;           /* outermost/system-level cache size */
+ } cache_info_t;
+ 
+ typedef struct {
+--- a/osfmk/arm/machine_routines_common.c
++++ b/osfmk/arm/machine_routines_common.c
+@@ -1314,12 +1314,20 @@
+ 
+ #if (__ARM_ARCH__ >= 8)
+ 	ml_cpu_info->l2_settings = 1;
++#if defined(SWEET)
++	/* c_l2size is the outermost cache on SWEET; report private L2 and LLC separately. */
++	ml_cpu_info->l2_cache_size = cpuid_cache_info->c_priv_l2size;
++	ml_cpu_info->l3_settings = (cpuid_cache_info->c_l3size != 0);
++	ml_cpu_info->l3_cache_size = (cpuid_cache_info->c_l3size != 0) ?
++	    cpuid_cache_info->c_l3size : 0xFFFFFFFF;
++#else
+ 	ml_cpu_info->l2_cache_size = cpuid_cache_info->c_l2size;
++	ml_cpu_info->l3_settings = 0;
++	ml_cpu_info->l3_cache_size = 0xFFFFFFFF;
++#endif
+ #else
+ #error Unsupported arch
+ #endif
+-	ml_cpu_info->l3_settings = 0;
+-	ml_cpu_info->l3_cache_size = 0xFFFFFFFF;
+ }
+ 
+ /*
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1430,18 +1430,27 @@
+ #else /* HAS_CLUSTER */
+ 	this_cpu_datap->cluster_master = is_boot_cpu;
+ #endif /* HAS_CLUSTER */
++	uint32_t pset_cluster_id = in_processor_info->cluster_id;
++#if defined(SWEET)
++	/*
++	 * SWEET reports E and P cluster types to the cache/perflevel code but
++	 * the non-edge clutch scheduler supports a single hierarchy, so every
++	 * CPU stays in pset0.
++	 */
++	pset_cluster_id = 0;
++#endif
+ 	lck_mtx_lock(&pset_create_lock);
+-	pset = pset_find(in_processor_info->cluster_id, NULL);
+-	kprintf("[%d]%s>pset_find(cluster_id=%d) returned pset %d\n", current_processor()->cpu_id, __FUNCTION__, in_processor_info->cluster_id, pset ? pset->pset_id : -1);
++	pset = pset_find(pset_cluster_id, NULL);
++	kprintf("[%d]%s>pset_find(cluster_id=%d) returned pset %d\n", current_processor()->cpu_id, __FUNCTION__, pset_cluster_id, pset ? pset->pset_id : -1);
+ 	if (pset == NULL) {
+ #if __AMP__
+ 		pset_cluster_type_t pset_cluster_type = this_cpu_datap->cpu_cluster_type == CLUSTER_TYPE_E ? PSET_AMP_E : PSET_AMP_P;
+-		pset = pset_create(ml_get_boot_cluster_type() == this_cpu_datap->cpu_cluster_type ? &pset_node0 : &pset_node1, pset_cluster_type, this_cpu_datap->cpu_cluster_id, this_cpu_datap->cpu_cluster_id);
++		pset = pset_create(ml_get_boot_cluster_type() == this_cpu_datap->cpu_cluster_type ? &pset_node0 : &pset_node1, pset_cluster_type, pset_cluster_id, pset_cluster_id);
+ 		assert(pset != PROCESSOR_SET_NULL);
+-		kprintf("[%d]%s>pset_create(cluster_id=%d) returned pset %d\n", current_processor()->cpu_id, __FUNCTION__, this_cpu_datap->cpu_cluster_id, pset->pset_id);
++		kprintf("[%d]%s>pset_create(cluster_id=%d) returned pset %d\n", current_processor()->cpu_id, __FUNCTION__, pset_cluster_id, pset->pset_id);
+ #else /* __AMP__ */
+ 		pset_cluster_type_t pset_cluster_type = PSET_SMP;
+-		pset = pset_create(&pset_node0, pset_cluster_type, this_cpu_datap->cpu_cluster_id, this_cpu_datap->cpu_cluster_id);
++		pset = pset_create(&pset_node0, pset_cluster_type, pset_cluster_id, pset_cluster_id);
+ 		assert(pset != PROCESSOR_SET_NULL);
+ #endif /* __AMP__ */
+ 	}
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -102,7 +102,13 @@
+ 
+ #define MAX_L2_CLINE                   6
+ #define MAX_CPUS                       8
+-#define MAX_CPU_CLUSTERS               1
++/*
++ * The ADT exposes two cluster types (E: A510, P: A710/X2) so cache geometry
++ * and hw.perflevelN describe the heterogeneous cores. The non-edge clutch
++ * scheduler still runs one pset; ml_processor_register keeps every SWEET CPU
++ * in pset0.
++ */
++#define MAX_CPU_CLUSTERS               2
+ 
+ #define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */
+ 
