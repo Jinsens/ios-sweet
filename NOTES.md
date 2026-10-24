@@ -106,6 +106,40 @@ ring with `tools/sweet-log-pull.sh` and look for `SWEET MT KEYS:`.
 
 ## >>> ACTIVE 2026-10-25 (USB): first boot FAILED - no enumeration, 31 s logo loop <<<
 
+**Two more runs since the first one, both with the persistent log forced on -
+and the log stayed empty.** `0093`'s gate can be removed without a build by
+NOPping `cbz w9` at VA `0xfffffe00074e8c84` (the `su.writable` test in
+`sweet_log_start()`, inlined into `sweet_ufs_init`); `patch-log-on.py` rewrites
+the payload and refuses if the byte is not the expected `0x34000349`. The
+patched payload was verified *inside the built image* (`1f2003d5` at file
+offset 5,132,404):
+
+- `sweetusb=2` + log (`entryprobe-el1-xnu-0092-usb-log.img`, `c9171532...`):
+  looped; log area **all zero**.
+- `sweetusb=1` + log (`entryprobe-el1-xnu-0092-usb1-log.img`, `e3f1f45b...`):
+  **also looped**; log area **all zero** again.
+
+So removing the write-protection gate is *not* sufficient on this board. The
+area is never even given a header, which `sweet_log_thread()` writes on every
+flush where `total != flushed`; either the thread never starts (boot dies
+before `sweet_ufs_init()` reaches `sweet_log_start()`) or the ring never
+advances because `sweet_log_append()` is only called from `_cnputs()` and no
+console is attached here. **Do not rely on 0093 alone for the keys log** -
+confirm with a boot whose mountroot is known good before trusting it.
+
+**`sweetusb=1` (register reads only, no controller start) still loops**, so
+the hang is not inside the QMU/EP0 pulse code: either reading the IPPC/MAC
+window wedges the bus, or the boot fails after mountroot for a reason that has
+nothing to do with USB. The empty log cannot separate those yet.
+
+**Local build is blocked on Xcode, not on patience.** `brew install jq gum
+bash cmake ninja` succeeded (bash 5.3.20, cmake 4.4.4, gum 2.0.2, jq 1.8.2,
+ninja 1.13.2). This machine has CLT only - no `xcodebuild`, no `iig`, and
+`build.sh` needs both (`xcrun --find iig`); Xcode 15.x is required because
+Xcode 16's `iig` emits `IORPC.kernelContent`, which xnu-8796 lacks. `xcodes`
+cannot be installed unattended: Homebrew ships no bottles for Intel x86_64 any
+more, so it builds from source, and fetching Xcode needs an Apple ID login.
+
 **Run 1 (approved): `entryprobe-el1-xnu-0092-usb.img`, SHA256 `d0c37b35...`,
 written into `boot_a` with recovery `dd`.** Result: the phone looped at the
 REDMI logo and **no `idVendor 0x1209` device ever appeared on the host** over a
