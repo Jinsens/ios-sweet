@@ -31,13 +31,26 @@ starts with `EFI PART` and the header names the usual GPT entries. So the
 READ succeeded and returned boot-LUN data, not zeros. Logical block size is
 4096, matching `UFS_BLOCK`.
 
-**Fix prepared: `xnu/patches/0088-sweet-ufs-gpt-lun-scan.patch`.** Adds
-`ufs_lun_has_gpt(lun)` (TUR with up to 3 retries to clear a per-LU unit
-attention, then READ(10) of LBA 1 and an `EFI PART` compare) and replaces the
-hardcoded LUN 0 plus the old TUR loop with a scan of LUN 0..7; `ufslun=`
-overrides the scan. Applies cleanly with `git apply` on the 0087 tree and
-passes `tools/xnu-cc.py` (`XNU_CC=/usr/bin/clang`, 0 of 1 failed; the local
-swiftlang clang is gone). Not yet built by CI or flashed.
+**Fix built in CI: run 40106917827 (`14eaca5`), 7m28s, success.** Kernel
+`xnu/out/ci-40106917827/kernel.development.sweet`, SHA256
+`893ac2a00641fc438c013939a0927411229503f396ce714b15b9b56574b4538c`
+(17,223,000 B, matches SHA256SUMS). `_ufs_lun_has_gpt` 0xfffffe00074e8bfc,
+`_sweet_ufs_rootdev` 0xfffffe00074e8090 (unchanged), `_IOFindBSDRoot`
+0xfffffe0007a425d4 (+0x120), entry VA still 0xfffffe000748c488. The `cbnz w0`
+after `bl _sweet_ufs_rootdev` is now 0xfffffe0007a42c88 (PA 0x101a42c88);
+BRK #0x5357 inserted there (payload offset 0x5b6800 from entry, file offset
+10743928 in the payload).
+
+**Probe ready (NOT flashed).**
+`research/matisse/20261024-ufs-wdt/entryprobe-el1-xnu-0088-lunscan-ufs-brk.img`,
+26,570,752 B, SHA256
+`8c67bac892817ee7381b042f96a26368bed1b407c4ee2e35e67abc7eb8d08b39`; payload
+`matisse-xnu-0088-lunscan-brk.payload` SHA256 `79ce42f5...` (embedded copy
+verified byte-equal inside the decompressed kernel, BRK word at decompressed
+offset 59,691,144). Same recipe as 0087 and the same ADT
+`shim/out/matisse-ufs.adt`; declared LUN scan, no `ufslun=` in the cmdline.
+Result to read: banner `x0` = `sweet_ufs_rootdev` return value; `x0=0` means
+the scan found LUN 2, the GPT and `userdata`, `x0=6` means still ENXIO.
 
 **First hardware result: `sweet_ufs_rootdev` returns ENXIO (6).** Recovery
 dmesg banner (`ufs-0087-wdt-dmesg.txt`):
