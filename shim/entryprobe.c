@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "entryprobe_config.h"
 #include "board.h"
+#include "fdt.h"
 #include "logstore.h"
 #include "mmu.h"
 #if defined(ENTRY_EL1_DISPLAY)
@@ -173,6 +174,58 @@ entryprobe_ufs_snapshot(char *banner)
 }
 #endif
 
+#ifdef ENTRY_USB_SNAPSHOT
+/* Read-only MTU3 snapshot at LK handoff. The addresses come from the live
+ * usb0 node (compatible mediatek,mtu3; reg-names mac, ippc), so nothing is
+ * written and no SoC constant is assumed. Two 32-bit registers per field,
+ * lower address in the high half. Field order is USB_FIELDS in
+ * tools/mkentryprobe.py; stage is (0x60 << 16) | code:
+ *   0 ok, 1 no MTU3 node, 2 unusable mac/ippc reg,
+ *   3 device power domain down, MAC left unread.
+ * The stage stays 0x5f if a read faults, so a partial snapshot is visible.
+ * IPPC lives in the always-on infra block; the MAC may be clock-gated while
+ * SSUSB_IP_DEV_PDN is set, so its reads are skipped in that case. */
+static void
+entryprobe_usb_snapshot(uintptr_t dtb, char *banner)
+{
+	char path[192];
+	uint64_t mac = 0, mac_size = 0, ippc = 0, ippc_size = 0;
+
+	field(banner, ENTRY_STAGE, 0x5f);
+	if (!fdt_find_compatible(dtb, "mediatek,mtu3", path, sizeof(path))) {
+		field(banner, ENTRY_STAGE, 0x6001);
+		return;
+	}
+	if (!fdt_reg_n(dtb, path, 0, &mac, &mac_size) ||
+	    !fdt_reg_n(dtb, path, 1, &ippc, &ippc_size) || !mac || !ippc) {
+		field(banner, ENTRY_STAGE, 0x6002);
+		return;
+	}
+
+	volatile uint32_t *i = (volatile uint32_t *)(uintptr_t)ippc;
+	volatile uint32_t *m = (volatile uint32_t *)(uintptr_t)mac;
+
+	field(banner, ENTRY_GICD, ((uint64_t)i[0x00 / 4] << 32) | i[0x04 / 4]);
+	field(banner, ENTRY_VTIMER, ((uint64_t)i[0x08 / 4] << 32) | i[0x0c / 4]);
+	field(banner, ENTRY_FB, ((uint64_t)i[0x10 / 4] << 32) | i[0x14 / 4]);
+	field(banner, ENTRY_DTB, ((uint64_t)i[0x18 / 4] << 32) | i[0x40 / 4]);
+	field(banner, ENTRY_SCTLR, ((uint64_t)i[0x30 / 4] << 32) | i[0x50 / 4]);
+	field(banner, ENTRY_ESR, ((uint64_t)i[0x8c / 4] << 32) | i[0x98 / 4]);
+	field(banner, ENTRY_FAR, ((uint64_t)i[0xa0 / 4] << 32) | i[0xa4 / 4]);
+	if (i[0x08 / 4] & 1) {
+		field(banner, ENTRY_STAGE, 0x6003);
+		return;
+	}
+
+	field(banner, ENTRY_PC, ((uint64_t)m[0x0800 / 4] << 32) | m[0x0c84 / 4]);
+	field(banner, ENTRY_FAULT, ((uint64_t)m[0x2404 / 4] << 32) | m[0x240c / 4]);
+	field(banner, ENTRY_X0, ((uint64_t)m[0x141c / 4] << 32) | m[0x1534 / 4]);
+	field(banner, ENTRY_X16, ((uint64_t)m[0x0000 / 4] << 32) | m[0x0004 / 4]);
+	field(banner, ENTRY_SPSR, ((uint64_t)m[0x0100 / 4] << 32) | m[0x0108 / 4]);
+	field(banner, ENTRY_STAGE, 0x6000);
+}
+#endif
+
 #ifdef ENTRY_UFS_INIT
 static void
 entryprobe_ufs_init(char *banner)
@@ -237,6 +290,9 @@ void entryprobe_board(uint64_t dtb, char *banner)
 	field(banner, ENTRY_VTIMER, brd.vtimer_intid);
 	field(banner, ENTRY_FB, brd.fb_base);
 	field(banner, ENTRY_STAGE, 2);
+#if defined(ENTRY_USB_SNAPSHOT)
+	entryprobe_usb_snapshot((uintptr_t)dtb, banner);
+#endif
 #if defined(ENTRY_EL1_DISPLAY)
 	/* Exercise the full shim's console/display at EL1, then return through
 	 * HVC to the saved EL2 Linux entry. Exceptions carry ESR/FAR/PC into

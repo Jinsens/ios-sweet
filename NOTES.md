@@ -1,5 +1,45 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-25 (USB): MTU3 handoff snapshot built, flash pending <<<
+
+**Request (user): "帮我移植 USB 功能，尽可能把 USB 功能恢复，然后输出日志".**
+matisse USB is MediaTek MTU3 (usb0@11201000 MAC, ippc@11203e00) + XSPHY,
+not sweet's Qualcomm DWC3, so the existing USB patches cannot drive it. The
+vendor recovery driver proves HS device mode works (ADB over bulk
+ep1in/ep1out, `gadget (high-speed) pullup D+`); LK itself logged
+"USB enum timeout ... cannot detect tools", so its final handoff state is
+unknown and is the next thing to measure.
+
+**Probe built (NOT flashed):** `research/matisse/20261025-usb/entryprobe-usb-snapshot.img`,
+20,832,256 B, SHA256 `0480bcc8f84e06979d42d6214861597db34cb30e9314c1be7d9d324c91eb7f8b`,
+new level `usb` (`ENTRY_LEVEL=1` + `ENTRY_USB_SNAPSHOT`) in
+`tools/mkentryprobe.py` / `shim/entryprobe.c`. It is read-only and runs right
+after `board_probe`, resolving MAC/IPPC from the live usb0 node
+(compatible `mediatek,mtu3`, reg-names `mac`, `ippc`). Fields are pairs,
+lower address in the high half (see `USB_FIELDS`):
+
+- always: IPPC PW_CTRL0..3, PW_STS1..2, OTG_STS, SPM_CTRL, U3_CTRL_0P,
+  U2_CTRL_0P, REF_CK_CTRL, DEV_RST_CTRL, HW_ID, HW_SUB_ID;
+- only if IPPC PW_CTRL2 bit0 (SSUSB_IP_DEV_PDN) is clear, because the MAC
+  may be clock-gated: DEVICE_CONF, MISC_CTRL, POWER_MANAGEMENT,
+  DEVICE_CONTROL, USB3_CONFIG, LINK_STATE_MACHINE, LV1ISR, LV1IER, EP0CSR,
+  RXCOUNT0.
+
+Stage is `(0x60 << 16) | code`: 0 ok, 1 no MTU3 node, 2 unusable mac/ippc
+reg, 3 device power domain down (MAC skipped); 0x5f means a read faulted
+mid-snapshot (recorder fields then hold ESR/FAR/PC). 13 mkentryprobe tests
+pass, and the inlined disassembly shows the expected MAC offsets
+(`0x800/0xc84`, `0x2404/0x240c`, `0x141c/0x1534`, `0x0/0x4`, `0x100/0x108`).
+
+**Awaiting explicit user confirmation to flash `boot_a`** (the only
+destructive step). `research/matisse/20261025-usb/run-approved-probe.py` is
+the usual harness with the recovery wait raised 45 -> 120 s: it verifies the
+pre-test partition equals `backup/recovery-20261021/boot_a-live-20261021.img`
+(`2931647a...`), writes the 20.8 MB probe, verifies the full 64 MiB
+readback, boots recovery, captures the single `SWEET-ENTRY` record from
+dmesg, and restores plus re-verifies the original in `finally`. The device
+is connected in recovery and `boot_a` reports 67,108,864 bytes.
+
 ## >>> ACTIVE 2026-10-25: per-CPU IRQ probe PASS (IPIs 8/8, timer demand-driven) <<<
 
 **Question (user: "irq正常吗").** The 8-core probe proved SGI1 ran on every

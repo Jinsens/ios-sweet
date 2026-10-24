@@ -28,7 +28,7 @@ DISPLAY_RECORD_FIELDS = tuple('0123456789abcdefghijk')
 DISPLAY_LEVELS = ('display', 'display-kick', 'xnu')
 LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5,
           'display': 6, 'display-kick': 6, 'xnu': 6, 'el1-display': 7,
-          'el1-xnu': 7, 'el1-load': 7}
+          'el1-xnu': 7, 'el1-load': 7, 'usb': 1}
 UFS_QUERY_MODES = {'full': 0, 'none': 1, 'read': 2, 'set': 3, 'power': 4}
 
 # For display levels the banner holds (first u32 << 32 | second u32) per
@@ -77,6 +77,37 @@ DISPLAY_SECONDARY = {
         'i': ('kick last INTSTA', 'kick completed frames'),
         'j': ('kick TE seen', 'kick status code'),
     },
+}
+
+# usb level: read-only MTU3 snapshot at LK handoff, taken after board_probe
+# from the live usb0 node (compatible mediatek,mtu3; reg-names mac, ippc).
+# Each field holds (first register << 32) | second register; offsets follow
+# the vendor mtu3_hw_regs.h with the DT-provided base. Stage is
+# (0x60 << 16) | code: 0 ok, 1 no MTU3 node, 2 unusable mac/ippc reg.
+# A read fault leaves stage at 0x5f and fills the recorder fields instead.
+# PW_CTRL2 DEV_PDN, U3/U2 PORT_PDN|DIS, PW_STS1 PLL/reset status,
+# OTG_STS VBUS_VALID and POWER_MANAGEMENT SOFT_CONN answer whether LK left
+# the controller powered, clocked and connected; HW_ID/HW_SUB_ID identify
+# the IP revision for the XNU driver.
+USB_FIELDS = {
+    'gicd': ('IPPC.PW_CTRL0', 'IPPC.PW_CTRL1'),
+    'vtimer': ('IPPC.PW_CTRL2', 'IPPC.PW_CTRL3'),
+    'fb': ('IPPC.PW_STS1', 'IPPC.PW_STS2'),
+    'dtb': ('IPPC.OTG_STS', 'IPPC.SPM_CTRL'),
+    'sctlr': ('IPPC.U3_CTRL_0P', 'IPPC.U2_CTRL_0P'),
+    'esr': ('IPPC.REF_CK_CTRL', 'IPPC.DEV_RST_CTRL'),
+    'far': ('IPPC.HW_ID', 'IPPC.HW_SUB_ID'),
+    'pc': ('MAC.DEVICE_CONF', 'MAC.MISC_CTRL'),
+    'fault': ('MAC.POWER_MANAGEMENT', 'MAC.DEVICE_CONTROL'),
+    'x0': ('MAC.USB3_CONFIG', 'MAC.LINK_STATE_MACHINE'),
+    'x16': ('MAC.LV1ISR', 'MAC.LV1IER'),
+    'spsr': ('MAC.EP0CSR', 'MAC.RXCOUNT0'),
+}
+
+USB_STATUS_CODES = {
+    0: 'ok', 1: 'no MTU3 node', 2: 'unusable mac/ippc reg',
+    3: 'device power domain down, MAC not read',
+    0x5f: 'read faulted before completion',
 }
 
 
@@ -253,6 +284,8 @@ def build(template_path, out_path, toolchain, level, max_image_size=None, payloa
         if ufs_init:
             config += '#define ENTRY_UFS_INIT 1\n'
             config += f'#define ENTRY_UFS_QUERY_MODE {UFS_QUERY_MODES[ufs_query]}\n'
+        if level == 'usb':
+            config += '#define ENTRY_USB_SNAPSHOT 1\n'
         (tmp / 'entryprobe_config.h').write_text(config)
         linker = '''ENTRY(_head)
 SECTIONS {
@@ -345,6 +378,8 @@ SECTIONS {
         'ufs_test': ufs_test,
         'ufs_init': ufs_init,
         'ufs_query': ufs_query if ufs_init else None,
+        'usb_fields': USB_FIELDS if level == 'usb' else None,
+        'usb_status_codes': USB_STATUS_CODES if level == 'usb' else None,
         'display_fields': DISPLAY_FIELDS if level in DISPLAY_LEVELS else None,
         'display_secondary': DISPLAY_SECONDARY.get(level),
         'display_status_codes': DISPLAY_STATUS_CODES if level in DISPLAY_LEVELS else None,

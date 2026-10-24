@@ -111,6 +111,19 @@ class ProbeLayoutTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'uniquely'):
             mkentryprobe.prepare(template(image))
 
+    def test_usb_snapshot_layout(self):
+        self.assertEqual(mkentryprobe.LEVELS['usb'], 1)
+        self.assertEqual(mkentryprobe.USB_FIELDS['gicd'],
+                         ('IPPC.PW_CTRL0', 'IPPC.PW_CTRL1'))
+        self.assertEqual(mkentryprobe.USB_FIELDS['spsr'],
+                         ('MAC.EP0CSR', 'MAC.RXCOUNT0'))
+        self.assertIn('no MTU3 node', mkentryprobe.USB_STATUS_CODES.values())
+        record, offsets = mkentryprobe.banner_record('usb')
+        self.assertTrue(record.startswith(b'SWEET-ENTRY v1'))
+        self.assertLessEqual(len(record), 407)
+        self.assertEqual(len(offsets), 17)
+        self.assertEqual(offsets['spsr'], offsets['x16'] + 22)
+
     def test_ufs_snapshot_requires_loader_level(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'boot.img'
