@@ -29,7 +29,7 @@ DISPLAY_LEVELS = ('display', 'display-kick', 'xnu')
 LEVELS = {'entry': 0, 'board': 1, 'logstore': 2, 'mmu': 3, 'timer': 4, 'irq': 5,
           'display': 6, 'display-kick': 6, 'xnu': 6, 'el1-display': 7,
           'el1-xnu': 7, 'el1-load': 7}
-UFS_QUERY_MODES = {'full': 0, 'none': 1, 'read': 2, 'set': 3}
+UFS_QUERY_MODES = {'full': 0, 'none': 1, 'read': 2, 'set': 3, 'power': 4}
 
 # For display levels the banner holds (first u32 << 32 | second u32) per
 # field. All bases are live-FDT lookups. Field K is the status word:
@@ -381,7 +381,7 @@ def main():
     ap.add_argument('--ufs-init', action='store_true',
                     help='reset host/device and start the UFS link before the XNU jump (el1-xnu/el1-load)')
     ap.add_argument('--ufs-query', choices=UFS_QUERY_MODES, default='full',
-                    help='device-init isolation: none, one READ_FLAG, READ+SET_FLAG, or full poll')
+                    help='device-init isolation: none, READ_FLAG, SET_FLAG, power-mode repair, or full poll')
     ap.add_argument('--toolchain', default=os.environ.get('LLVM_BIN'))
     ap.add_argument('--max-image-size', type=lambda s: int(s, 0),
                     help='safe load-window size measured from this device; refuse to exceed')

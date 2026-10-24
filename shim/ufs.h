@@ -8,6 +8,7 @@ void test_ufs(void);
 #define UFS_QUERY_NONE	1
 #define UFS_QUERY_READ	2
 #define UFS_QUERY_SET	3
+#define UFS_QUERY_POWER	4
 
 /* Reset host/device and start the UniPro link before the XNU jump. Leaves
  * the host claimed with the shim's UTRL so XNU's driver passes its

@@ -1081,6 +1081,47 @@ same way.
 No `userdata` write was made. Device is in Recovery, slot `_a`, `boot_a`
 `2931647a...` (verified). Each `boot_a` write still needs explicit approval.
 
+## >>> UFS device-init fixed; TUR GOOD (2026-10-24) <<<
+
+Each hardware run below used explicit approval; `boot_a` was restored and
+verified `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`
+right after it.
+
+- Power-mode probe `entryprobe-el1-ufs-query-power.img`, 26,570,752 B,
+  SHA256 `88aeae48228f4fb56fb8405cd1493d456caac8dc9636910af37b331045b3e980`:
+  banner `dtb=0 gicd=0103110000360000 vtimer=0302000000000011`: READ
+  ATTRIBUTE IDN 0x02 succeeded and `bCurrentPowerMode` was already 0x11, so
+  power mode is not the cause. First TUR still target failure
+  (`fb=0000000121020004`).
+- Fixed probe `entryprobe-el1-ufs-query-full.img`, 26,570,752 B, SHA256
+  `04a23f165cd73db2586c2023b90384c3e4da7c3e745db2bbc443115edc6d5338`:
+  banner `dtb=0` (SET+poll returned 0), `fb=0000000121020004` (first TUR
+  still target failure), `spsr=0000700021000000` (REQUEST SENSE rc0,
+  sense data 0x70), `x0=0000000021000000`: **second TUR GOOD**. Same-boot
+  stock recovery dmesg in `research/matisse/20261023-ufs/ufs-query-{power,
+  full}-dmesg.txt`.
+
+**Root cause.** Linux `ufshcd_complete_dev_init` always SETs fDeviceInit=1
+and then polls READ_FLAG until 0. `device_init` skipped the SET whenever the
+first READ_FLAG returned 0, which is what a device that has not started or
+completed its init reports after the shim's SMC reset; the SCSI target then
+rejects every command (including REQUEST SENSE) with TARGET FAILURE
+(response byte 6 = 1, status 2). With the unconditional SET_FLAG (opcode
+0x06, IDN 0x01) plus poll, REQUEST SENSE succeeds and the next TUR is GOOD.
+
+**Changes.** `shim/ufs.c` `device_init` (NONE/READ/SET/POWER/FULL; SET and
+FULL always SET), `shim/entryprobe.c` (FB = first TUR, SPSR = sense
+record), `tools/mkentryprobe.py` (`power` mode) and its tests. XNU patch
+0086 `ufs_device_init` now always SETs too: its old read-first early return
+had the same bug after the driver's own device reset. 48 unit tests,
+`git diff --check` and `git apply --numstat` pass.
+
+**Next.** Push and let CI build the 0086 kernel; package an XNU boot image
+with `--ufs-init` and check `_sweet_ufs_rootdev` = 0 on hardware, then the
+iOS root in `userdata`. Each `boot_a` write still needs explicit approval.
+
+Device: Recovery, slot `_a`, `boot_a` `2931647a...` verified.
+
 ## Summary at pause (handoff for the next session)
 
 **Proven on hardware.** XNU reaches BSD initialization, mounts md0, executes

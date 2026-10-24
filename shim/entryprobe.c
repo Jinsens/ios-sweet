@@ -186,6 +186,8 @@ entryprobe_ufs_init(char *banner)
 	field(banner, ENTRY_DTB, ufs_test_info[5]);	/* device-init stage */
 	field(banner, ENTRY_GICD, ufs_test_info[6]);	/* last query result */
 	field(banner, ENTRY_VTIMER, ufs_test_info[7]);	/* query IDN/index/value */
+	field(banner, ENTRY_FB, ufs_test_info[1]);	/* first TUR */
+	field(banner, ENTRY_SPSR, ufs_test_info[2]);	/* REQUEST SENSE + sense data */
 }
 #endif
 

@@ -223,8 +223,8 @@ query_ex(uint8_t opcode, uint8_t idn, uint8_t index, uint8_t selector,
 	zero(&ucd, sizeof(ucd));
 
 	ucd.cmd[0] = 0x16;
-	ucd.cmd[1] = function;
 	ucd.cmd[3] = ++tag;
+	ucd.cmd[5] = function;
 	ucd.cmd[12] = opcode;
 	ucd.cmd[13] = idn;
 	ucd.cmd[14] = index;
@@ -292,13 +292,35 @@ device_init(unsigned mode)
 
 	if (mode == UFS_QUERY_NONE)
 		return 0;
-	uint32_t rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);
-	if (rc)
-		return 0x10 | rc;
-	if (mode == UFS_QUERY_READ || !(v & 1))
-		return 0;
-	v = 1;
-	rc = query_ex(0x06, 0x01, 0, 0, 0, 0, 2, &v, &st);
+	if (mode == UFS_QUERY_POWER) {
+		v = 0;
+		uint32_t rc = query_ex(0x03, 0x02, 0, 0, 0, 0, 0, &v, &st);
+		if (rc)
+			return 0x50 | rc;
+		if ((v & 0xff) == 0x11)
+			return 0;
+		v = 0x11;
+		rc = query_ex(0x04, 0x02, 0, 0, 0, 0, 2, &v, &st);
+		if (rc)
+			return 0x60 | rc;
+		v = 0;
+		rc = query_ex(0x03, 0x02, 0, 0, 0, 0, 0, &v, &st);
+		if (rc)
+			return 0x70 | rc;
+		return (v & 0xff) == 0x11 ? 0 : 0x80;
+	}
+	if (mode == UFS_QUERY_READ) {
+		uint32_t rc = query_ex(0x05, 0x01, 0, 0, 0, 0, 0, &v, &st);
+		return rc ? 0x10 | rc : 0;
+	}
+	/*
+	 * Linux ufshcd_complete_dev_init always signals completion first: after
+	 * a device reset fDeviceInit can already read 0 while the device is
+	 * still initializing, and it rejects SCSI with TARGET FAILURE until the
+	 * host SETs the flag. Poll until the device clears it.
+	 */
+	v = 0;
+	uint32_t rc = query_ex(0x06, 0x01, 0, 0, 0, 0, 2, &v, &st);
 	if (rc)
 		return 0x20 | rc;
 	if (mode == UFS_QUERY_SET)
@@ -694,9 +716,17 @@ init_ufs_link(unsigned query_mode)
 	static const uint8_t tur[6] = { 0x00 };
 	uint32_t ocs = 0, st = 0;
 	int rc = scsi(0, tur, sizeof(tur), 0, 0, 0, &ocs, &st);
+	ufs_test_info[1] = (uint64_t)rc | (uint64_t)ocs << 8 |
+	    (uint64_t)st << 16 | (uint64_t)ufs_scsi_resp[0] << 24 |
+	    (uint64_t)ufs_scsi_resp[6] << 32;
 	if (rc) {
 		uint8_t sense[6] = { 0x03, 0, 0, 0, 18, 0 };
-		(void)scsi(0, sense, sizeof(sense), data, 18, 1, &ocs, &st);
+		zero(data, 18);
+		rc = scsi(0, sense, sizeof(sense), data, 18, 1, &ocs, &st);
+		ufs_test_info[2] = (uint64_t)rc | (uint64_t)ocs << 8 |
+		    (uint64_t)st << 16 | (uint64_t)ufs_scsi_resp[0] << 24 |
+		    (uint64_t)ufs_scsi_resp[6] << 32 | (uint64_t)data[0] << 40 |
+		    (uint64_t)data[2] << 48 | (uint64_t)data[12] << 56;
 	}
 	rc = scsi(0, tur, sizeof(tur), 0, 0, 0, &ocs, &st);
 	ufs_test_info[3] = (uint64_t)rc | (uint64_t)ocs << 8 |
