@@ -70,7 +70,12 @@ tries `sweet_mt_keys_start(level)` first; it returns 0 when the ADT has no
 cleanly on the 0092 tree; `validate-repo.py` still fails only on the
 pre-existing `[[ ]]` shell syntax in 0019/0020/0026.
 
-**CI.** Run **40127176212** (`10a6412`, Jinsens `codex/matisse-xnu-screen-log`).
+**CI.** Run **40127176212** (`10a6412`, Jinsens `codex/matisse-xnu-screen-log`)
+**succeeded** in 9m33s. Kernel `xnu/out/ci-40127176212/kernel.development.sweet`,
+17,223,696 B, SHA256 `d7630599ec9041d8dc766016aad6e512601d7ed7e5e58ab921a2b51449b70615`
+(matches `SHA256SUMS`). `_sweet_mt_keys_start` is linked at
+`0xfffffe00074eab68` and the image carries 8 `SWEET MT KEYS` strings. Built,
+**not** packaged into a payload and **not** flashed.
 
 **Local clang check is not a signal here.** With CLT 17's SDK, `sys/param.h`
 -> SDK `string.h`/`refcnt_internal.h` fail identically for the existing
