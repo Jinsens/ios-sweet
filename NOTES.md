@@ -1,14 +1,47 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-24: 0086 SET-fix verified in binary; MTK WDT driver added <<<
+## >>> ACTIVE 2026-10-24: 0087 WDT kernel verified; UFS probe image ready, awaiting flash approval <<<
 
-**Device (verified): Recovery, slot `_a`, `boot_a`
+**Device (verified 14:47Z): root ADB in Recovery, slot `_a`, `boot_a`
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.**
 No test image is flashed. The 0086 SET-fix probe
 (`entryprobe-el1-xnu-0086-setfix-ufs-preinit-error-brk.img`, SHA256
 `b988da3f...`, payload `b9ccd87d...`) hung at the logo with no banner and
 `boot_a` was restored/verified afterwards. Whether the relay, a kernel halt,
-or a reset caused the hang is unproven.
+or a reset caused the hang is unproven; the observation window was only
+~198 s, while the BRK site is reachable only after the 30 s RTC wait and the
+up-to-10 x 60 s `waitForService` retries in `IOFindBSDRoot`.
+
+**0087 built and verified in CI.** Run 40103653699 (`1ef6f0e`) succeeded in
+13m34s. Kernel `xnu/out/ci-40103653699/xnu-kernel/kernel.development.sweet`,
+SHA256 `dc6925e8f0c9307853569608d888f92ab8438547d89726b876f7adbc358de615`
+(17,222,960 B). `_ZN10IOWatchdog5startEP9IOService` 0xfffffe0007a6701c,
+`_ZL18sweet_mtk_wdt_feedPvi` 0xfffffe0007a674b8, `_ZL13sweet_mtk_wdt`
+0xfffffe000806e060. `start()` maps 0x1c007000/0x1000 with `ml_io_map`, reads
+MODE/LENGTH/STATUS and logs `SWEET WDT: MTK WDT mode=0x%08x length=0x%x
+status=0x%08x`, then `kernel_thread_start`; the feed loop stores 0x1971 at
++0x08 and `IOSleep(1000)`. `IOWatchdog` is in `KernelConfigTables.cpp`
+(IOResources/IOWatchdog). The 0086 SET→poll fix is present too:
+`sweet_ufs_rootdev` 0xfffffe00074e8090, SET at 0x...798, 1000 x 1 ms READ
+loop at 0x...7c0.
+
+**Text layout unchanged vs 0086**, so the proven offsets still hold: entry
+0xfffffe000748c488, virt_base 0xfffffe0006000000, kernel_end
+0xfffffe00084d0000, `_bootstrap_pagetables` 0xfffffe000717c000 (PA
+0x10117c000), `_IOFindBSDRoot` 0xfffffe0007a424b4, BRK site (the `cbnz w0`
+after `bl _sweet_ufs_rootdev`) 0xfffffe0007a42b68 = payload offset 0x5b66e0.
+
+**Probe image ready (NOT flashed).**
+`research/matisse/20261024-ufs-wdt/entryprobe-el1-xnu-0087-wdt-ufs-brk.img`,
+26,570,752 B, SHA256
+`76b55890cff1bb3cc6b8c28383ecaf1c680bb38f4588ac26f62550c8cac71546`; payload
+`8e75de9f...` (0087 kernel + BRK 0x350032c0→0xd42a6ae0). Built with the proven
+recipe: `backup/boot_a-stock.img`, `--xnu-vector-offset 0xb78`,
+`--xnu-high-vector-offset=-0x4488`, `--xnu-clean --xnu-clean-limit
+0x108000000`, `--xnu-restore-ttbr0 0x10117c000`, `--xnu-selective`,
+`--ufs-init --ufs-query full`, `--max-image-size 67108864`, NDK 28.2.13676358.
+Verified inside the gzip kernel: `SWEETAPP` at 48947200, payload SHA matches,
+BRK word at file offset 10743640.
 
 **0086 build verified; the ufs_query arity question is closed.** CI run
 40101113289 (`9a19655`) built kernel `aa765f0d...` from the 7-argument
@@ -35,13 +68,17 @@ registered before `vfs_mountroot`; do not add a second hook.
 (`mediatek,mt6983-wdt`, not the older 0x10007000), prints MODE/LENGTH/STATUS
 once at IOWatchdog start, and starts a kernel thread that writes RESTART
 (0x08) = 0x1971 every second. The service still does not enable the
-watchdog and keeps its no-op check-in/PMU behaviour. Tested with
-`patch -p1` against the post-0045 file; not compiled or booted yet (needs a
-CI run). 48 unit tests pass.
+watchdog and keeps its no-op check-in/PMU behaviour. Compiled in run
+40103653699 (see above); not booted yet.
 
-**Next.** Commit and let CI build 0087; package a kernel payload without the
-0084 rtcfast words; prefer a self-returning `el1-load` probe before any
-further XNU boot. Each `boot_a` write still needs explicit approval.
+**Next.** Needs explicit approval to write `boot_a` for the prepared image.
+Plan: flash, watch >=6 min for the SWEET banner/BRK record (the WDT feed
+should stop the 31 s AP watchdog from resetting during the long
+`IOFindBSDRoot` waits), then restore
+`backup/recovery-20261021/boot_a-live-20261021.img` and verify
+`2931647a...`. If no banner appears even then, the block is independent of
+`_sweet_ufs_rootdev` returning, and the next probe should move the BRK
+earlier (e.g. at `IOFindBSDRoot` entry) to find how far boot gets.
 
 ## >>> ACTIVE 2026-10-23: UFS link/commands work in shim; XNU EIO remains <<<
 
