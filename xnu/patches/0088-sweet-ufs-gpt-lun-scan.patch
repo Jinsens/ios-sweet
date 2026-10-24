@@ -1,0 +1,60 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -633,6 +633,24 @@
+ 	return ENOENT;
+ }
+ 
++/* True when this LUN answers a TUR and LBA 1 starts with a GPT header. */
++static bool
++ufs_lun_has_gpt(uint8_t lun)
++{
++	static const uint8_t tur[6] = { 0x00 };
++	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
++	int error;
++
++	su.lun = lun;
++	/* A freshly reset device reports a power-on unit attention once per LU. */
++	for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
++	}
++	if (error) {
++		return false;
++	}
++	return ufs_read_blocks(1, 1) == 0 && memcmp(b, "EFI PART", 8) == 0;
++}
++
+ static int
+ ufs_take_over_host(void)
+ {
+@@ -922,7 +940,6 @@
+ 		return ENOMEM;
+ 	}
+ 	su.dma_pa = ptoa_64(pn);
+-	su.lun = 0;
+ 	su.secsize = DEV_BSIZE;
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+@@ -931,9 +948,21 @@
+ 		error = ufs_device_init();
+ 	}
+ 	if (!error) {
+-		static const uint8_t tur[6] = { 0x00 };
+-		/* The first command after the bootloader may report a unit attention. */
+-		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
++		/*
++		 * LUN 0 is not the user LUN on every device: on matisse LUN 0
++		 * and 1 are the UFS boot LUNs (boot_lun_id 1/2) and the GPT
++		 * lives on LUN 2. Scan for the GPT unless ufslun= picks one.
++		 */
++		uint32_t lun = 0;
++		if (PE_parse_boot_argn("ufslun", &lun, sizeof(lun))) {
++			error = ufs_lun_has_gpt((uint8_t)lun) ? 0 : ENXIO;
++		} else {
++			for (su.lun = 0; su.lun < 8; su.lun++) {
++				if (ufs_lun_has_gpt(su.lun)) {
++					break;
++				}
++			}
++			error = (su.lun < 8) ? 0 : ENXIO;
+ 		}
+ 	}
+ 	if (!error) {

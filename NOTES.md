@@ -1,13 +1,43 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-24: 0087 probe works; rootdev returns ENXIO; branch bisect prepared <<<
+## >>> ACTIVE 2026-10-24: GPT signature check fails; UFS I/O through READ(10) works <<<
 
-**Device (verified 15:16Z): root ADB in Recovery, slot `_a`, `boot_a`
+**Device (verified after test 2): root ADB in Recovery, slot `_a`, `boot_a`
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.**
-The 0087 probe was flashed and booted, then the stock `boot_a` was restored
-and verified (15:16Z). The 0086 probe (`b988da3f...`) had hung at the logo;
-with 0087's watchdog feed the same BRK is now reached and relayed in ~50 s,
-so that hang was most likely a watchdog reset during the XNU waits.
+Both probe boots were followed by a stock restore; the last one reflashed
+`backup/recovery-20261021/boot_a-live-20261021.img` and
+`sha256sum /dev/block/by-name/boot_a` matched. The 0086 probe (`b988da3f...`)
+had hung at the logo; with 0087's watchdog feed the same BRK is now reached
+and relayed in ~50 s, so that hang was most likely a watchdog reset during
+the XNU waits.
+
+**Second hardware result: the GPT signature check fails.** Multi-BRK banner
+(`ufs-0087-multibrk-dmesg.txt`):
+`SWEET-ENTRY v1 el=1 stage=0x87 fault=1 esr=f2005357 far=fffffe39766bc000
+pc=fffffe00074e88c4 x0=fffffe0007088f39 x16=0 spsr=20400204`. `pc` is the
+inlined "LUN %u has no GPT" branch (0x...88c4), not the DT-node, 64AS,
+bad-entries or last<first sites. Since that branch is only reachable after
+`ufs_take_over_host`, `ufs_device_init` (SET+READ fDeviceInit), TUR and
+`READ(10)` of LBA 1 all returned success, the host takeover and SCSI path
+work.
+
+**Root cause: the GPT is not on LUN 0.** The driver hardcoded `su.lun = 0`.
+On this device (read from recovery, read-only) LUN 0 and 1 are the UFS boot
+LUNs: `0:0:0:0`/`0:0:0:1` are 4 MiB (`logical_block_count` 0x400,
+`boot_lun_id` 1/2) and contain `MMM` MTK boot images at byte 4096. The user
+LUN with the GPT is **LUN 2** (`0:0:0:2`, 128 GiB,
+`logical_block_size` 0x0C = 4096, `boot_lun_id` 0): `dd bs=4096 skip=1`
+starts with `EFI PART` and the header names the usual GPT entries. So the
+READ succeeded and returned boot-LUN data, not zeros. Logical block size is
+4096, matching `UFS_BLOCK`.
+
+**Fix prepared: `xnu/patches/0088-sweet-ufs-gpt-lun-scan.patch`.** Adds
+`ufs_lun_has_gpt(lun)` (TUR with up to 3 retries to clear a per-LU unit
+attention, then READ(10) of LBA 1 and an `EFI PART` compare) and replaces the
+hardcoded LUN 0 plus the old TUR loop with a scan of LUN 0..7; `ufslun=`
+overrides the scan. Applies cleanly with `git apply` on the 0087 tree and
+passes `tools/xnu-cc.py` (`XNU_CC=/usr/bin/clang`, 0 of 1 failed; the local
+swiftlang clang is gone). Not yet built by CI or flashed.
 
 **First hardware result: `sweet_ufs_rootdev` returns ENXIO (6).** Recovery
 dmesg banner (`ufs-0087-wdt-dmesg.txt`):
@@ -55,7 +85,7 @@ after `bl _sweet_ufs_rootdev`) 0xfffffe0007a42b68 = payload offset 0x5b66e0.
 0x10117c000`, `--xnu-selective`, `--ufs-init --ufs-query full`,
 `--max-image-size 67108864`, NDK 28.2.13676358.
 
-**Branch bisect prepared (NOT flashed).**
+**Branch bisect (flashed and tested).**
 `research/matisse/20261024-ufs-wdt/entryprobe-el1-xnu-0087-wdt-multibrk.img`,
 SHA256 `2d3b3e74...`, payload `ff750159...`: the same 0087 kernel with seven
 BRKs so one boot identifies the failing branch by `pc` in the banner.
