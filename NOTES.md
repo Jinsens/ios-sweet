@@ -1,6 +1,155 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (USB): first boot of the MTU3 driver - image rebuilt on 0092, awaiting approval <<<
+## >>> ACTIVE 2026-10-25 (keys): MT6363 PON keys + keypad volume-down (patch 0093) <<<
+
+**Request (user): "帮我移植按键功能" then "设备在线 你可以直接参考设备的".**
+sweet's `bsd/dev/sweet_keys.c` polls the Qualcomm PM6150/PM6150L SPMI
+arbiter; matisse has neither that arbiter nor those GPIOs, so the driver had
+to be re-hosted, not recompiled.
+
+**Measured on the device (OrangeFox, root adb, nothing written):**
+
+- `/proc/bus/input/devices`: `mtk-pmic-keys` at
+  `1c015000.spmi/spmi-0/0-04/mtk-pmic-keys` reports KEY 0x73 (115,
+  volume-up) and 0x74 (116, power) - the DTS child called `home` is wired to
+  volume-up, `power` is PWRKEY. `mtk-kpd` at `1c00e000.kp` reports only KEY
+  0x72 (114, volume-down). Touch is `fts` on SPI6.
+- `mount -t debugfs none /sys/kernel/debug` works in recovery, so
+  `/sys/kernel/debug/regmap/0-04/registers` exposes the whole MT6363 map:
+  `0x0009 = 0x63` (the id in `probe chip id=0x63`) and `0x001e
+  TOPSTATUS = 0x1e` at rest (bit2 = CHRDET, charger attached).
+- Sampling `0x1c..0x21` at ~10 Hz while the operator pressed keys showed
+  exactly two bits dropping, never together: **bit1 (0x1c)** and **bit3
+  (0x16)**. MT6359's mainline masks are PWRKEY `0x2` (bit1) and HOMEKEY
+  `0x8` (bit3); the vendor MT6363 entry (`0x1`/`0x3`) is dead code because
+  that chip takes the release-IRQ path and never reads the debounce
+  register. So bit1 = PWRKEY = power, bit3 = HOMEKEY/RESIN = volume-up,
+  both active low.
+- **Unfinished:** the run was cut short when the phone dropped off USB (the
+  operator held power; `adb` and `fastboot` both empty afterwards) before
+  `dmesg | grep "key ="` could be correlated with the samples. That
+  correlation is what would *name* the two bits instead of inferring them
+  from MT6359. Repeat: sample
+  `sed -n 31p /sys/kernel/debug/regmap/0-04/registers` with `/proc/uptime`
+  next to it, press one key at a time, then match the `(pressed) key =116`
+  lines' timestamps. The ADT carries `power-bit`/`volup-bit`, so a swap
+  costs a new payload, not a new kernel build.
+
+**Driver (patch `xnu/patches/0093-sweet-mt6363-keys.patch`,
+`bsd/dev/sweet_mt_keys.c`).** `sweet_keys_init()` keeps its name and now
+tries `sweet_mt_keys_start(level)` first; it returns 0 when the ADT has no
+`/sweet-keys` node, so sweet still runs the Qualcomm path unchanged.
+
+- Power/volume-up: poll MT6363 `TOPSTATUS` (0x001e) over the MT6983 PMIF at
+  `0x1c015000`. Register map is the vendor `mt6xxx_regs` table, AP software
+  interface channel 2 (`soc_chan = 2`): `STA 0x8a8`, `ACC 0x880`,
+  `RDATA 0x894`, `VLD_CLR 0x8a4` - re-derived from the enum in
+  `spmi-mtk-pmif-core.c`, not from the table's textual order. Each read is
+  the vendor FSM: wait `SWINF == IDLE`, write
+  `(3 << 30) | (sid << 24) | (bc << 16) | addr` to ACC (extended register
+  read long, the opcode an `reg_bits = 16` regmap uses), wait
+  `SWINF == WFVLDCLR`, take RDATA, write 1 to VLD_CLR.
+- Init writes are the vendor probe's own values (`INF_EN`/`ARB_EN` =
+  0xffffffff, `CMDISSUE_EN` = `INIT_DONE` = 1); LK normally leaves them so
+  no clock, regulator or IRQ work is done. `sweetkeys=1` reports only.
+- Volume-down: read `KP_MEM1..KP_MEM5` (0x04..0x14, u16) of `kp@1c00e000`
+  and take bit 0 of MEM1, active low, per `mtk-kpd.c`
+  (`pressed = (state & mask) == 0`). The bootloader keymap
+  (`mediatek,hw-init-map = <114 0 ...>`) puts volume-down at index 0. If
+  `KP_EN` bit 0 is clear the driver sets it; all-zero MEM registers mean
+  "not scanning" and are ignored. `sweetkpd=0` skips the block.
+- 20 ms poll from one kernel thread with a 2-sample (40 ms) debounce; a
+  failed SPMI read keeps the previous state instead of inventing a release.
+  Every edge prints `SWEET MT KEYS: <name> down=<0|1> topstatus=0x..`.
+
+**Tooling.** `tools/mkadt.py --board matisse` emits `/sweet-keys`
+(`compatible mediatek,mt6363-keys`, `reg = 0x1c015000 0x900 0x1c00e000
+0x1000`, `spmi-sid 4`, `power-bit 1`, `volup-bit 3`, `voldown-index 0`).
+`tools/mkpayload.py` moves `sweetkeys` from the pinned-off list to a range:
+0 off, 1 report only, 2 default. 63 host tests pass, and the patch applies
+cleanly on the 0092 tree; `validate-repo.py` still fails only on the
+pre-existing `[[ ]]` shell syntax in 0019/0020/0026.
+
+**CI.** Run **40127176212** (`10a6412`, Jinsens `codex/matisse-xnu-screen-log`).
+
+**Local clang check is not a signal here.** With CLT 17's SDK, `sys/param.h`
+-> SDK `string.h`/`refcnt_internal.h` fail identically for the existing
+`sweet_keys.c` and the new file (13 errors each), i.e. the environment, not
+this code. CI is the gate.
+
+**Next.** (1) Finish the bit naming above in recovery. (2) A hardware boot
+needs one observability decision first: `sweet_log_start()` refuses to flush
+unless `su.writable` and the matisse policy pins `ufsrw=0`, the framebuffer
+console is dark (0085 disabled) and the MTU3 live log is unproven - so a
+keys boot either allows `ufsrw=1` for the 4 MiB ring in userdata or gets a
+BRK cave probe. Writing `boot_a` needs explicit approval. (3) HID only
+reaches something once a real iOS root runs; on the 64 MiB HFS test volume
+`sweet_hid_key()` has no consumer and the log lines are the whole proof.
+
+## >>> ACTIVE 2026-10-25 (USB): first boot FAILED - no enumeration, 31 s logo loop <<<
+
+**Run 1 (approved): `entryprobe-el1-xnu-0092-usb.img`, SHA256 `d0c37b35...`,
+written into `boot_a` with recovery `dd`.** Result: the phone looped at the
+REDMI logo and **no `idVendor 0x1209` device ever appeared on the host** over a
+2-minute watch; `adb` never returned. The run script was cancelled before its
+restore step, which left the test image in `boot_a` and produced the loop the
+user saw - a cancelled run must be treated as "phone still armed".
+
+**Recovery that worked:** hold Power+Volume Down -> `fastboot`,
+`fastboot flash boot_a backup/recovery-20261021/boot_a-live-20261021.img`,
+then `fastboot reboot recovery`; `boot_a` re-verified `2931647a...` over adb.
+
+**Operational facts (learned the hard way):**
+
+- `fastboot boot` is **rejected** by this ABL (`Booting FAILED (remote:
+  'unknown command')`); a test image can only go into `boot_a`.
+- `fastboot flash` after another large write in the same session fails with
+  `usb_write failed with status e0004061` / `e00002d9`. One big write per
+  fresh, hand-entered fastboot session.
+- `fastboot reboot` (plain) makes the bootloader treat the recovery image as a
+  normal boot and fail AVB within seconds - that fast loop is not the XNU
+  test. Always `fastboot reboot recovery`.
+- A watchdog reset re-boots `boot_a`, so a hung XNU re-enters the same shim
+  forever: expect one manual Power+Volume Down per test, then
+  `research/matisse/20261025-usb/restore-boot-a.py`.
+
+**Ruled out by reading after the run:**
+
+- `ml_io_map()` handles an unaligned base - `osfmk/arm/io_map.c` returns
+  `start + phys_addr - trunc_page(phys_addr)`, so `ml_io_map(0x11203e00,
+  0x100)` really points at IPPC.
+- `mt_if_create()` is line-for-line `ud_if_create()`, and the
+  `kmem_alloc_contig(... PAGE_MASK, 0, 0, KMA_DATA|KMA_ZERO|KMA_PERMANENT,
+  VM_KERN_MEMORY_IOKIT)` + `pmap_find_phys` pair is identical to the sweet
+  driver that works on hardware.
+- So the only never-run-on-this-SoC code before the D+ pull-up is
+  `mt_hw_init()`.
+
+**Inference from "no enumeration":** reaching the last statement of
+`mt_hw_init()` (`POWER_MANAGEMENT |= SOFT_CONN|SUSPENDM_ENABLE`) holds the
+pull-up for the whole 31 s watchdog window even with the CPU halted. Caveat:
+a port that never completes the host's reset also produces no `ioreg` node,
+so "nothing listed" only proves the host never *reset* the device, not that
+D+ was never pulled up. With that caveat the failure still sits at or before
+soft-connect: either a bus stall/fault while driving IPPC/MAC (the
+`DEV_RST_CTRL` device-function reset is the only step that changes hardware
+state LK established), or that reset clears `DEVICE_CONTROL` (LK left `0x99`,
+DC_SESSION=1) so the port never electrically connects.
+
+**Run 2 (approved, ran, banner unread):**
+`entryprobe-el1-xnu-0092-usb-mtthread-brk.img`, SHA256 `d2f72e5b...` - same
+payload with `BRK #0x5357` at `_mt_thread` (`0xfffffe00074f0800`, replacing
+`sub sp, sp, #0x130`). A record whose `pc` is that VA means bring-up finished
+and only the poll loop is left to explain; no record means the fault is in
+`mt_hw_init`. The phone looped again and then came up on its own (probably the
+ABL retry counter falling back to slot B), so the banner has not been read;
+`boot_a` may still hold the BRK image.
+
+**Tooling added:** `run-usb-boot.py` (verify/write/readback/restore plus a
+host `0x1209` watch, now SIGTERM-safe), `restore-boot-a.py` (fastboot or adb
+restore, then reboot recovery and grep dmesg), `watch-usb.py`.
+
+## >>> 2026-10-25 (USB): pre-boot audit; image rebuilt on the 0092 kernel <<<
 
 **Request (user): "再继续推进 USB 移植功能".** Driver `0090-sweet-mtu3-usb.patch`
 is unchanged since commit `a686a6a`; this pass is the pre-boot audit plus a
