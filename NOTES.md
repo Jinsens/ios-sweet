@@ -60,6 +60,35 @@ disassembly. Decoded (live recovery values in parentheses for contrast):
   below 64 GiB (16-byte aligned, low 4 bits encoded if following the vendor
   QMU format).
 
+**Driver implemented (2026-10-25, not yet booted).** Commits `bca092a`
+(driver + ADT node + payload policy) and `a686a6a` (read the MAC only after
+the IPPC power check); pushed to `fork/codex/matisse-xnu-screen-log`.
+`xnu/patches/0090-sweet-mtu3-usb.patch` adds `bsd/dev/sweet_mtu3.c`, its
+`bsd/conf/files` entry, and a `sweet_mtu3_probe()` dispatch at the top of
+`sweet_usb_probe()` (returns 0 when the ADT has no `/sweet-usb`, so sweet
+still probes DWC3). The driver resets only the MTU3 device function, drives
+EP0 from FIFO0 and bulk/notification endpoints through the gen2cp QMU with
+36-bit DMA, polls from one kernel thread, and reuses the DWC3 CDC-ECM
+descriptors, `ue0` 192.168.7.2/24 and UDP 192.168.7.1:5140 log. `mkadt.py`
+adds a matisse-only `/sweet-usb`
+(`reg = 0x11201000 0x2e00 0x11203e00 0x100`); `mkpayload.py` accepts
+`sweetusb=0..2` on matisse and defaults to 2. Observation: local
+`clang -fsyntax-only` with the ci-40103653699 defines passes, 0090 applies
+clean to the patched tree, and all 63 host tests pass. CI run **40116784474
+success** (kernel `b0ad9f5e...`, 24 `SWEET MTU3` strings linked).
+Built, **not flashed**, `research/matisse/20261025-usb/`: ADT
+`matisse-usb.adt` (`d61d7fbf...`, has `/sweet-usb`), payload
+`matisse-xnu-0090-usb.payload` 16,629,568 B (`4e0d07a5...`, cmdline
+`... rd=ufsroot0 ufsrw=0 ufscache=1 -noprogress ... sweetusb=2`), entryprobe
+image `entryprobe-el1-xnu-0090-usb.img` 26,578,944 B (`e12259a7...`) with
+the usual el1-xnu recipe (offsets unchanged: vector `0xb78`, high
+`-0x4488`, TTBR0 `0x10117c000`, clean limit `0x108000000`, `--ufs-init
+--ufs-query full`, template `backup/boot_a-stock.img`). Verified the
+decompressed kernel embeds the payload byte-for-byte at 48,947,216 and the
+ADT carries the USB node. The phone was in recovery; flashing awaits
+explicit user confirmation. Host side (macOS) must wait for the CDC-ECM
+interface, assign 192.168.7.1/24 and listen on UDP 5140.
+
 **Takeover plan (next):** mask/clear LV1, pulse IPPC DEV_RST_CTRL bit0 to
 reset only the device function (not the IP/clock domains), set DEVICE_CONF=0,
 EP0 maxpkt 64, then re-enable interrupts and let the host re-enumerate.
