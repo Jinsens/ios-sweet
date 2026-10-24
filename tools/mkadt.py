@@ -247,6 +247,14 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         ('panel', cstr('l11_38_0a_0a_dsc_cmd')),
     ])]
 
+    # bsd/dev/sweet_mtu3.c: MT6983 USB device controller (MAC) and its
+    # IPPC power/clock sub-block. LK leaves both powered and soft-connected.
+    usb = [] if board != 'matisse' else [node('sweet-usb', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6983-mtu3')),
+        ('reg', u64(0x11201000, 0x2e00, 0x11203e00, 0x100)),
+    ])]
+
     # bsd/dev/sweet_ufs.c: the UFS host the bootloader leaves running.
     # matisse is MediaTek ufshci@112b0000; sweet is the Qualcomm host.
     if board == 'matisse':
@@ -289,7 +297,7 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + display + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + display + usb + product + ([] if qemu else [ufs]))
 
 
 if __name__ == '__main__':

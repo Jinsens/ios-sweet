@@ -1,0 +1,1602 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/sweet_mtu3.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -39,6 +39,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ void sweet_usb_probe(void);
++extern int sweet_mtu3_probe(int enabled);
+ static void sweet_usb_gadget_start(vm_offset_t dwc);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ 
+@@ -85,6 +86,10 @@
+ 	if (!enabled) {
+ 		return;
+ 	}
++	/* matisse has a MediaTek MTU3 instead of the Qualcomm DWC3 */
++	if (sweet_mtu3_probe(enabled)) {
++		return;
++	}
+ 	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
+ 	if (gcc == 0) {
+ 		printf("SWEET USB: GCC map failed\n");
+--- /dev/null
++++ b/bsd/dev/sweet_mtu3.c
+@@ -0,0 +1,1568 @@
++/*
++ * SWEET: MediaTek MTU3 (MT6983) USB device - CDC-ECM Ethernet and live log.
++ *
++ * matisse has a MediaTek MTU3 controller (mac@11201000, ippc@11203e00,
++ * SPI 160) rather than sweet's Qualcomm DWC3. LK leaves it powered, clocked
++ * and connected in high-speed device mode; this driver reuses those clocks
++ * and PHYs, resets only the device function (IPPC DEV_RST_CTRL bit 0), and
++ * brings the controller up for a CDC-ECM function. No GIC interrupt is used:
++ * EP0 and the QMU rings are polled from one kernel thread, like the UFS
++ * driver. Register names and the EP0/QMU state machines follow the vendor
++ * driver (drivers/usb/mtu3) for MT6983.
++ *
++ * Transport choices:
++ *  - EP0 is FIFO based (FIFO0): the data stage is copied by the CPU.
++ *  - Bulk IN/OUT and the notification IN use the QMU with gen2cp GPDs.
++ *  - The USB host and the controller are not cache coherent: the GPD rings
++ *    and data buffers are cleaned/invalidated around every hand-off.
++ *  - LK enabled 36-bit DMA (MISC_CTRL bit 31); GPD buffer and next-pointer
++ *    high nibbles are carried in bits 24:27 and 28:31 of dw0 (TX) or dw3
++ *    (RX), and the ring start high nibble in the QHIAR registers.
++ *
++ * Boot args: sweetusb=1 reports state only, sweetusb=2 (default for
++ * matisse) starts the device; sweetusblog=0 disables the UDP live log.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <kern/locks.h>
++#include <sys/kpi_mbuf.h>
++#include <sys/kpi_socket.h>
++#include <sys/sockio.h>
++#include <net/if.h>
++#include <net/if_types.h>
++#include <net/ethernet.h>
++#include <net/if_ether.h>
++#include <net/ether_if_module.h>
++#include <net/kpi_interface.h>
++#include <net/kpi_protocol.h>
++#include <netinet/in.h>
++#include <net/if_media.h>
++#include <net/dlil.h>
++#include <sys/kern_event.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
++extern uint64_t sweet_log_position(void);
++
++int sweet_mtu3_probe(int enabled);
++
++#define MTU_BIT(x)              (1u << (x))
++#define MTU_MASK(x)             (1u << (x))
++
++/* ---- IPPC (power/clock/reset sub-block) ---- */
++#define IPPC_PW_CTRL2           0x0008
++#define IPPC_PW_STS1            0x0010
++#define IPPC_PW_STS2            0x0014
++#define IPPC_OTG_STS            0x0018
++#define IPPC_DEV_CAP            0x0028
++#define IPPC_U3_CTRL_0P         0x0030
++#define IPPC_U2_CTRL_0P         0x0050
++#define IPPC_REF_CK_CTRL        0x008c
++#define IPPC_DEV_RST_CTRL       0x0098
++#define IPPC_HW_ID              0x00a0
++#define IPPC_HW_SUB_ID          0x00a4
++
++#define IPPC_IP_DEV_PDN         MTU_BIT(0)
++#define IPPC_SYSPLL_STABLE      MTU_BIT(0)
++#define IPPC_REF_RST_B          MTU_BIT(8)
++#define IPPC_SYS125_RST_B       MTU_BIT(10)
++#define IPPC_XHCI_RST_B         MTU_BIT(11)
++#define IPPC_U3_MAC_RST_B       MTU_BIT(16)
++#define IPPC_U2_MAC_RST_B       MTU_BIT(0)
++#define IPPC_VBUS_VALID         MTU_BIT(9)
++#define IPPC_U3_DIS             MTU_BIT(0)
++#define IPPC_U3_PDN             MTU_BIT(1)
++#define IPPC_U3_HOST_SEL        MTU_BIT(2)
++#define IPPC_U3_DUAL_MODE       MTU_BIT(7)
++#define IPPC_U3_SSP_SPEED       MTU_BIT(9)
++#define IPPC_U2_DIS             MTU_BIT(0)
++#define IPPC_U2_PDN             MTU_BIT(1)
++#define IPPC_U2_HOST            MTU_BIT(2)
++#define IPPC_U2_OTG_SEL         MTU_BIT(7)
++#define IPPC_DEV_SW_RST         MTU_BIT(0)
++
++/* ---- MAC device CSRs ---- */
++#define MAC_LV1ISR              0x0000
++#define MAC_LV1IER              0x0004
++#define MAC_LV1IESR             0x0008
++#define MAC_LV1IECR             0x000c
++#define MAC_EPISR               0x0080
++#define MAC_EPIER               0x0084
++#define MAC_EPIESR              0x0088
++#define MAC_EPIECR              0x008c
++#define MAC_EP0CSR              0x0100
++#define MAC_RXCOUNT0            0x0108
++#define MAC_FIFO0               0x0300
++#define MAC_TX1CSR0             0x0110
++#define MAC_RX1CSR0             0x0210
++#define MAC_QCR1                0x0404
++#define MAC_QCR3                0x040c
++#define MAC_QFCR                0x0428
++#define MAC_TXQHIAR1            0x0484
++#define MAC_RXQHIAR1            0x04c4
++#define MAC_TXQCSR1             0x0510
++#define MAC_TXQSAR1             0x0514
++#define MAC_TXQCPR1             0x0518
++#define MAC_RXQCSR1             0x0610
++#define MAC_RXQSAR1             0x0614
++#define MAC_RXQCPR1             0x0618
++#define MAC_QISAR0              0x0700
++#define MAC_QIER0               0x0704
++#define MAC_QIESR0              0x0708
++#define MAC_QIECR0              0x070c
++#define MAC_QISAR1              0x0710
++#define MAC_QIER1               0x0714
++#define MAC_QIESR1              0x0718
++#define MAC_QIECR1              0x071c
++#define MAC_TQERRIR0            0x0780
++#define MAC_RQERRIR0            0x07c0
++#define MAC_RQERRIR1            0x07d0
++#define MAC_DEVICE_CONF         0x0800
++#define MAC_EP_RST              0x0804
++#define MAC_USB2_EPCTL_LPM      0x0828
++#define MAC_DEV_LINK_INTR       0x0854
++#define MAC_EPCTL_LPM_FC_CHK    0x0860
++#define MAC_CAP_EP0FFSZ         0x0c04
++#define MAC_CAP_EPNTXFFSZ       0x0c08
++#define MAC_CAP_EPNRXFFSZ       0x0c0c
++#define MAC_MISC_CTRL           0x0c84
++#define MAC_LTSSM_CTRL          0x1410
++#define MAC_USB3_CONFIG         0x141c
++#define MAC_TXDEEMPH            0x1420
++#define MAC_U3U2_SWITCH_CTRL    0x1570
++#define MAC_LINK_POWER_CONTROL  0x1610
++#define MAC_POWER_MANAGEMENT    0x2404
++#define MAC_DEVICE_CONTROL      0x240c
++#define MAC_USB2_TEST_MODE      0x2414
++#define MAC_COMMON_USB_INTR_EN  0x2418
++#define MAC_COMMON_USB_INTR     0x241c
++#define MAC_LINK_RESET_INFO     0x2424
++#define MAC_USB20_LPM_PARAMETER 0x2444
++
++#define TX_DMAREQEN             MTU_BIT(29)
++#define TX_TXPKTRDY             MTU_BIT(18)
++#define TX_TYPE(x)              (((x) & 3) << 4)
++#define TX_SLOT(x)              (((x) & 0x3f) << 8)
++#define TX_MAX_PKT_G2(x)        (((x) & 0xff) << 24)
++#define TX_MULT_G2(x)           (((x) & 7) << 21)
++#define TX_BINTERVAL(x)         (((x) & 0xff) << 24)
++#define TX_FIFOSEGSIZE(x)       (((x) & 0xf) << 16)
++#define TX_FIFOADDR(x)          ((x) & 0x1fff)
++#define RX_DMAREQEN             MTU_BIT(29)
++#define RX_TYPE(x)              (((x) & 3) << 4)
++#define RX_SLOT(x)              (((x) & 0x3f) << 8)
++#define RX_MAX_PKT_G2(x)        (((x) & 0xff) << 24)
++#define RX_MULT_G2(x)           (((x) & 7) << 21)
++#define RX_BINTERVAL(x)         (((x) & 0xff) << 24)
++#define RX_FIFOSEGSIZE(x)       (((x) & 0xf) << 16)
++#define RX_FIFOADDR(x)          ((x) & 0x1fff)
++
++#define EP_TYPE_BULK            0
++#define EP_TYPE_INT             1
++
++#define EP0_SENDSTALL           MTU_BIT(25)
++#define EP0_FIFOFULL            MTU_BIT(23)
++#define EP0_SENTSTALL           MTU_BIT(22)
++#define EP0_DPHTX               MTU_BIT(20)
++#define EP0_DATAEND             MTU_BIT(19)
++#define EP0_TXPKTRDY            MTU_BIT(18)
++#define EP0_SETUPPKTRDY         MTU_BIT(17)
++#define EP0_RXPKTRDY            MTU_BIT(16)
++#define EP0_W1C_BITS            (~(EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL))
++
++#define QMU_Q_ACTIVE            MTU_BIT(15)
++#define QMU_Q_STOP              MTU_BIT(2)
++#define QMU_Q_RESUME            MTU_BIT(1)
++#define QMU_Q_START             MTU_BIT(0)
++#define QMU_TX_ZLP(ep)          (MTU_BIT(0) << (ep))
++#define QMU_RX_COZ(ep)          (MTU_BIT(16) << (ep))
++#define QMU_RX_ZLP(ep)          (MTU_BIT(0) << (ep))
++#define QMU_TX_DONE(ep)         (MTU_BIT(0) << (ep))
++#define QMU_RX_DONE(ep)         (MTU_BIT(16) << (ep))
++
++#define PM_SOFT_CONN            MTU_BIT(6)
++#define PM_HS_ENABLE            MTU_BIT(5)
++#define PM_LPM_BESL_STALL       MTU_BIT(14)
++#define PM_LPM_BESLD_STALL      MTU_BIT(13)
++#define PM_LPM_HRWE             MTU_BIT(10)
++#define PM_SUSPENDM_ENABLE      MTU_BIT(0)
++#define DEVCTL_DC_SESSION       MTU_BIT(0)
++
++#define USB3_EN                 MTU_BIT(0)
++#define LTSSM_SOFT_U3_EXIT_EN   MTU_BIT(2)
++#define LP_SW_U1_REQ_EN         MTU_BIT(0)
++#define LP_SW_U2_REQ_EN         MTU_BIT(1)
++#define TESTMODE_U2U3_AUTO      MTU_BIT(10)
++#define SWITCH_SOFTCON_CLR_AUTO MTU_BIT(0)
++#define LPM_L1_EXIT_EP0_CHK     MTU_BIT(0)
++
++#define MISC_DMA_36BIT          MTU_BIT(31)
++#define MISC_VBUS_ON            MTU_BIT(1)
++#define MISC_VBUS_FRC_EN        MTU_BIT(0)
++
++#define COMMON_SUSPEND          MTU_BIT(0)
++#define COMMON_RESUME           MTU_BIT(1)
++#define COMMON_RESET            MTU_BIT(2)
++#define COMMON_SOF              MTU_BIT(3)
++#define COMMON_CONN             MTU_BIT(4)
++#define COMMON_DISCONN          MTU_BIT(5)
++#define COMMON_LPM              MTU_BIT(8)
++#define COMMON_LPM_RESUME       MTU_BIT(9)
++#define DEV_LINK_SPEED_CHG      MTU_BIT(0)
++
++#define MTU_SPEED_FULL          1
++#define MTU_SPEED_HIGH          3
++
++#define EP_IN_BULK              1
++#define EP_OUT_BULK             1
++#define EP_IN_INT               2
++
++#define MT_SLOT_U3              2
++#define MT_SLOT_U2              1
++#define MT_FIFO_UNIT            512
++#define MT_FIFO_SEG_SHIFT       9
++#define MT_BULK_MAXP_HS         512
++#define MT_BULK_MAXP_FS         64
++#define MT_INT_MAXP             16
++#define MT_EP0_MAXP             64
++
++/* ---- DMA area (one contiguous, non-coherent allocation) ---- */
++#define MT_TX_GPD_OFF           0x0000
++#define MT_TX_GPD_N             2
++#define MT_RX_GPD_OFF           0x0040
++#define MT_RX_GPD_N             8
++#define MT_INT_GPD_OFF          0x00c0
++#define MT_INT_GPD_N            2
++#define MT_EP0_DATA_OFF         0x0200
++#define MT_EP0_DATA_SIZE        0x0200
++#define MT_EP0_OUT_OFF          0x0400
++#define MT_NOTIFY_OFF           0x0600
++#define MT_TX_BUF_OFF           0x0800
++#define MT_TX_BUF_SIZE          0x0800
++#define MT_RX_BUF_OFF           0x1000
++#define MT_RX_BUF_SIZE          0x0800
++#define MT_DMA_SIZE             0x5000
++
++#define MT_GPD_HWO              1u
++#define MT_GPD_ZLP              MTU_BIT(6)
++#define MT_GPD_IOC              MTU_BIT(7)
++
++#define MT_TXQ                  32
++
++struct mt_gpd {
++	uint32_t dw0;
++	uint32_t next;
++	uint32_t buf;
++	uint32_t dw3;
++};
++
++static const uint8_t mt_dev_desc[18] = {
++	18, 1, 0x00, 0x02, 0x02, 0x00, 0x00, 64,
++	0x09, 0x12, 0x01, 0x00, 0x00, 0x01, 1, 2, 3, 1,
++};
++static uint8_t mt_cfg_desc[80] = {
++	9, 2, 80, 0, 2, 1, 0, 0x80, 250,
++	9, 4, 0, 0, 1, 0x02, 0x06, 0x00, 0,
++	5, 0x24, 0x00, 0x10, 0x01,
++	5, 0x24, 0x06, 0, 1,
++	13, 0x24, 0x0f, 4, 0, 0, 0, 0, 0xea, 0x05, 0, 0, 0,
++	7, 5, 0x82, 0x03, 16, 0, 9,
++	9, 4, 1, 0, 0, 0x0a, 0x00, 0x00, 0,
++	9, 4, 1, 1, 2, 0x0a, 0x00, 0x00, 0,
++	7, 5, 0x81, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
++};
++static const char *const mt_strings[] = {
++	NULL, "ios-sweet", "Sweet iOS (USB Ethernet)", "0001", "02005E77EE01",
++};
++static const uint8_t mt_phone_mac[ETHER_ADDR_LEN] = { 0x02, 0x00, 0x5e, 0x77, 0xee, 0x02 };
++
++enum mt_ep0_state {
++	MT_EP0_SETUP,
++	MT_EP0_TX,
++	MT_EP0_TX_END,
++	MT_EP0_RX,
++};
++
++static struct {
++	vm_offset_t mac;
++	vm_offset_t ippc;
++	vm_offset_t dma;
++	uint64_t    dma_pa;
++	uint32_t    hw_version;
++	uint32_t    speed;
++	bool        gen2cp;
++	bool        is_u3;
++	bool        configured;
++	bool        link_up;
++	bool        suspended;
++	ifnet_t     ifp;
++	lck_mtx_t  *lock;
++	mbuf_t      txq[MT_TXQ];
++	unsigned    txq_head;
++	unsigned    txq_count;
++	bool        tx_busy;
++	uint32_t    tx_gpd;
++	bool        int_busy;
++	uint32_t    int_gpd;
++	uint32_t    rx_deq;
++	enum mt_ep0_state ep0_state;
++	uint32_t    ep0_len;
++	uint32_t    ep0_done;
++	uint32_t    ep0_rx_want;
++	uint32_t    ep0_rx_total;
++	uint32_t    setups;
++	uint32_t    events;
++	uint32_t    errors;
++	uint32_t    resets;
++	uint64_t    rx_frames;
++	uint64_t    tx_frames;
++	int         sleep_chan;
++} mt;
++
++static inline void
++mt_wr(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(mt.mac + off) = v;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static inline uint32_t
++mt_rd(uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(mt.mac + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++mt_iwr(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(mt.ippc + off) = v;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static inline uint32_t
++mt_ird(uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(mt.ippc + off);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++mt_sleep_ms(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&mt.sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++mt_sync(uint32_t off, uint32_t len)
++{
++	flush_dcache64((addr64_t)(mt.dma_pa + off), len, TRUE);
++}
++
++static struct mt_gpd *
++mt_gpd(uint32_t ring_off, uint32_t idx)
++{
++	return (struct mt_gpd *)(mt.dma + ring_off) + idx;
++}
++
++static void
++mt_gpd_tx(uint32_t idx, uint32_t buf_off, uint32_t len, bool zlp)
++{
++	volatile struct mt_gpd *g = mt_gpd(MT_TX_GPD_OFF, idx);
++	uint64_t bpa = mt.dma_pa + buf_off;
++	uint64_t npa = mt.dma_pa + MT_TX_GPD_OFF + ((idx + 1) % MT_TX_GPD_N) * sizeof(struct mt_gpd);
++
++	g->buf = (uint32_t)bpa;
++	g->next = (uint32_t)npa;
++	g->dw3 = len & 0xfffff;
++	__asm__ volatile ("dmb sy" ::: "memory");
++	g->dw0 = (((uint32_t)(bpa >> 32) & 0xf) << 24) |
++	    (((uint32_t)(npa >> 32) & 0xf) << 28) |
++	    (zlp ? MT_GPD_ZLP : 0) | MT_GPD_IOC | MT_GPD_HWO;
++	mt_sync(MT_TX_GPD_OFF, MT_TX_GPD_N * sizeof(struct mt_gpd));
++}
++
++static void
++mt_gpd_rx(uint32_t idx, uint32_t buf_off, uint32_t len)
++{
++	volatile struct mt_gpd *g = mt_gpd(MT_RX_GPD_OFF, idx);
++	uint64_t bpa = mt.dma_pa + buf_off;
++	uint64_t npa = mt.dma_pa + MT_RX_GPD_OFF + ((idx + 1) % MT_RX_GPD_N) * sizeof(struct mt_gpd);
++
++	g->buf = (uint32_t)bpa;
++	g->next = (uint32_t)npa;
++	g->dw3 = (((uint32_t)(bpa >> 32) & 0xf) << 24) |
++	    (((uint32_t)(npa >> 32) & 0xf) << 28);
++	__asm__ volatile ("dmb sy" ::: "memory");
++	g->dw0 = ((len & 0xfffff) << 12) | MT_GPD_IOC | MT_GPD_HWO;
++	mt_sync(MT_RX_GPD_OFF, MT_RX_GPD_N * sizeof(struct mt_gpd));
++}
++
++static void
++mt_gpd_int(uint32_t idx, uint32_t len)
++{
++	volatile struct mt_gpd *g = mt_gpd(MT_INT_GPD_OFF, idx);
++	uint64_t bpa = mt.dma_pa + MT_NOTIFY_OFF;
++	uint64_t npa = mt.dma_pa + MT_INT_GPD_OFF + ((idx + 1) % MT_INT_GPD_N) * sizeof(struct mt_gpd);
++
++	g->buf = (uint32_t)bpa;
++	g->next = (uint32_t)npa;
++	g->dw3 = len & 0xfffff;
++	__asm__ volatile ("dmb sy" ::: "memory");
++	g->dw0 = (((uint32_t)(bpa >> 32) & 0xf) << 24) |
++	    (((uint32_t)(npa >> 32) & 0xf) << 28) | MT_GPD_IOC | MT_GPD_HWO;
++	mt_sync(MT_INT_GPD_OFF, MT_INT_GPD_N * sizeof(struct mt_gpd));
++}
++
++static void mt_tx_kick_locked(void);
++static void mt_link_event(bool up);
++static void mt_notify_connected(void);
++
++/* ---- EP0 FIFO helpers ---- */
++
++static void
++mt_ep0_fifo_write(const uint8_t *src, uint32_t len)
++{
++	uint32_t i = 0;
++
++	while (len - i >= 4) {
++		uint32_t v;
++		memcpy(&v, src + i, 4);
++		mt_wr(MAC_FIFO0, v);
++		i += 4;
++	}
++	if (len - i >= 2) {
++		uint16_t v;
++		memcpy(&v, src + i, 2);
++		*(volatile uint16_t *)(mt.mac + MAC_FIFO0) = v;
++		i += 2;
++	}
++	if (len - i) {
++		*(volatile uint8_t *)(mt.mac + MAC_FIFO0) = src[i];
++	}
++}
++
++static void
++mt_ep0_fifo_read(uint8_t *dst, uint32_t len)
++{
++	uint32_t i = 0;
++
++	while (len - i >= 4) {
++		uint32_t v = mt_rd(MAC_FIFO0);
++		memcpy(dst + i, &v, 4);
++		i += 4;
++	}
++	if (len - i) {
++		uint32_t v = mt_rd(MAC_FIFO0);
++		memcpy(dst + i, &v, len - i);
++	}
++}
++
++static void
++mt_ep0_w1c_or(uint32_t bits)
++{
++	mt_wr(MAC_EP0CSR, (mt_rd(MAC_EP0CSR) & EP0_W1C_BITS) | bits);
++}
++
++static void
++mt_ep0_maxp(uint32_t maxp)
++{
++	uint32_t csr = mt_rd(MAC_EP0CSR) & EP0_W1C_BITS;
++	mt_wr(MAC_EP0CSR, (csr & ~0x3ffu) | (maxp & 0x3ff));
++}
++
++static void
++mt_ep0_reset_state(void)
++{
++	mt_ep0_maxp(MT_EP0_MAXP);
++	mt.ep0_state = MT_EP0_SETUP;
++	mt.ep0_len = 0;
++	mt.ep0_done = 0;
++}
++
++static void
++mt_ep0_stall(uint32_t wlength)
++{
++	uint32_t bits = EP0_SENDSTALL;
++	if (wlength == 0) {
++		bits |= EP0_SETUPPKTRDY;
++	}
++	mt_ep0_w1c_or(bits);
++	mt.ep0_state = MT_EP0_SETUP;
++}
++
++static void
++mt_ep0_status_stage(void)
++{
++	mt_ep0_w1c_or(EP0_SETUPPKTRDY | EP0_DATAEND);
++	mt.ep0_state = MT_EP0_SETUP;
++}
++
++static uint32_t
++mt_string_desc(unsigned idx, uint8_t *out)
++{
++	if (idx == 0) {
++		out[0] = 4;
++		out[1] = 3;
++		out[2] = 0x09;
++		out[3] = 0x04;
++		return 4;
++	}
++	if (idx >= sizeof(mt_strings) / sizeof(mt_strings[0])) {
++		return 0;
++	}
++	const char *str = mt_strings[idx];
++	uint32_t n = 2;
++	for (; *str && n < 126; str++) {
++		out[n++] = (uint8_t)*str;
++		out[n++] = 0;
++	}
++	out[0] = (uint8_t)n;
++	out[1] = 3;
++	return n;
++}
++
++/* ---- endpoints and QMU ---- */
++
++static uint32_t
++mt_speed(void)
++{
++	return mt_rd(MAC_DEVICE_CONF) & 7;
++}
++
++static void
++mt_desc_for_speed(uint32_t speed)
++{
++	uint16_t maxp = speed == MTU_SPEED_FULL ? MT_BULK_MAXP_FS : MT_BULK_MAXP_HS;
++
++	mt_cfg_desc[70] = maxp & 0xff;
++	mt_cfg_desc[71] = maxp >> 8;
++	mt_cfg_desc[77] = maxp & 0xff;
++	mt_cfg_desc[78] = maxp >> 8;
++}
++
++static void
++mt_fifo_layout(uint32_t *tx_base, uint32_t *rx_base, uint32_t *tx_limit, uint32_t *rx_limit)
++{
++	uint32_t tx_size = mt_rd(MAC_CAP_EPNTXFFSZ);
++	uint32_t rx_size = mt_rd(MAC_CAP_EPNRXFFSZ);
++
++	if (mt.is_u3) {
++		*tx_base = 0;
++		*rx_base = 0;
++		*tx_limit = tx_size / MT_FIFO_UNIT;
++		*rx_limit = rx_size / MT_FIFO_UNIT;
++	} else {
++		*tx_base = 64;
++		*tx_limit = (tx_size / MT_FIFO_UNIT) >> 1;
++		*rx_base = *tx_base + *tx_limit * MT_FIFO_UNIT;
++		*rx_limit = *tx_limit;
++	}
++}
++
++static void
++mt_cfg_out(uint32_t ep, uint32_t maxp, uint32_t type, uint32_t fifo_addr, uint32_t slot)
++{
++	uint32_t csr0 = maxp | RX_DMAREQEN;
++	uint32_t csr1 = RX_SLOT(slot) | RX_TYPE(type) | RX_MAX_PKT_G2(0) | RX_MULT_G2(0);
++	uint32_t csr2 = RX_FIFOADDR(fifo_addr >> 4) | RX_FIFOSEGSIZE(MT_FIFO_SEG_SHIFT);
++
++	mt_wr(MAC_RX1CSR0 + (ep - 1) * 0x10, csr0);
++	mt_wr(MAC_RX1CSR0 + 4 + (ep - 1) * 0x10, csr1);
++	mt_wr(MAC_RX1CSR0 + 8 + (ep - 1) * 0x10, csr2);
++}
++
++static void
++mt_cfg_in(uint32_t ep, uint32_t maxp, uint32_t type, uint32_t fifo_addr, uint32_t interval, uint32_t slot)
++{
++	uint32_t csr0 = maxp | TX_DMAREQEN;
++	uint32_t csr1 = TX_SLOT(slot) | TX_TYPE(type) | TX_MAX_PKT_G2(0) | TX_MULT_G2(0);
++	uint32_t csr2 = TX_FIFOADDR(fifo_addr >> 4) | TX_FIFOSEGSIZE(MT_FIFO_SEG_SHIFT);
++
++	if (type != EP_TYPE_BULK) {
++		csr2 |= TX_BINTERVAL(interval);
++	}
++	mt_wr(MAC_TX1CSR0 + (ep - 1) * 0x10, csr0);
++	mt_wr(MAC_TX1CSR0 + 4 + (ep - 1) * 0x10, csr1);
++	mt_wr(MAC_TX1CSR0 + 8 + (ep - 1) * 0x10, csr2);
++}
++
++static void
++mt_qmu_stop(uint32_t ep, bool in)
++{
++	uint32_t csr = in ? (MAC_TXQCSR1 + (ep - 1) * 0x10) : (MAC_RXQCSR1 + (ep - 1) * 0x10);
++	int i;
++
++	if (!(mt_rd(csr) & QMU_Q_ACTIVE)) {
++		return;
++	}
++	mt_wr(csr, QMU_Q_STOP);
++	for (i = 0; i < 1000; i++) {
++		if (!(mt_rd(csr) & QMU_Q_ACTIVE)) {
++			return;
++		}
++		delay(1);
++	}
++	printf("SWEET MTU3: ep%u %s QMU stop timeout\n", ep, in ? "IN" : "OUT");
++}
++
++static void
++mt_qmu_start(uint32_t ep, bool in, uint32_t ring_off)
++{
++	uint64_t pa = mt.dma_pa + ring_off;
++	uint32_t sar = in ? (MAC_TXQSAR1 + (ep - 1) * 0x10) : (MAC_RXQSAR1 + (ep - 1) * 0x10);
++	uint32_t hi = in ? (MAC_TXQHIAR1 + (ep - 1) * 4) : (MAC_RXQHIAR1 + (ep - 1) * 4);
++	uint32_t csr = in ? (MAC_TXQCSR1 + (ep - 1) * 0x10) : (MAC_RXQCSR1 + (ep - 1) * 0x10);
++	uint32_t v;
++
++	mt_wr(sar, (uint32_t)pa);
++	v = mt_rd(hi);
++	mt_wr(hi, (v & ~0xfu) | ((uint32_t)(pa >> 32) & 0xf));
++	if (mt_rd(csr) & QMU_Q_ACTIVE) {
++		mt_qmu_stop(ep, in);
++	}
++	mt_wr(csr, QMU_Q_START);
++}
++
++static void
++mt_qmu_resume(uint32_t ep, bool in)
++{
++	uint32_t csr = in ? (MAC_TXQCSR1 + (ep - 1) * 0x10) : (MAC_RXQCSR1 + (ep - 1) * 0x10);
++
++	mt_wr(csr, QMU_Q_RESUME);
++	if (!(mt_rd(csr) & QMU_Q_ACTIVE)) {
++		mt_wr(csr, QMU_Q_RESUME);
++	}
++}
++
++static void
++mt_rings_init(void)
++{
++	uint32_t i;
++
++	memset((void *)(mt.dma + MT_TX_GPD_OFF), 0, MT_TX_GPD_N * sizeof(struct mt_gpd));
++	memset((void *)(mt.dma + MT_RX_GPD_OFF), 0, MT_RX_GPD_N * sizeof(struct mt_gpd));
++	memset((void *)(mt.dma + MT_INT_GPD_OFF), 0, MT_INT_GPD_N * sizeof(struct mt_gpd));
++	memset((void *)(mt.dma + MT_TX_BUF_OFF), 0, MT_TX_BUF_SIZE);
++	for (i = 0; i < MT_RX_GPD_N; i++) {
++		mt_gpd_rx(i, MT_RX_BUF_OFF + i * MT_RX_BUF_SIZE, MT_RX_BUF_SIZE);
++	}
++	mt.tx_busy = false;
++	mt.tx_gpd = 0;
++	mt.int_busy = false;
++	mt.int_gpd = 0;
++	mt.rx_deq = 0;
++}
++
++static void
++mt_ep_deconfig(uint32_t ep, bool in)
++{
++	mt_qmu_stop(ep, in);
++	if (in) {
++		mt_wr(MAC_TX1CSR0 + (ep - 1) * 0x10, 0);
++		mt_wr(MAC_TX1CSR0 + 4 + (ep - 1) * 0x10, 0);
++		mt_wr(MAC_TX1CSR0 + 8 + (ep - 1) * 0x10, 0);
++		mt_wr(MAC_EP_RST, mt_rd(MAC_EP_RST) | (MTU_BIT(16) << ep));
++		mt_wr(MAC_EP_RST, mt_rd(MAC_EP_RST) & ~(MTU_BIT(16) << ep));
++	} else {
++		mt_wr(MAC_RX1CSR0 + (ep - 1) * 0x10, 0);
++		mt_wr(MAC_RX1CSR0 + 4 + (ep - 1) * 0x10, 0);
++		mt_wr(MAC_RX1CSR0 + 8 + (ep - 1) * 0x10, 0);
++		mt_wr(MAC_EP_RST, mt_rd(MAC_EP_RST) | (MTU_BIT(0) << ep));
++		mt_wr(MAC_EP_RST, mt_rd(MAC_EP_RST) & ~(MTU_BIT(0) << ep));
++	}
++}
++
++static void
++mt_deconfigure(void)
++{
++	mbuf_t m;
++
++	if (!mt.configured) {
++		return;
++	}
++	mt.configured = false;
++	mt.link_up = false;
++	mt_ep_deconfig(EP_IN_BULK, true);
++	mt_ep_deconfig(EP_OUT_BULK, false);
++	mt_ep_deconfig(EP_IN_INT, true);
++	if (mt.lock != NULL) {
++		lck_mtx_lock(mt.lock);
++		while (mt.txq_count > 0) {
++			m = mt.txq[mt.txq_head];
++			mt.txq_head = (mt.txq_head + 1) % MT_TXQ;
++			mt.txq_count--;
++			mbuf_freem(m);
++		}
++		mt.tx_busy = false;
++		lck_mtx_unlock(mt.lock);
++	}
++	mt_link_event(false);
++}
++
++static void
++mt_configure(void)
++{
++	uint32_t tx_base, rx_base, tx_limit, rx_limit;
++	uint32_t speed = mt_speed();
++	uint32_t bulk_maxp = speed == MTU_SPEED_FULL ? MT_BULK_MAXP_FS : MT_BULK_MAXP_HS;
++	uint32_t v;
++
++	if (mt.configured) {
++		return;
++	}
++	mt_fifo_layout(&tx_base, &rx_base, &tx_limit, &rx_limit);
++	if (tx_limit < 4 || rx_limit < 3) {
++		printf("SWEET MTU3: FIFO too small for ECM (tx %u rx %u units)\n", tx_limit, rx_limit);
++		return;
++	}
++	mt_rings_init();
++	/*
++	 * FIFO layout (512-byte units): TX ep2 interrupt at 0 (1 unit),
++	 * TX ep1 bulk at 1..3 (slot 2 -> 3 units); RX ep1 bulk at 0..2.
++	 */
++	mt_cfg_out(EP_OUT_BULK, bulk_maxp, EP_TYPE_BULK, rx_base, mt.is_u3 ? MT_SLOT_U3 : MT_SLOT_U2);
++	mt_cfg_in(EP_IN_BULK, bulk_maxp, EP_TYPE_BULK, tx_base + MT_FIFO_UNIT, 0,
++	    mt.is_u3 ? MT_SLOT_U3 : MT_SLOT_U2);
++	mt_cfg_in(EP_IN_INT, MT_INT_MAXP, EP_TYPE_INT, tx_base, 8, 0);
++
++	/* ZLP is selected by the GPD, RX accepts ZLP and advances. */
++	mt_wr(MAC_QCR1, mt_rd(MAC_QCR1) | QMU_TX_ZLP(EP_IN_BULK) | QMU_TX_ZLP(EP_IN_INT));
++	v = mt_rd(MAC_QCR3) & ~QMU_RX_ZLP(EP_OUT_BULK);
++	mt_wr(MAC_QCR3, v | QMU_RX_COZ(EP_OUT_BULK));
++
++	mt_wr(MAC_QISAR0, 0xffffffff);
++	mt_wr(MAC_TQERRIR0, 0xffffffff);
++	mt_wr(MAC_RQERRIR0, 0xffffffff);
++	mt_wr(MAC_RQERRIR1, 0xffffffff);
++	mt_wr(MAC_QIER0, QMU_TX_DONE(EP_IN_BULK) | QMU_TX_DONE(EP_IN_INT) | QMU_RX_DONE(EP_OUT_BULK));
++
++	mt_qmu_start(EP_OUT_BULK, false, MT_RX_GPD_OFF);
++	mt_qmu_start(EP_IN_BULK, true, MT_TX_GPD_OFF);
++	mt_qmu_start(EP_IN_INT, true, MT_INT_GPD_OFF);
++	mt.configured = true;
++	printf("SWEET MTU3: ECM configured, speed %u bulk maxp %u, FIFO tx 0x%x rx 0x%x\n",
++	    speed, bulk_maxp, tx_base, rx_base);
++}
++
++/* ---- EP0 control transfers ---- */
++
++static void
++mt_ep0_pump_tx(void)
++{
++	uint32_t csr = mt_rd(MAC_EP0CSR);
++	uint32_t count;
++
++	if (mt.ep0_state == MT_EP0_TX_END) {
++		if (!(csr & EP0_TXPKTRDY)) {
++			mt_wr(MAC_EP0CSR, (csr & EP0_W1C_BITS) | EP0_DATAEND);
++			mt.ep0_state = MT_EP0_SETUP;
++		}
++		return;
++	}
++	if (mt.ep0_state != MT_EP0_TX || (csr & (EP0_TXPKTRDY | EP0_FIFOFULL))) {
++		return;
++	}
++	count = mt.ep0_len - mt.ep0_done;
++	if (count > MT_EP0_MAXP) {
++		count = MT_EP0_MAXP;
++	}
++	if (count) {
++		mt_ep0_fifo_write((const uint8_t *)(mt.dma + MT_EP0_DATA_OFF) + mt.ep0_done, count);
++	}
++	mt.ep0_done += count;
++	if (count < MT_EP0_MAXP || mt.ep0_done == mt.ep0_len) {
++		mt.ep0_state = MT_EP0_TX_END;
++	}
++	mt_wr(MAC_EP0CSR, (mt_rd(MAC_EP0CSR) & EP0_W1C_BITS) | EP0_TXPKTRDY);
++}
++
++static void
++mt_ep0_setup(void)
++{
++	uint8_t st[8];
++	uint8_t *data = (uint8_t *)(mt.dma + MT_EP0_DATA_OFF);
++	uint32_t type, req, value, index, length, n = 0;
++	bool ok = true;
++	bool data_in;
++
++	if (mt_rd(MAC_RXCOUNT0) < 8) {
++		mt_ep0_stall(0);
++		return;
++	}
++	mt_ep0_fifo_read(st, 8);
++	type = st[0];
++	req = st[1];
++	value = (uint32_t)(st[2] | st[3] << 8);
++	index = (uint32_t)(st[4] | st[5] << 8);
++	length = (uint32_t)(st[6] | st[7] << 8);
++	data_in = (type & 0x80) != 0;
++	if (mt.setups++ < 80) {
++		printf("SWEET MTU3: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
++	}
++
++	/* Acknowledge SETUP for a data stage; no-data requests ack in the status stage. */
++	if (length) {
++		mt_ep0_w1c_or(EP0_SETUPPKTRDY | (data_in ? EP0_DPHTX : 0));
++	}
++
++	if ((type & 0x60) == 0x20) {            /* class request */
++		if (req == 0x44 && data_in && length) { /* GET_ETHERNET_STATISTIC */
++			uint32_t want = length > 8 ? 8 : length;
++			memset(data, 0, want);
++			n = want;
++		} else if (length) {
++			ok = false;
++		}
++	} else if ((type & 0x60) != 0) {
++		ok = false;
++	} else if (req == 6) {                  /* GET_DESCRIPTOR */
++		switch (value >> 8) {
++		case 1:
++			memcpy(data, mt_dev_desc, sizeof(mt_dev_desc));
++			n = sizeof(mt_dev_desc);
++			break;
++		case 2:
++			mt_desc_for_speed(mt_speed());
++			memcpy(data, mt_cfg_desc, sizeof(mt_cfg_desc));
++			n = sizeof(mt_cfg_desc);
++			break;
++		case 3:
++			n = mt_string_desc(value & 0xff, data);
++			ok = n != 0;
++			break;
++		default:
++			ok = false;
++			break;
++		}
++	} else if (req == 5) {                  /* SET_ADDRESS */
++		uint32_t conf = mt_rd(MAC_DEVICE_CONF) & ~(0x7fu << 24);
++		mt_wr(MAC_DEVICE_CONF, conf | ((value & 0x7f) << 24));
++		printf("SWEET MTU3: address %u\n", value & 0x7f);
++	} else if (req == 9) {                  /* SET_CONFIGURATION */
++		if (value == 1) {
++			mt_configure();
++		} else if (value == 0) {
++			mt_deconfigure();
++		} else {
++			ok = false;
++		}
++	} else if (req == 8) {                  /* GET_CONFIGURATION */
++		data[0] = mt.configured ? 1 : 0;
++		n = 1;
++	} else if (req == 0) {                  /* GET_STATUS */
++		data[0] = 0;
++		data[1] = 0;
++		n = 2;
++	} else if (req == 11) {                 /* SET_INTERFACE */
++		if (index == 1 && value <= 1) {
++			if (value == 1 && mt.configured) {
++				mt_notify_connected();
++			}
++		} else if (index != 0 || value != 0) {
++			ok = false;
++		}
++	} else if (req == 10) {                 /* GET_INTERFACE */
++		data[0] = 0;
++		n = 1;
++	} else if (req == 1 || req == 3) {      /* CLEAR/SET_FEATURE */
++	} else {
++		ok = false;
++	}
++
++	if (!ok) {
++		mt_ep0_stall(length);
++		return;
++	}
++	if (length == 0) {
++		mt_ep0_status_stage();
++		return;
++	}
++	if (data_in) {
++		if (n > length) {
++			n = length;
++		}
++		mt.ep0_len = n;
++		mt.ep0_done = 0;
++		mt.ep0_state = MT_EP0_TX;
++		mt_ep0_pump_tx();
++	} else {
++		mt.ep0_rx_want = length;
++		mt.ep0_rx_total = 0;
++		mt.ep0_state = MT_EP0_RX;
++	}
++}
++
++static void
++mt_ep0_rx(void)
++{
++	uint32_t csr = mt_rd(MAC_EP0CSR);
++	uint32_t count, ack;
++
++	if (!(csr & EP0_RXPKTRDY)) {
++		return;
++	}
++	count = mt_rd(MAC_RXCOUNT0);
++	if (count > MT_EP0_DATA_SIZE) {
++		count = MT_EP0_DATA_SIZE;
++	}
++	mt_ep0_fifo_read((uint8_t *)(mt.dma + MT_EP0_OUT_OFF), count);
++	mt.ep0_rx_total += count;
++	ack = (csr & EP0_W1C_BITS) | EP0_RXPKTRDY;
++	if (count < MT_EP0_MAXP || mt.ep0_rx_total >= mt.ep0_rx_want) {
++		ack |= EP0_DATAEND;
++		mt.ep0_state = MT_EP0_SETUP;
++	}
++	mt_wr(MAC_EP0CSR, ack);
++}
++
++static void
++mt_ep0_poll(void)
++{
++	uint32_t csr = mt_rd(MAC_EP0CSR);
++
++	if (csr & EP0_SENTSTALL) {
++		mt_wr(MAC_EP0CSR, (csr & EP0_W1C_BITS) | EP0_SENTSTALL);
++		csr = mt_rd(MAC_EP0CSR);
++	}
++	if (csr & EP0_SETUPPKTRDY) {
++		mt_ep0_setup();
++		return;
++	}
++	if (mt.ep0_state == MT_EP0_TX || mt.ep0_state == MT_EP0_TX_END) {
++		mt_ep0_pump_tx();
++	} else if (mt.ep0_state == MT_EP0_RX) {
++		mt_ep0_rx();
++	}
++}
++
++/* ---- QMU data paths ---- */
++
++static void
++mt_notify_connected(void)
++{
++	uint8_t *n = (uint8_t *)(mt.dma + MT_NOTIFY_OFF);
++
++	n[0] = 0xa1;
++	n[1] = 0x00;
++	n[2] = 1;
++	n[3] = 0;
++	n[4] = 0;
++	n[5] = 0;
++	n[6] = 0;
++	n[7] = 0;
++	mt_sync(MT_NOTIFY_OFF, 8);
++	mt_gpd_int(mt.int_gpd, 8);
++	mt.int_busy = true;
++	mt_qmu_resume(EP_IN_INT, true);
++	mt.link_up = true;
++	mt_link_event(true);
++}
++
++static void
++mt_rx_deliver(uint32_t off, uint32_t len)
++{
++	mbuf_t m = NULL;
++
++	if (mt.ifp == NULL || len < ETHER_HDR_LEN || len > ETHER_MAX_LEN) {
++		return;
++	}
++	if (mbuf_gethdr(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) == 0 &&
++	    mbuf_mclget(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) == 0 &&
++	    (mbuf_flags(m) & MBUF_EXT) && mbuf_maxlen(m) >= len) {
++		struct ifnet_stat_increment_param stats = {};
++		memcpy(mbuf_data(m), (const void *)(mt.dma + off), len);
++		mbuf_setlen(m, len);
++		mbuf_pkthdr_setlen(m, len);
++		void *frame_header = mbuf_data(m);
++		mbuf_pkthdr_setrcvif(m, mt.ifp);
++		mbuf_pkthdr_setheader(m, frame_header);
++		mbuf_pkthdr_adjustlen(m, -ETHER_HDR_LEN);
++		(void)mbuf_setdata(m, (char *)mbuf_data(m) + ETHER_HDR_LEN, mbuf_len(m) - ETHER_HDR_LEN);
++		stats.packets_in = 1;
++		stats.bytes_in = len;
++		mt.rx_frames++;
++		ifnet_input(mt.ifp, m, &stats);
++	} else if (m != NULL) {
++		mbuf_freem(m);
++	}
++}
++
++static void
++mt_rx_poll(void)
++{
++	volatile struct mt_gpd *g;
++	uint32_t len, i;
++
++	mt_sync(MT_RX_GPD_OFF, MT_RX_GPD_N * sizeof(struct mt_gpd));
++	for (i = 0; i < MT_RX_GPD_N; i++) {
++		g = mt_gpd(MT_RX_GPD_OFF, mt.rx_deq);
++		if (g->dw0 & MT_GPD_HWO) {
++			break;
++		}
++		len = g->dw3 & 0xfffff;
++		if (len > MT_RX_BUF_SIZE) {
++			len = MT_RX_BUF_SIZE;
++		}
++		if (len) {
++			mt_sync(MT_RX_BUF_OFF + mt.rx_deq * MT_RX_BUF_SIZE, MT_RX_BUF_SIZE);
++			mt_rx_deliver(MT_RX_BUF_OFF + mt.rx_deq * MT_RX_BUF_SIZE, len);
++		}
++		mt_gpd_rx(mt.rx_deq, MT_RX_BUF_OFF + mt.rx_deq * MT_RX_BUF_SIZE, MT_RX_BUF_SIZE);
++		mt.rx_deq = (mt.rx_deq + 1) % MT_RX_GPD_N;
++	}
++	if (!(mt_rd(MAC_RXQCSR1) & QMU_Q_ACTIVE)) {
++		mt_qmu_resume(EP_OUT_BULK, false);
++	}
++}
++
++static void
++mt_tx_kick_locked(void)
++{
++	while (!mt.tx_busy && mt.txq_count > 0 && mt.configured) {
++		mbuf_t m = mt.txq[mt.txq_head];
++		uint32_t len;
++
++		mt.txq_head = (mt.txq_head + 1) % MT_TXQ;
++		mt.txq_count--;
++		len = (uint32_t)mbuf_pkthdr_len(m);
++		if (len > ETHER_MAX_LEN - ETHER_CRC_LEN) {
++			mbuf_freem(m);
++			continue;
++		}
++		mbuf_copydata(m, 0, len, (void *)(mt.dma + MT_TX_BUF_OFF));
++		mbuf_freem(m);
++		if ((len % MT_BULK_MAXP_HS) == 0) {
++			((uint8_t *)(mt.dma + MT_TX_BUF_OFF))[len++] = 0;
++		}
++		mt_sync(MT_TX_BUF_OFF, len);
++		mt_gpd_tx(mt.tx_gpd, MT_TX_BUF_OFF, len, false);
++		mt.tx_busy = true;
++		mt.tx_frames++;
++		mt_qmu_resume(EP_IN_BULK, true);
++	}
++}
++
++static void
++mt_tx_poll(void)
++{
++	volatile struct mt_gpd *g;
++
++	if (!mt.tx_busy) {
++		return;
++	}
++	mt_sync(MT_TX_GPD_OFF, MT_TX_GPD_N * sizeof(struct mt_gpd));
++	g = mt_gpd(MT_TX_GPD_OFF, mt.tx_gpd);
++	if (g->dw0 & MT_GPD_HWO) {
++		return;
++	}
++	mt.tx_gpd = (mt.tx_gpd + 1) % MT_TX_GPD_N;
++	lck_mtx_lock(mt.lock);
++	mt.tx_busy = false;
++	mt_tx_kick_locked();
++	lck_mtx_unlock(mt.lock);
++}
++
++static void
++mt_int_poll(void)
++{
++	volatile struct mt_gpd *g;
++
++	if (!mt.int_busy) {
++		return;
++	}
++	mt_sync(MT_INT_GPD_OFF, MT_INT_GPD_N * sizeof(struct mt_gpd));
++	g = mt_gpd(MT_INT_GPD_OFF, mt.int_gpd);
++	if (!(g->dw0 & MT_GPD_HWO)) {
++		mt.int_gpd = (mt.int_gpd + 1) % MT_INT_GPD_N;
++		mt.int_busy = false;
++	}
++}
++
++/* ---- network interface (ue0, 192.168.7.2/24) ---- */
++
++static errno_t
++mt_if_output(ifnet_t ifp, mbuf_t m)
++{
++	lck_mtx_lock(mt.lock);
++	if (mt.txq_count == MT_TXQ || !mt.configured) {
++		lck_mtx_unlock(mt.lock);
++		mbuf_freem(m);
++		ifnet_stat_increment_out(ifp, 0, 0, 1);
++		return 0;
++	}
++	ifnet_stat_increment_out(ifp, 1, (u_int32_t)mbuf_pkthdr_len(m), 0);
++	mt.txq[(mt.txq_head + mt.txq_count) % MT_TXQ] = m;
++	mt.txq_count++;
++	mt_tx_kick_locked();
++	lck_mtx_unlock(mt.lock);
++	return 0;
++}
++
++static void
++mt_link_event(bool up)
++{
++	if (mt.ifp != NULL) {
++		dlil_post_msg(mt.ifp, KEV_DL_SUBCLASS, up ? KEV_DL_LINK_ON : KEV_DL_LINK_OFF, NULL, 0, FALSE);
++	}
++}
++
++static errno_t
++mt_if_ioctl(ifnet_t ifp, unsigned long cmd, void *data)
++{
++	switch (cmd) {
++	case SIOCGIFMEDIA32:
++	case SIOCGIFMEDIA64: {
++		struct ifmediareq *ifmr = (struct ifmediareq *)data;
++		user_addr_t list = (cmd == SIOCGIFMEDIA64) ?
++		    ((struct ifmediareq64 *)ifmr)->ifmu_ulist :
++		    CAST_USER_ADDR_T(((struct ifmediareq32 *)ifmr)->ifmu_ulist);
++		int media = IFM_ETHER | IFM_AUTO;
++		ifmr->ifm_current = media;
++		ifmr->ifm_active = mt.link_up ? (IFM_ETHER | IFM_1000_T | IFM_FDX) : media;
++		ifmr->ifm_mask = 0;
++		ifmr->ifm_status = IFM_AVALID | (mt.link_up ? IFM_ACTIVE : 0);
++		if (list != USER_ADDR_NULL && ifmr->ifm_count > 0) {
++			ifmr->ifm_count = 1;
++			return copyout(&media, list, sizeof(media));
++		}
++		ifmr->ifm_count = 1;
++		return 0;
++	}
++	case SIOCSIFADDR:
++	case SIOCAIFADDR:
++		ifnet_set_flags(ifp, IFF_UP, IFF_UP);
++		return 0;
++	case SIOCSIFFLAGS:
++	case SIOCADDMULTI:
++	case SIOCDELMULTI:
++		return 0;
++	default:
++		return EOPNOTSUPP;
++	}
++}
++
++static void
++mt_if_detach(ifnet_t ifp __unused)
++{
++}
++
++static void
++mt_if_create(void)
++{
++	struct ifnet_init_eparams init;
++	static lck_grp_t *grp;
++
++	grp = lck_grp_alloc_init("sweet_mtu3", LCK_GRP_ATTR_NULL);
++	mt.lock = lck_mtx_alloc_init(grp, LCK_ATTR_NULL);
++
++	bzero(&init, sizeof(init));
++	init.ver = IFNET_INIT_CURRENT_VERSION;
++	init.len = sizeof(init);
++	init.flags = IFNET_INIT_LEGACY;
++	init.uniqueid = "sweet-mtu3-ecm";
++	init.uniqueid_len = sizeof("sweet-mtu3-ecm") - 1;
++	init.name = "ue";
++	init.unit = 0;
++	init.family = IFNET_FAMILY_ETHERNET;
++	init.type = IFT_ETHER;
++	init.output = mt_if_output;
++	init.demux = ether_demux;
++	init.add_proto = ether_add_proto;
++	init.del_proto = ether_del_proto;
++	init.check_multi = ether_check_multi;
++	init.framer_extended = ether_frameout_extended;
++	init.ioctl = mt_if_ioctl;
++	init.detach = mt_if_detach;
++	init.broadcast_addr = etherbroadcastaddr;
++	init.broadcast_len = ETHER_ADDR_LEN;
++	if (ifnet_allocate_extended(&init, &mt.ifp) != 0) {
++		printf("SWEET MTU3: ifnet_allocate failed\n");
++		mt.ifp = NULL;
++		return;
++	}
++	ifnet_set_addrlen(mt.ifp, ETHER_ADDR_LEN);
++	ifnet_set_hdrlen(mt.ifp, sizeof(struct ether_header));
++	ifnet_set_mtu(mt.ifp, ETHERMTU);
++	ifnet_set_baudrate(mt.ifp, 480000000);
++	ifnet_set_flags(mt.ifp, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST, 0xffff);
++	if (ifnet_attach(mt.ifp, NULL) != 0) {
++		printf("SWEET MTU3: ifnet_attach failed\n");
++		mt.ifp = NULL;
++		return;
++	}
++	ifnet_set_lladdr(mt.ifp, mt_phone_mac, ETHER_ADDR_LEN);
++
++	errno_t err = proto_plumb(PF_INET, mt.ifp);
++	socket_t so = NULL;
++	if (err == 0) {
++		err = sock_socket(PF_INET, SOCK_DGRAM, 0, NULL, NULL, &so);
++	}
++	if (err == 0) {
++		struct ifaliasreq ifra;
++		bzero(&ifra, sizeof(ifra));
++		snprintf(ifra.ifra_name, sizeof(ifra.ifra_name), "ue0");
++		struct sockaddr_in *a = (struct sockaddr_in *)&ifra.ifra_addr;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0xc0a80702);         /* 192.168.7.2 */
++		a = (struct sockaddr_in *)&ifra.ifra_mask;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0xffffff00);
++		a = (struct sockaddr_in *)&ifra.ifra_broadaddr;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0xc0a807ff);
++		err = sock_ioctl(so, SIOCAIFADDR, &ifra);
++		sock_close(so);
++	}
++	ifnet_set_flags(mt.ifp, IFF_UP | IFF_RUNNING, IFF_UP | IFF_RUNNING);
++	printf("SWEET MTU3: ue0 192.168.7.2/24 %s (err %d)\n", err ? "NOT configured" : "up", err);
++}
++
++/* ---- controller bring-up ---- */
++
++static bool
++mt_powered(void)
++{
++	uint32_t pw2 = mt_ird(IPPC_PW_CTRL2);
++	uint32_t sts1 = mt_ird(IPPC_PW_STS1);
++	uint32_t sts2 = mt_ird(IPPC_PW_STS2);
++	uint32_t need = IPPC_SYSPLL_STABLE | IPPC_REF_RST_B | IPPC_SYS125_RST_B;
++
++	if (mt.is_u3) {
++		need |= IPPC_U3_MAC_RST_B;
++	}
++	if ((pw2 & IPPC_IP_DEV_PDN) || (sts1 & need) != need || !(sts2 & IPPC_U2_MAC_RST_B)) {
++		printf("SWEET MTU3: not powered/clocked: PW_CTRL2 0x%08x PW_STS1 0x%08x PW_STS2 0x%08x\n",
++		    pw2, sts1, sts2);
++		return false;
++	}
++	return true;
++}
++
++static void
++mt_hw_init(void)
++{
++	uint32_t v;
++
++	/* Pull-up off first, so the host sees one clean reconnect. */
++	v = mt_rd(MAC_POWER_MANAGEMENT);
++	mt_wr(MAC_POWER_MANAGEMENT, v & ~(PM_SOFT_CONN | PM_SUSPENDM_ENABLE));
++	delay(50000);
++
++	/* Reset only the device function; IP/PHY clocks stay as LK left them. */
++	v = mt_ird(IPPC_DEV_RST_CTRL);
++	mt_iwr(IPPC_DEV_RST_CTRL, v | IPPC_DEV_SW_RST);
++	delay(1);
++	mt_iwr(IPPC_DEV_RST_CTRL, v & ~IPPC_DEV_SW_RST);
++
++	/* Device port enable (vendor mtu3_device_enable). */
++	v = mt_ird(IPPC_PW_CTRL2);
++	mt_iwr(IPPC_PW_CTRL2, v & ~IPPC_IP_DEV_PDN);
++	if (mt.is_u3) {
++		v = mt_ird(IPPC_U3_CTRL_0P);
++		mt_iwr(IPPC_U3_CTRL_0P, v & ~(IPPC_U3_DIS | IPPC_U3_PDN | IPPC_U3_HOST_SEL));
++	}
++	v = mt_ird(IPPC_U2_CTRL_0P);
++	mt_iwr(IPPC_U2_CTRL_0P, v & ~(IPPC_U2_DIS | IPPC_U2_PDN | IPPC_U2_HOST | IPPC_U2_OTG_SEL));
++
++	/* All interrupts off; polled only. Clear every stale status. */
++	mt_wr(MAC_LV1IECR, 0xffffffff);
++	mt_wr(MAC_EPIECR, 0xffffffff);
++	mt_wr(MAC_QIECR0, 0xffffffff);
++	mt_wr(MAC_QIECR1, 0xffffffff);
++	mt_wr(MAC_EPISR, 0xffffffff);
++	mt_wr(MAC_COMMON_USB_INTR, 0xffffffff);
++	mt_wr(MAC_DEV_LINK_INTR, 0xffffffff);
++	mt_wr(MAC_QISAR0, 0xffffffff);
++	mt_wr(MAC_TQERRIR0, 0xffffffff);
++	mt_wr(MAC_RQERRIR0, 0xffffffff);
++	mt_wr(MAC_RQERRIR1, 0xffffffff);
++
++	/* Vendor mtu3_csr_init. */
++	if (mt.is_u3) {
++		v = mt_rd(MAC_LINK_POWER_CONTROL);
++		mt_wr(MAC_LINK_POWER_CONTROL, v & ~(LP_SW_U1_REQ_EN | LP_SW_U2_REQ_EN));
++		v = mt_rd(MAC_LTSSM_CTRL);
++		mt_wr(MAC_LTSSM_CTRL, v & ~LTSSM_SOFT_U3_EXIT_EN);
++		v = mt_rd(MAC_USB2_TEST_MODE);
++		mt_wr(MAC_USB2_TEST_MODE, v | TESTMODE_U2U3_AUTO);
++		v = mt_rd(MAC_U3U2_SWITCH_CTRL);
++		mt_wr(MAC_U3U2_SWITCH_CTRL, v | SWITCH_SOFTCON_CLR_AUTO);
++	}
++	v = mt_rd(MAC_LINK_RESET_INFO);
++	mt_wr(MAC_LINK_RESET_INFO, v & ~(0xfu << 16));
++	v = mt_rd(MAC_POWER_MANAGEMENT);
++	mt_wr(MAC_POWER_MANAGEMENT, v | PM_LPM_HRWE);
++	mt_wr(MAC_USB2_EPCTL_LPM, LPM_L1_EXIT_EP0_CHK);
++	mt_wr(MAC_EPCTL_LPM_FC_CHK, 0);
++
++	/* Address 0; force VBUS (LK saw a cable and LK's own force bit set). */
++	mt_wr(MAC_DEVICE_CONF, 0);
++	v = mt_rd(MAC_MISC_CTRL);
++	mt_wr(MAC_MISC_CTRL, v & ~(MISC_VBUS_FRC_EN | MISC_VBUS_ON));
++	v = mt_rd(MAC_MISC_CTRL);
++	mt_wr(MAC_MISC_CTRL, v | MISC_VBUS_FRC_EN | MISC_VBUS_ON);
++	v = mt_ird(IPPC_U2_CTRL_0P);
++	mt_iwr(IPPC_U2_CTRL_0P, v & ~IPPC_U2_OTG_SEL);
++
++	if (mt.gen2cp) {
++		mt_wr(MAC_QFCR, 0xffffffff);
++	}
++	v = mt_rd(MAC_TXDEEMPH);
++	mt_wr(MAC_TXDEEMPH, (v & ~0x3ffffu) | 1);
++
++	/* High speed only: U3 off, HS/FS detected by hardware. */
++	v = mt_rd(MAC_USB3_CONFIG);
++	mt_wr(MAC_USB3_CONFIG, v & ~USB3_EN);
++	v = mt_rd(MAC_POWER_MANAGEMENT);
++	mt_wr(MAC_POWER_MANAGEMENT, v | PM_HS_ENABLE);
++
++	mt_ep0_reset_state();
++
++	/* Soft connect: D+ pull-up. */
++	v = mt_rd(MAC_POWER_MANAGEMENT);
++	mt_wr(MAC_POWER_MANAGEMENT, v | PM_SOFT_CONN | PM_SUSPENDM_ENABLE);
++}
++
++static void
++mt_status(void)
++{
++	printf("SWEET MTU3: speed %u cfg %d link %d qmu tx %04x rx %04x ep0 %08x rx %llu tx %llu err %u\n",
++	    mt_speed(), mt.configured, mt.link_up,
++	    mt_rd(MAC_TXQCSR1) & 0xffff, mt_rd(MAC_RXQCSR1) & 0xffff,
++	    mt_rd(MAC_EP0CSR), mt.rx_frames, mt.tx_frames, mt.errors);
++}
++
++static void
++mt_bus_reset(void)
++{
++	mt.resets++;
++	mt_deconfigure();
++	mt_wr(MAC_DEVICE_CONF, 0);
++	mt_ep0_reset_state();
++	printf("SWEET MTU3: bus reset (%u)\n", mt.resets);
++}
++
++static void
++mt_poll(void)
++{
++	uint32_t comm, link, q;
++
++	comm = mt_rd(MAC_COMMON_USB_INTR);
++	if (comm) {
++		mt_wr(MAC_COMMON_USB_INTR, comm);        /* W1C */
++		if (mt.events++ < 40) {
++			printf("SWEET MTU3: common intr 0x%08x\n", comm);
++		}
++		if (comm & COMMON_RESET) {
++			mt_bus_reset();
++		}
++		if (comm & COMMON_DISCONN) {
++			mt_deconfigure();
++		}
++		if (comm & COMMON_SUSPEND) {
++			mt.suspended = true;
++		}
++		if (comm & COMMON_RESUME) {
++			mt.suspended = false;
++		}
++	}
++	link = mt_rd(MAC_DEV_LINK_INTR);
++	if (link & DEV_LINK_SPEED_CHG) {
++		uint32_t speed;
++		mt_wr(MAC_DEV_LINK_INTR, link);
++		speed = mt_speed();
++		if (speed != mt.speed) {
++			mt.speed = speed;
++			mt_desc_for_speed(speed);
++			printf("SWEET MTU3: link speed %u\n", speed);
++		}
++	}
++	q = mt_rd(MAC_QISAR0);
++	if (q & mt_rd(MAC_QIER0)) {
++		mt_wr(MAC_QISAR0, q & mt_rd(MAC_QIER0));
++	}
++	{
++		uint32_t err = mt_rd(MAC_QISAR1);
++		if (err) {
++			if (mt.errors++ < 10) {
++				printf("SWEET MTU3: qmu error 0x%08x\n", err);
++			}
++			mt_wr(MAC_TQERRIR0, 0xffffffff);
++			mt_wr(MAC_RQERRIR0, 0xffffffff);
++			mt_wr(MAC_RQERRIR1, 0xffffffff);
++		}
++	}
++	mt_ep0_poll();
++	if (mt.configured) {
++		mt_rx_poll();
++		mt_tx_poll();
++		mt_int_poll();
++	}
++}
++
++static void
++mt_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	uint32_t ticks = 0;
++
++	for (;;) {
++		mt_poll();
++		if ((++ticks % 30000) == 0) {
++			mt_status();
++		}
++		mt_sleep_ms(1);
++	}
++}
++
++/* ---- UDP live log to 192.168.7.1:5140 ---- */
++
++static void
++mt_log_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	static char chunk[1400];
++	socket_t so = NULL;
++	struct sockaddr_in to;
++	uint64_t pos = sweet_log_position();
++
++	pos = pos > 65536 ? pos - 65536 : 0;
++	bzero(&to, sizeof(to));
++	to.sin_len = sizeof(to);
++	to.sin_family = AF_INET;
++	to.sin_port = htons(5140);
++	to.sin_addr.s_addr = htonl(0xc0a80701);
++	for (;;) {
++		mt_sleep_ms(100);
++		if (!mt.configured || !mt.link_up) {
++			continue;
++		}
++		if (so == NULL && sock_socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, NULL, &so) != 0) {
++			so = NULL;
++			continue;
++		}
++		uint32_t n;
++		while ((n = sweet_log_copy(&pos, chunk, sizeof(chunk))) > 0) {
++			struct iovec iov = { .iov_base = chunk, .iov_len = n };
++			struct msghdr msg = {
++				.msg_name = &to, .msg_namelen = sizeof(to),
++				.msg_iov = &iov, .msg_iovlen = 1,
++			};
++			size_t sent = 0;
++			if (sock_send(so, &msg, 0, &sent) != 0) {
++				break;          /* no route/ARP yet */
++			}
++		}
++	}
++}
++
++static void
++mt_start(void)
++{
++	thread_t thread;
++
++	if (kmem_alloc_contig(kernel_map, &mt.dma, MT_DMA_SIZE, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET MTU3: no DMA memory\n");
++		return;
++	}
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)mt.dma);
++	if (!pn) {
++		printf("SWEET MTU3: DMA memory not physically mapped\n");
++		return;
++	}
++	mt.dma_pa = ptoa_64(pn);
++	mt_if_create();
++
++	mt_hw_init();
++
++	printf("SWEET MTU3: running, DMA at 0x%llx, EP0CSR 0x%08x PM 0x%08x\n",
++	    mt.dma_pa, mt_rd(MAC_EP0CSR), mt_rd(MAC_POWER_MANAGEMENT));
++	if (kernel_thread_start(mt_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++	int livelog = 1;
++	PE_parse_boot_argn("sweetusblog", &livelog, sizeof(livelog));
++	if (livelog && mt.ifp != NULL && kernel_thread_start(mt_log_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
++/*
++ * Called from sweet_usb_probe() (bsd/dev/sweet_usb.c) before the DWC3 path.
++ * Returns 1 when the device-tree describes a MediaTek MTU3, so the caller
++ * stops; returns 0 on sweet, which then probes its DWC3.
++ */
++int
++sweet_mtu3_probe(int enabled)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	uint32_t hw_id, hw_sub;
++
++	if (enabled <= 0) {
++		return 0;
++	}
++	if (SecureDTLookupEntry(NULL, "/sweet-usb", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 4 * sizeof(uintptr_t)) {
++		return 0;
++	}
++	mt.mac = ml_io_map(reg[0], reg[1]);
++	mt.ippc = ml_io_map(reg[2], reg[3]);
++	if (mt.mac == 0 || mt.ippc == 0) {
++		printf("SWEET MTU3: map failed (mac 0x%lx ippc 0x%lx)\n",
++		    (unsigned long)reg[0], (unsigned long)reg[2]);
++		return 1;
++	}
++	hw_id = mt_ird(IPPC_HW_ID);
++	hw_sub = mt_ird(IPPC_HW_SUB_ID);
++	mt.hw_version = (hw_sub >> 16) & 0xffff;
++	mt.gen2cp = mt.hw_version >= 0x1003;
++	mt.is_u3 = (mt_ird(IPPC_DEV_CAP) & 0xff) != 0;
++
++	printf("SWEET MTU3: HW_ID 0x%08x HW_SUB_ID 0x%08x (trunk 0x%x, %s IP)\n",
++	    hw_id, hw_sub, mt.hw_version, mt.is_u3 ? "U3" : "U2");
++	printf("SWEET MTU3: DEV_CAP 0x%08x PW_CTRL2 0x%08x PW_STS1 0x%08x PW_STS2 0x%08x OTG 0x%08x\n",
++	    mt_ird(IPPC_DEV_CAP), mt_ird(IPPC_PW_CTRL2), mt_ird(IPPC_PW_STS1),
++	    mt_ird(IPPC_PW_STS2), mt_ird(IPPC_OTG_STS));
++	printf("SWEET MTU3: DEVICE_CONF 0x%08x EP0CSR 0x%08x MISC 0x%08x PM 0x%08x\n",
++	    mt_rd(MAC_DEVICE_CONF), mt_rd(MAC_EP0CSR), mt_rd(MAC_MISC_CTRL),
++	    mt_rd(MAC_POWER_MANAGEMENT));
++	printf("SWEET MTU3: CAP ep0 %u tx %u rx %u bytes\n",
++	    mt_rd(MAC_CAP_EP0FFSZ), mt_rd(MAC_CAP_EPNTXFFSZ), mt_rd(MAC_CAP_EPNRXFFSZ));
++
++	if (!mt_powered()) {
++		printf("SWEET MTU3: refusing to touch the MAC until it is powered\n");
++		return 1;
++	}
++	if (enabled < 2) {
++		printf("SWEET MTU3: sweetusb=1, controller not started\n");
++		return 1;
++	}
++	mt_start();
++	return 1;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */

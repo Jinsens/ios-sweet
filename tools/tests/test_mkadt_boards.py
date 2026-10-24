@@ -61,6 +61,10 @@ class BoardProfileTests(unittest.TestCase):
         ufs = child(root, 'sweet-ufs')
         self.assertIn(b'mediatek,mt8183-ufshci\0', ufs.prop('compatible'))
         self.assertEqual(words(ufs.prop('reg')), (0x112b0000, 0x1000))
+        usb = child(root, 'sweet-usb')
+        self.assertIn(b'mediatek,mt6983-mtu3\0', usb.prop('compatible'))
+        self.assertEqual(words(usb.prop('reg')),
+                         (0x11201000, 0x2e00, 0x11203e00, 0x100))
         self.assertEqual(root.prop('model'), b'iPhone10,3\0')
         self.assertIn(b'D22AP\0', root.prop('compatible'))
         self.assertIn(b'xiaomi,matisse\0', root.prop('compatible'))
@@ -73,13 +77,15 @@ class BoardProfileTests(unittest.TestCase):
         blob = adt.serialize(self.build(board='matisse'))
         args = mkpayload.platform_cmdline(blob, 'debug=0xc serial=3 cpus=1')
         for token in ('cpus=1', 'sweetkeys=0', 'sweettouch=0',
-                      'sweetbattery=0', 'sweetusb=0', 'ufsrw=0', '-noprogress'):
+                      'sweetbattery=0', 'sweetusb=2', 'ufsrw=0', '-noprogress'):
             self.assertIn(token, args.split())
         self.assertEqual(args, mkpayload.platform_cmdline(blob, args))
         self.assertIn('cpus=8', mkpayload.platform_cmdline(blob, 'debug=0xc').split())
         self.assertIn('cpus=8', mkpayload.platform_cmdline(blob, 'cpus=8').split())
+        for usb in ('sweetusb=0', 'sweetusb=1', 'sweetusb=2'):
+            self.assertIn(usb, mkpayload.platform_cmdline(blob, usb).split())
         for unsafe in ('cpus=9', 'cpus=0', 'cpus=bad', 'sweetkeys=1',
-                       'sweetusb=1', 'ufsrw=1'):
+                       'sweetusb=3', 'sweetusb=-1', 'ufsrw=1'):
             with self.assertRaises(ValueError):
                 mkpayload.platform_cmdline(blob, unsafe)
         with self.assertRaises(ValueError):
@@ -97,6 +103,7 @@ class BoardProfileTests(unittest.TestCase):
         for prop in ('l2-cache-size', 'l3-cache-size'):
             self.assertNotIn(prop, [name for name, _, _ in cpus[0].props])
         self.assertEqual(words(child(root, 'sweet-ufs').prop('reg')), (0x1d84000, 0x3000))
+        self.assertNotIn('sweet-usb', [c.name for c in root.children])
         gic = child(child(root, 'arm-io'), 'gic')
         self.assertEqual(words(gic.prop('virtual-timer-intid'), 32), (19,))
         self.assertEqual(mkpayload.adt_dram(adt.serialize(root)), (0xb0000000, 0x4d000000))
@@ -105,6 +112,7 @@ class BoardProfileTests(unittest.TestCase):
         root = self.build(qemu=True)
         self.assertEqual(len(child(root, 'cpus').children), 1)
         self.assertNotIn('sweet-ufs', [c.name for c in root.children])
+        self.assertNotIn('sweet-usb', [c.name for c in root.children])
         gic = child(child(root, 'arm-io'), 'gic')
         self.assertEqual(words(gic.prop('virtual-timer-intid'), 32), (27,))
 

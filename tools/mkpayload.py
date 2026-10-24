@@ -151,7 +151,9 @@ def platform_cmdline(adt_blob, cmdline):
         return cmdline
     cpu_count = len(next(c for c in root.children if c.name == 'cpus').children)
     required = {'sweetkeys': 0, 'sweettouch': 0,
-                'sweetbattery': 0, 'sweetusb': 0, 'ufsrw': 0}
+                'sweetbattery': 0, 'ufsrw': 0}
+    # sweetusb: 0 off, 1 report MTU3 state only, 2 (default) run the device
+    ranges = {'sweetusb': (0, 2, 2)}
     tokens = cmdline.split()
     present = set()
     for token in tokens:
@@ -164,6 +166,15 @@ def platform_cmdline(adt_blob, cmdline):
             if not safe:
                 raise ValueError(f'matisse requires cpus=1..{cpu_count}')
             present.add(key)
+        elif key in ranges:
+            lo, hi, _ = ranges[key]
+            try:
+                safe = sep and lo <= int(value, 0) <= hi
+            except ValueError:
+                safe = False
+            if not safe:
+                raise ValueError(f'matisse requires {key}={lo}..{hi}')
+            present.add(key)
         elif key in required:
             try:
                 safe = sep and int(value, 0) == required[key]
@@ -173,6 +184,7 @@ def platform_cmdline(adt_blob, cmdline):
                 raise ValueError(f'matisse bring-up requires {key}={required[key]}')
             present.add(key)
     tokens += [f'{k}={v}' for k, v in required.items() if k not in present]
+    tokens += [f'{k}={default}' for k, (_, _, default) in ranges.items() if k not in present]
     if 'cpus' not in present:
         tokens.append(f'cpus={cpu_count}')
     if '-noprogress' not in tokens:
