@@ -1,6 +1,104 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (keys): MT6363 PON keys + keypad volume-down (patch 0094) <<<
+## >>> ACTIVE 2026-10-25 (USB): local build + progress marks; the logo loop is not USB <<<
+
+**Local XNU build works without a KDK and without CI.** `xnu/out/ci-40115544522`
+turned out to be a *complete* build tree (sources, generated headers, every
+`.o`, `fakeroot`), so a rebuild is incremental: 10-20 s for one file plus the
+link, instead of a 45-minute full build. `tools/build-xnu-local.sh <tree>`
+does it:
+
+- Xcode 16.4 lives at `~/Downloads/Xcode.app`; `DEVELOPER_DIR` is honoured, and
+  `xcode-select -s` is *not* needed (it would require sudo, which this account
+  does not have).
+- The tree's generated Makefiles and `.d` files hard-code the CI path
+  `/Users/runner/work/ios-sweet/ios-sweet/dxb`. Rewriting that prefix to the
+  local tree (1129 text files) is what makes `make` work at all - without it
+  every rule fails with "No rule to make target .../runner/...".
+- `ctfconvert`/`ctfmerge` are not in Xcode; they come from the CI
+  `xnu-linklibs` artifact (`xnu/out/ci-40101113289/xnu-linklibs/linklibs.tgz`,
+  together with the real `libfirehose_kernel.a`, which goes into
+  `fakeroot/usr/local/lib/kernel/`).
+- Xcode 16 dropped `usr/lib/libcc_kext.a`; `-lcc_kext` still resolves through
+  clang, and the kernel links.
+- The dSYM step copies LLDB's Python macros with `env python`, which does not
+  exist; the build script installs a no-op `python` shim so `make install`
+  finishes. It is cosmetic only.
+- Segments of the locally linked kernel are byte-for-byte the same *sizes* as
+  the CI kernel (`__TEXT` 1441792, `__TEXT_EXEC` 8749056, `__DATA` 5488640);
+  only `__LINKEDIT` differs. It boots, which the marks below prove.
+
+**The shim's vector offsets move with every rebuild.** `mkentryprobe` refuses a
+stale `--xnu-high-vector-offset` ("expected branch/NOP padded high exception
+slots"). `tools/xnu-vector-offsets.py NEW.payload [--ref OLD.payload]` prints
+both offsets; the early table stayed at `0xb78` and the high table at
+`-0x3488` across three rebuilds, but check it every time.
+
+**New: boot progress marks (uncommitted, `bsd/dev/sweet_ufs.c` `sweet_mark`).**
+No console exists on this board, and the persistent log ring cannot help
+(two independent reasons: it is fed from `_cnputs()`, which never runs without
+a console, and `ufs_write_blocks()` refuses everything while `ufsrw=0`). A mark
+appends one 24-byte record to a BSS array and rewrites it into the **last block
+of userdata**, bypassing `su.writable` on purpose - that one block is inside
+the log ring area, so no filesystem block is touched. Read it back with
+`tools/sweet-marks.py --pull` (works in recovery, no root needed beyond adb).
+
+**Result of run 0095/0096/0097 (three boots, all restored):**
+
+| marks | meaning |
+| --- | --- |
+| 10-12 | userdata geometry known, USB probe entered and **returned** |
+| 1-15, 20-24, 30-42 | MTU3 probe, DMA, ifnet, full `mt_hw_init`, **soft connect** |
+| 50, 55, 51 | `bsd_init` -> `vfs_mountroot` -> **root mounted** |
+| 53, 54 | `IOSecureBSDRoot`, root vnode |
+| 60, 62, 65 | `load_init_program` entered |
+| 63 (i=0, errno 2), 63 (i=1, errno 2) | candidates tried, **ENOENT** |
+| 64 (i=2, errno 2) | about to `panic("Process 1 exec ... failed")` |
+
+Three corrections to what this project believed:
+
+1. **The MTU3 driver does not hang.** It runs to the very last statement of
+   `mt_hw_init()` and `sweet_usb_probe()` returns normally. The earlier
+   "failure is at or before soft-connect" inference was wrong: the absence of
+   host enumeration is not evidence of a hang.
+2. **The REDMI-logo loop is not caused by USB.** Boot reaches `launchd` exec;
+   the 64 MiB HFS+ test volume has no `/sbin/launchd`, `execve` returns ENOENT,
+   the kernel panics and the watchdog resets the board ~31 s later. This is the
+   already-known "next blocker: a real root image" - the same loop would happen
+   with `sweetusb=0`. Together with `sweetusb=1` also looping, that closes the
+   case: nothing about the USB driver is involved in the loop.
+3. **The host sees nothing at all**, not even a failed enumeration: `log show`
+   over the run window has no USB event, and `ioreg` never lists `0x1209`.
+   With `SOFT_CONN` (bit 6) set in `U3D_POWER_MANAGEMENT` (read back as
+   `0x64e1`), the pull-up is asserted in the controller, so the D+/D- pair is
+   not reaching the host. The prime suspect is the **MT6363 MUIC/USB switch**:
+   on MediaTek boards the PMIC routes the port's data lines to either the AP
+   or the charger, LK only sets that up for fastboot, and a normal boot never
+   asks for it. The ADT has **no MUIC node** (`/sweet-usb` is the only USB
+   node), while patch 0094 already has a working SPMI/PMIF path to MT6363, so
+   this is reachable but is new work: read the vendor MUIC register map, add a
+   `/sweet-usb-switch` (or extend `/sweet-usb`) with the SPMI address, and put
+   the port in USB/device mode before soft-connect.
+
+**Operational lessons (both cost a run):**
+
+- `restore-boot-a.py` used to restore over **adb** as soon as adb was up, so
+  one run was destroyed by it: it rewrote `boot_a` one second after the test
+  image was written and before the reboot, and the probe never executed. It is
+  now **fastboot-only** by default (`--allow-adb` to override); adb being up
+  means the phone booted the image that is in `boot_a`, so touching it is
+  pointless.
+- Write images with recovery `dd` from `adb push`; `fastboot boot` is rejected
+  by this ABL, and a bare `fastboot reboot` boots the stock path and fails AVB
+  in a few seconds (looks like "faster reboot").
+
+**Next, in order:** (a) `sweetusb=3` diagnostic that reads back
+`U3D_POWER_MANAGEMENT` after the soft-connect write and marks `IPPC_OTG_STS`
+(VBUS) and `PW_STS1/2` - one run, tells whether VBUS is even seen;
+(b) the MUIC work above; (c) only then the network side of the driver.
+
+## >>> 2026-10-25 (keys): MT6363 PON keys + keypad volume-down (patch 0094) <<<
+
 
 **Numbering.** This landed as `0093-sweet-mt6363-keys.patch` at 03:50 and was
 CI-validated as such (run 40127176212); a parallel session then produced
