@@ -1,6 +1,30 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-24: UFS root device WORKS (LUN 2 + `userdata`); next: HFS mount <<<
+## >>> ACTIVE 2026-10-25: HFS root MOUNTS from UFS (`vfs_mountroot`=0) <<<
+
+**Test 4 (mountroot) hardware PASS.** The 0088 kernel probe was built with a
+BRK at the `cbz w0` after `bl _vfs_mountroot` (VA `0xfffffe000776ee3c`) and
+booted from `boot_a` over a 64 MiB raw HFS+ test volume written at the start
+of `userdata`. Banner (`ufs-0088-hfsroot-dmesg.txt`):
+`SWEET-ENTRY v1 el=1 stage=0x87 fault=1 esr=f2005357
+pc=fffffe000776ee3c x0=0 x16=0x182b spsr=60400204`. **x0=0** means
+`vfs_mountroot` returned success: the UFS block device (`/dev/ufsroot0`,
+found via the LUN scan) was read, the `H+` volume header was accepted, and
+the HFS root was mounted. Probe image
+`entryprobe-el1-xnu-0088-hfsroot-mountroot-brk.img` (26,570,752 B, SHA256
+`8c84ec8d4ff495ee1e10abd10a02e1afc701e44a727bb8882601b68185c949f2`,
+BRK at payload file offset 7,778,860) was written and read back inside
+recovery; stock `boot_a` restored immediately after and verified
+`2931647a...` (full 64 MiB partition hash).
+
+**Flashing route: use recovery root ADB, not fastboot.** This bootloader
+rejects `fastboot boot` ("unknown command") and `fastboot flash` wedged once
+(usb_write e00002d9). Both the probe write and the stock restore were done
+with `adb push` to `/tmp` + `dd ... of=/dev/block/by-name/boot_a conv=fsync`
+in recovery (adbd is root there), then verified with a partition readback
+hash. `dd` the full 64 MiB backup on restore; the probe image is smaller
+than the partition and leaves the old tail in place, which Android's boot
+header ignores.
 
 **Test 3 (0088 LUN scan) hardware PASS.** Banner after the probe boot
 (`ufs-0088-lunscan-dmesg.txt`):
@@ -12,17 +36,26 @@ its char device, and returned success before the HFS mount is reached.
 Stock `boot_a` was restored immediately after and verified `2931647a...`.
 Log: `research/matisse/20261024-ufs-wdt/flash-0088-lunscan.log`.
 
-**Next blocker: `userdata` has no HFS volume.** `userdata` is `/dev/block/sdc86`
-(223,281,088 512-byte sectors = 114.3 GB) and its first bytes are
-high-entropy (Android metadata-encrypted filesystem; no `H+` at 1024, no
-`EFI`/`HFS` strings in the first 4 MiB). No `ios16-root-*.img`/`.simg` exists
-on this Mac (`/Volumes` scan found none; the old images lived on the Linux
-host at `/run/media/dipa/android/ios-sweet-ipsw/`). So a `rd=ufsroot0` boot
-would reach `vfs_mountroot` and fail to find HFS. Moving on needs either a
-minimal HFS+ test volume written into the start of `userdata` (destroys the
-Android userdata filesystem) or the real iOS root image copied over.
+**Test volume used for test 4.** `userdata` is `/dev/block/sdc86`
+(223,281,088 512-byte sectors = 114.3 GB). On 2026-10-24, with user approval,
+a 64 MiB raw HFS+ volume was written at its start (destroying the Android
+userdata filesystem; GPT and every other partition untouched). Created with
+`hdiutil create -layout NONE -size 64m -fs HFS+ -volname iOSRoot`:
+`hfs-test/none.dmg`, SHA256
+`8b8db5ef44562ee4af008ca92678e1519274a3b93bf1355033ddf56beb08d826`,
+`H+` at byte 1024, version 4. Pushed and `dd`'d to
+`/dev/block/by-name/userdata` (`bs=1M count=64`) in recovery, readback hash
+verified. So Android will no longer boot normally until userdata is
+reformatted.
 
-**Device (verified after test 2): root ADB in Recovery, slot `_a`, `boot_a`
+**Next blocker: a real root image.** No `ios16-root-*.img`/`.simg` exists on
+this Mac (`/Volumes` scan found none; the old images lived on the Linux host
+at `/run/media/dipa/android/ios-sweet-ipsw/`). The 64 MiB test volume only
+proves mounting; an actual iOS boot needs the real root copied over (or into
+`userdata` after the test volume). Everything up to and including
+`vfs_mountroot` is now proven on hardware.
+
+**Device (verified after test 4): root ADB in Recovery, slot `_a`, `boot_a`
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.**
 Both probe boots were followed by a stock restore; the last one reflashed
 `backup/recovery-20261021/boot_a-live-20261021.img` and
