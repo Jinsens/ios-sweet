@@ -1,5 +1,73 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-25 (USB): first boot of the MTU3 driver - image rebuilt on 0092, awaiting approval <<<
+
+**Request (user): "再继续推进 USB 移植功能".** Driver `0090-sweet-mtu3-usb.patch`
+is unchanged since commit `a686a6a`; this pass is the pre-boot audit plus a
+fresh image built on the current kernel, not new driver code.
+
+**Audit against the vendor source** (`research/matisse/kernel-rubens-oss/drivers/usb/mtu3`,
+`research/matisse/linux-mtu3`) found the register work faithful - no change made:
+
+- IPPC/EPCTL/USB2-CSR offsets, `EP0CSR`/`TX*CSR`/`RX*CSR` field masks,
+  `QMU_Q_*`, `QMU_TX_ZLP`/`QMU_RX_COZ`, `DEV_ADDR` shift 24, `DMAREQEN`,
+  `EP_RST` bit layout all match `mtu3_hw_regs.h`.
+- GPD encoding matches `mtu3_qmu.c`: gen2cp TX carries buf-high in dw0[27:24]
+  and next-high in dw0[31:28], RX in dw3[27:24]/dw3[31:28]; RX buffer length
+  is `(len & 0xfffff) << 12`; IOC|HWO set last after a `dmb`.
+- EP0 follows `mtu3_gadget_ep0.c`: SETUP ack with `SETUPPKTRDY|DPHTX`, TX
+  pump waits for `TXPKTRDY` to clear before `DATAEND`, RX acks `RXPKTRDY` and
+  ends on a short packet, no-data requests ack in the status stage.
+- Bring-up order matches `mtu3_hw_init()`: `device_reset` (IPPC DEV_RST bit0)
+  *before* `device_enable`, then `csr_init`, `DEVICE_CONF=0`, VBUS force,
+  `QFCR` (gen2cp), TXDEEMPH, then HS-only speed and soft connect.
+  `is_u3 = DEV_CAP[7:0]`, `gen2cp = HW_SUB_ID[31:16] >= 0x1003` are the same
+  expressions the vendor uses (probe showed trunk 0x1006, so gen2cp).
+- FIFO split (base 0 for U3 IP, 64 B + halved for U2 IP), slot 2 (U3) / 1 (U2)
+  for bulk and 0 for the interrupt EP match `mtu3_fifo_init()` / `mtu3_ep_enable()`.
+- A bus reset does not need EP0 maxp re-programming: `mtu3_state_reset()`
+  only clears software state, so the MAC keeps `EP0CSR.maxpacket`.
+
+**Two blind spots recorded, not fixed:** the driver never programs
+`COMMON_USB_INTR_ENABLE` (0x2418) or `DEV_LINK_INTR_ENABLE` (0x0850), so
+bus-reset and speed-change *status* are only trusted to latch with the
+vendor's enables written; and it does not re-read `MISC_CTRL[31]`
+(DMA_ADDR_36BIT) after the device reset. The vendor only ever *reads* that
+bit to pick a 36/32-bit DMA mask, i.e. it is a bootloader strap, so the
+36-bit GPD encoding should hold - worth confirming before believing a DMA
+fault.
+
+**Observability on this board is thin.** `sweet_log_start()` refuses to flush
+unless `su.writable`, and the matisse payload policy pins `ufsrw=0`, so the
+4 MiB persistent console ring in userdata is off; the framebuffer console is
+dark (0085 disabled); `shim/diag.c` notes log_store access hung on hardware.
+The only hard signal is **host USB enumeration**. If a run shows nothing, the
+next step is a BRK cave probe in the poll thread (like
+`tools/xnu_smp_irqprobe.py`) that dumps the `mt` struct, not another blind boot.
+
+**Built and verified (not flashed).** `research/matisse/20261025-usb/`:
+- `matisse-xnu-0092-usb.payload`, 16,629,568 B, SHA256 `b1ca2d52...`, from
+  the 0092 kernel `68781200...` (`xnu/out/ci-40124596123`), cmdline
+  `debug=0xc serial=0 cpus=8 keepsyms=1 -enable_kprintf_spam rd=ufsroot0
+  ufsrw=0 ufscache=1 -noprogress sweetkeys=0 sweettouch=0 sweetbattery=0 sweetusb=2`.
+- `entryprobe-el1-xnu-0092-usb.img`, 26,578,944 B, SHA256
+  `d0c37b35...`, usual el1-xnu recipe (vector `0xb78`, high `-0x4488`,
+  TTBR0 `0x10117c000`, clean limit `0x108000000`, `--ufs-init --ufs-query full`,
+  template `backup/boot_a-stock.img`). Payload verified byte-for-byte at
+  decompressed offset 48,947,216; `/sweet-usb` present with
+  `reg = 0x11201000 0x2e00 0x11203e00 0x100`; kernel carries 24 `SWEET MTU3`
+  strings.
+- `run-usb-boot.py NAME IMAGE SHA` replaces `run-approved-probe.py`: same
+  verify-write-readback-restore discipline, but it also polls the host USB
+  tree for `idVendor 0x1209` and new `en*` interfaces while the image runs,
+  and records the time-to-appear. Live boot_a hash checked read-only first
+  (`2931647a...`, matches the backup).
+
+**Phone state:** in recovery, boot_a == `2931647a...`. Nothing written.
+
+**Next:** user approval for one `boot_a` write + boot of
+`entryprobe-el1-xnu-0092-usb.img`, watched with `run-usb-boot.py`.
+
 ## >>> ACTIVE 2026-10-25 (cache, 0092): report ADT geometry when measurement is absent <<<
 
 **Request (user): the ADT/topology/hw.l3cachesize/do_cacheid bullets ending
