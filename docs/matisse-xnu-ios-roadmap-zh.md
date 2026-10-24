@@ -300,6 +300,7 @@ USB 日志能显著减少后续对屏幕和断点回传的依赖。定时 IRQ �
 - **内存：** 当前 XNU 配置的上部窗口是 `0x100000000..0x22e000000`，约 4.72 GiB；它不代表已经压力验证所有 RAM。后续内存扩展需逐个避开 secure/carve-out、framebuffer、回传及 DMA 保留区。
 - **时钟和中断：** 使用本机 13 MHz、虚拟计时器 INTID27，避免复用 sweet 的 19.2 MHz/INTID19。GPIO编号、Linux IRQ 和 GIC INTID 不能混用。
 - **多核与 CPU 驱动（2026-10-25 实机验证通过）：** matisse ADT 现在声明 8 个 CPU 节点（cpu@000..300 = A55，cpu@100..200 = A78，reg/MPIDR 0x000..0x700），每个节点的 compatible 以 `qcom,kryo470` 开头，因此 SweetCPU 能匹配并走既有 PSCI CPU_ON + initCPU/SGI1 路径；`cpus=N` 选择 1..8 的前缀（默认 8）。8 核 probe 的 `vfs_mountroot` 断点返回 x0=0，且 `kperf_init_early` 的 `ml_wait_max_cpus` 只在 8/8 核完成 initCPU + SGI1 后才被放行，证明 0x100..0x700 七个从核的 PSCI、GIC redistributor、SGI 与缓存初始化均可用。CPU_OFF/quiesce 与异构簇上报仍未实现。
+- **per-CPU 中断探针（2026-10-25 实机）：** `tools/xnu_smp_irqprobe.py` 在 mountroot 检查点跳入早期向量槽 14 的 cave，等待 2 s 后读取 `CpuDataEntries` 中每核的 `ipi_cnt`（`cdp+0x228`）与 `timer_cnt`（`cdp+0x238`）。实机 banner 返回 IPI 掩码 `0xff`（8/8 核都有中断入口活动）和定时器掩码 `0x03`（仅 CPU0/1）。这与 XNU arm64 的 tickless 设计一致：`SetIdlePop()` 只在 `rtcPop` 存在真实未来 deadline 时 arm vtimer，空闲且无调度线程的从核累计 tick 计数保持 0；CPU1 的计数是从核 vtimer 投递的首个证据，CPU2-7 在调度负载下的直接 vtimer 证据仍待更晚检查点验证。
 - **电源与外设：** 按键走 MTK PMIC/SPMI；电池、充电、热管理、挂起恢复均未完成 XNU 移植。先短时可观测测试，再考虑长时间运行；不要把静态电量服务当作真实充电/温控。
 - **后续大项：** Wi-Fi、蓝牙、基带、音频、摄像头、传感器、GPS、GPU、休眠唤醒都需要独立驱动/固件/用户态接口。桌面亮起不会自动补齐这些功能。
 - **写入范围：** iOS 根的预定位置是现有 `userdata`，未来写入仍需当次明确确认；不修改 GPT，保留 bootloader、vendor_boot/Recovery、modem、persist 和校准备份。

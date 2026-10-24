@@ -1,6 +1,53 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25: 8-core matisse probe built (awaiting flash approval) <<<
+## >>> ACTIVE 2026-10-25: per-CPU IRQ probe PASS (IPIs 8/8, timer demand-driven) <<<
+
+**Question (user: "irq正常吗").** The 8-core probe proved SGI1 ran on every
+core, but not which CPUs take timer/IPI interrupts afterwards. Instead of
+rebuilding the kernel, `tools/xnu_smp_irqprobe.py` rewrites the mountroot
+checkpoint (`cbz w0` at VA `0xfffffe000776ee3c`) into `B 0xfffffe000748d714`,
+a 26-word cave in early-vector slot 14: read CNTVCT, busy-wait 2 s
+(26,000,000 ticks at 13 MHz), scan `CpuDataEntries[7..0]`
+(VA `0xfffffe0007be1bd8`, vaddr at entry+8), test `cdp+0x228` (ipi_cnt, 64-bit
+pair incremented in `_cpu_signal_handler_internal`) and `cdp+0x238`
+(`_rtclock_intr` timer_cnt), build one-bit-per-CPU masks, put them in x0/x12
+and `BRK #0x5357`. Offsets were re-checked against the 0088 Mach-O:
+`ldr x8,[cdp+0x238]` at `fffffe00074963c4` and the 2x64-bit increment at
+`[cdp+0x228]` in `_cpu_signal_handler_internal`.
+
+**Hardware PASS (2026-10-25).** `research/matisse/20261025-smp8-irq/`:
+`entryprobe-el1-xnu-0088-smp8-irq-brk.img`, 26,570,752 B, SHA256
+`ee8e652b...`, same recipe as the 8-core probe; written partition
+`726c122f...`. Recovery came back just after the flash script's 45 s window,
+so its `finally` left the test image in place; dmesg was captured and the
+stock `boot_a` restored manually (`2931647a...`, full 64 MiB verified).
+Banner (exactly one record):
+
+```
+SWEET-ENTRY v1 el=0000000000000001 midr=00000000410fd462 mpidr=0000000081000000 freq=0000000000c65d40 dtb=0000000000000000 sctlr=0000000030d00980 stage=0000000000000087 fault=0000000000000001 esr=00000000f2005357 far=fffffe10108b0000 pc=fffffe000748d778 gicd=0105000000360000 vtimer=0501000000000000 fb=0000000121020004 x0=0000000000000003 x16=00000000000000ff spsr=0000000062400204
+```
+
+`pc` is the cave's BRK and `esr=f2005357` confirms it. `x0=0x03` = timer mask
+(logical CPUs 0 and 1); `x16=0xff` = IPI mask (all CPUs 0-7).
+
+**Interpretation.** Per-CPU interrupt delivery works on all eight cores: each
+CpuData entry is valid and every core has handled at least one CPU signal
+(the initCPU SGI1 self-test alone guarantees the count). Both counters are
+cumulative since boot. Timer IRQs are demand-driven: XNU arm64 is tickless
+and `SetIdlePop()` arms the vtimer only when `rtcPop` is a real future
+deadline; otherwise it programs the clamped maximum (rtcPop starts at
+`EndOfAllTime`), so idle cores with no scheduled thread legitimately keep a
+zero timer count. CPU1's nonzero timer_cnt is the first per-secondary vtimer
+evidence; CPUs 2-7 have no direct vtimer-interrupt proof yet because nothing
+ran there. A later checkpoint (after launchd/threads are active) or a loaded
+8-core run would prove that. Raise the flash script's recovery wait to ~120 s
+next time.
+
+**Next.** Real-root 8-core boot with `matisse-xnu-0088-smp8.payload`, then
+check per-CPU scheduler activity; CPU_OFF/quiesce and heterogeneous cluster
+reporting remain unimplemented.
+
+## 8-core matisse probe (PASS 2026-10-25)
 
 **Goal (user request): enable all eight cores.** The 0088 kernel already has
 the SMP path (0065 PSCI CPU_ON + legacy IOCPU, 0078 8 cores, 0084 single-CPU
