@@ -1,5 +1,68 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-25 (cache, 0092): report ADT geometry when measurement is absent <<<
+
+**Request (user): the ADT/topology/hw.l3cachesize/do_cacheid bullets ending
+with "帮我解决而且现在已经完成一部分了".** Status of each item, split into
+already-landed and new work:
+
+- **ADT sizes** - landed in `6b7d1da`. `tools/mkadt.py` writes
+  `l2-cache-size`/`l3-cache-size` on every matisse CPU (256K A510, 512K A710,
+  1M X2; 8M shared L3) and marks cores 0-3 `cluster-type='E'`, 4-7 `'P'`.
+  `ml_parse_cpu_topology()` therefore fills `cpu->l2_cache_size/l3_cache_size`,
+  so SweetCPU's `ml_processor_info_t` is no longer zero. Test:
+  `tools/tests/test_mkadt_boards.py::test_matisse_eight_cpus_and_timer`.
+- **`hw.l3cachesize`** - `0089` already replaced the unconditional
+  `0xFFFFFFFF` with the measured `c_l3size`; `0091` fixed the FEAT_CCIDX
+  decode that made every value wrong. `hw.l3cachesize` returns `EINVAL` only
+  when the size is genuinely unknown.
+- **do_cacheid() per cluster** - `0089` samples every core of a cluster type
+  and keeps the largest private L2 (A710 512K vs X2 1M), so the boot A510 is
+  no longer the only core measured for the P cluster.
+- **Heterogeneous reporting** - E/P types + `MAX_CPU_CLUSTERS 2` are in
+  `0089`; `ml_processor_register` keeps every CPU in pset0 (the non-edge
+  clutch scheduler has one hierarchy). `hw.nperflevels` = 2,
+  perflevel0 = P, perflevel1 = E.
+
+**Gap found while auditing (fixed here, patch
+`xnu/patches/0092-sweet-cache-report-fallback.patch`):**
+
+1. `ml_cpu_get_info_type()` answered only from `cpuid_cache_info[]`, so a
+   cluster type that had not measured yet reported L2/L3 = 0 and then
+   `0xFFFFFFFF`. It now falls back per cluster type to the largest ADT
+   `l2-cache-size`/`l3-cache-size`, and only returns `0xFFFFFFFF` when the ADT
+   has no value either. Measured geometry still drives cache maintenance and
+   `vm_cache_geometry_colors`.
+2. `cache_info_type()` sleeps until `c_valid` for a non-boot cluster type.
+   With `cpus=4` the P cores never run `do_cacheid()`, so any
+   `hw.perflevel0.*` read would sleep forever. It now returns the empty entry
+   when `cpuid_cache_info_bitmap` shows that no core of that type has ever
+   entered `do_cacheid()`; the ADT fallback above then answers. Cache line size
+   falls back to the boot cluster's (uniform 64 B on this SoC).
+3. `hw.cachesize[2]` used `cache_info_type()->c_l2size`, which on this board is
+   the shared L3 (do_cacheid selects CSSELR_L3 when CLIDR.Ctype3 == 4). Under
+   SWEET it now reports the private L2 of the lowest perflevel, matching the
+   meaning of that array entry.
+
+**Verified locally.** 0092 applies forward and reverse cleanly; `clang
+-fsyntax-only` with the exact ci-40115544522 flags (extracted from the run log,
+CLT SDK substituted for the Xcode SDK) gives 0 errors for `cpuid.c`,
+`machine_routines_common.c` and `kern_mib.c`, and no new warnings at the edited
+lines; all 63 host tests pass. `tools/validate-repo.py` still fails on
+pre-existing `[[ ]]` shell syntax in 0019/0020/0026, unrelated to this change.
+
+**Not done / next:** the kernel with 0092 has not been built by CI or booted.
+`0091`'s re-probe (`entryprobe-el1-xnu-0091-hetero-cache-brk.img`) is still
+unbuilt, and any `boot_a` write needs explicit user approval. Once 0091 runs,
+the expected E/P values are those in the section below; 0092 only changes what
+is reported when a type has not run (e.g. `cpus=4`) or when CLIDR has no L3.
+
+**`sctlr` in SWEET-ENTRY is a handoff value.** It is SCTLR_EL1 at the shim
+entry point (the probe clears M/C/I first, hence `0x30d00980`), not XNU's
+running state; `tools/mkentryprobe.py` now says so next to the field list,
+and the bring-up checklist tells readers to use `pc`/`esr`/`far` for kernel
+checkpoints.
+
 ## >>> ACTIVE 2026-10-25 (cache): E/P L2/L3 probe - FEAT_CCIDX truncation, patch 0091 <<<
 
 **Request (user): "L1、L2、L3 都全开了吗" plus the cache/ADT gap bullets
@@ -60,8 +123,62 @@ likely `0x800000`; the earlier 0 may be the probe race above. `hw.perflevel1`
 maps to E, `perflevel0` to P; the boot-cluster non-perflevel
 `hw.l2cachesize`/`hw.l3cachesize` therefore report E.
 
-**CI run for 0091: pending.** Any new `boot_a` write (a re-built 0091 cache
-probe or the real kernel) still needs explicit user approval.
+**CI run 40120476258 (0091): success.** Build 14m18s; artifact
+`xnu/out/ci-40120476258/xnu-kernel/kernel.development.sweet` (17,239,952 B,
+SHA256 `54994bd4...`). Verified in the binary, not just in the sources:
+
+- `_do_cacheid` (`0xfffffe000748083c`) decodes 64-bit CCSIDR at every site:
+  `mrs x8, CCSIDR_EL1`, `mrs x9, ID_AA64MMFR2_EL1`, `tst x9,#0xf00000`,
+  `ubfx x9,#3,#10` / `ubfx x12,#3,#21` with `csel` for ways,
+  `ubfx w11,#13,#15` / `ubfx x8,#32,#24` with `csel` for sets, so
+  size = linesz*ways*sets rather than linesz*ways.
+- `GET_CACHE_CONFIG` inlined into `_clean_mmu_dcache` (`0xfffffe000747d900`)
+  and `_CleanPoU_Dcache` (`0xfffffe000747d9e8`): `mrs x4, ID_AA64MMFR2_EL1;
+  ubfx x4,x4,#20,#4; cmp x4,#0` selects CCIDX ways/sets with `csel`; the
+  way-stride magic is unchanged and the increment still survives in x11.
+- Layout for the cave: `_cpuid_cache_info` = `0xfffffe0007c5da98`
+  (was `...7c59a98`), entry stride `0x38`; stores at entry+`0x24`
+  (`c_l2size`), +`0x30` (`c_priv_l2size`), +`0x34` (`c_l3size`) confirm the
+  offsets used by `tools/xnu_cacheprobe.py`.
+
+**0091 payload built** for a re-probe:
+`research/matisse/20261025-cache-0091/matisse-xnu-0091.payload`
+(16,629,568 B, SHA256 `4cad7a19...`), same 8-core ADT and cmdline as 0089.
+`__TEXT_EXEC` grew `0x854000 -> 0x858000` and every later segment moved
++`0x4000`; `kernel_end` `0xfffffe00084d4000`. Because of that shift the 0089
+addresses cannot be reused:
+checkpoint `cbz w0` after `bl _vfs_mountroot` is now VA `0xfffffe0007771324`
+(PA `0x101771324`, original word `0x34000180`). The cave is unchanged:
+`_LowExceptionVectorBase` is still `0xfffffe000748d000`, its slot 14 still
+`B .`+NOPs, so cave VA `0xfffffe000748d714` (PA `0x10148d714`) and
+`cpuid_cache_info` above apply. `_bootstrap_pagetables` is still
+`0xfffffe000717c000` in `__DATA_CONST`, so the verified
+`--xnu-restore-ttbr0 0x10117c000` remains valid; `tools/mkentryprobe.py`
+re-validates that the page is still zero in the new payload.
+
+**Open question before the re-probe: is P's `c_l3size=0` real?** In 0089 the
+P entry had `c_priv_l2size=0x200` but `c_l3size=0`. The first P core to run
+takes the main path and stores `c_priv_l2size` (+0x30) before `c_l3size`
+(+0x34); `SweetCPU::startAll` starts CPUs one at a time and waits for each
+`initCPU`, so by `bsd_init` all 8 should be past `do_cacheid` - but a race is
+not provable from one sample. If instead P's CLIDR really has Ctype3 != 4,
+the main path takes the `Ctype2==4` branch, leaving `c_l3size=0` and setting
+`c_l2size` = private L2; that would make the 0 correct rather than a decode
+bug. To answer both in one flash, extend `tools/xnu_cacheprobe.py` before
+building the image: keep `x0 = (E.priv_l2<<32)|E.l3`, and pack the P fields
+as 12-bit page counts `x16 = (P.l3>>12) | ((P.priv_l2>>12)<<12) |
+((P.c_l2size>>12)<<24)`. Then `l3=0, c_l2size==priv_l2` means Ctype3 absent;
+`l3=0, c_l2size=0` means the main path never reached the geometry block.
+Update the matching unit test (`tools/tests/test_xnu_cacheprobe.py`).
+
+**Next action: build `entryprobe-el1-xnu-0091-hetero-cache-brk.img`** with
+the established recipe (`--xnu-vector-offset 0xb78 --xnu-high-vector-offset
+-0x4488 --xnu-clean --xnu-clean-limit 0x108000000 --xnu-restore-ttbr0
+0x10117c000 --xnu-selective --ufs-init --ufs-query full --template
+backup/boot_a-stock.img`), run it through the readback/restore runner, then
+read the single `SWEET-ENTRY` record. Any new `boot_a` write - this probe or
+the real kernel - still needs explicit user approval; the 0089 approval is
+consumed. Do not flash without it.
 
 ## >>> ACTIVE 2026-10-25 (USB): handoff PASS - MTU3 powered, HS device, soft-connected <<<
 

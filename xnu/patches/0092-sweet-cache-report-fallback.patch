@@ -1,0 +1,118 @@
+--- a/osfmk/arm/cpuid.c
++++ b/osfmk/arm/cpuid.c
+@@ -494,6 +494,19 @@
+ 	if (ret != cpuid_cache_info_boot_cpu) {
+ 		lck_rw_lock_shared(&cpuid_cache_info_lck_rw);
+ 		while (CC_UNLIKELY(!ret->c_valid)) {
++#if defined(SWEET)
++			/*
++			 * A cluster type outside the boot set (cpus=N leaves the
++			 * P cores powered off) never runs do_cacheid(), so its
++			 * c_valid is never published. Return the still-empty entry
++			 * and let ml_cpu_get_info_type() answer from the ADT instead
++			 * of sleeping forever.
++			 */
++			if (!(os_atomic_load(&cpuid_cache_info_bitmap, relaxed) &
++			    (uint8_t)(1 << cluster_type))) {
++				break;
++			}
++#endif /* SWEET */
+ 			lck_rw_sleep(&cpuid_cache_info_lck_rw, LCK_SLEEP_DEFAULT,
+ 			    (event_t)&ret->c_valid, THREAD_UNINT);
+ 		}
+--- a/osfmk/arm/machine_routines_common.c
++++ b/osfmk/arm/machine_routines_common.c
+@@ -1299,12 +1299,45 @@
+ 	}
+ 	lck_mtx_unlock(&max_cpus_lock);
+ 	return machine_info.max_cpus;
++}
++
++#if defined(SWEET)
++/*
++ * do_cacheid() measures the geometry of one core per cluster type.  Cores that
++ * have not run yet leave the measured sizes at zero, and a cluster type that is
++ * not in the boot set (cpus=N) is never measured at all.  The ADT describes
++ * every CPU, so use it to answer cache-size queries; the measured geometry is
++ * still what drives cache maintenance and VM cache coloring.
++ */
++static uint32_t
++sweet_topology_cache_size(cluster_type_t cluster_type, boolean_t outermost)
++{
++	const ml_topology_info_t *topology = ml_get_topology_info();
++	uint32_t size = 0;
++
++	for (unsigned int i = 0; i < topology->num_cpus; i++) {
++		const ml_topology_cpu_t *cpu = &topology->cpus[i];
++		uint32_t candidate;
++
++		if (cpu->cluster_type != cluster_type) {
++			continue;
++		}
++		candidate = outermost ? cpu->l3_cache_size : cpu->l2_cache_size;
++		if (candidate > size) {
++			size = candidate;
++		}
++	}
++	return size;
+ }
++#endif /* SWEET */
+ 
+ void
+ ml_cpu_get_info_type(ml_cpu_info_t * ml_cpu_info, cluster_type_t cluster_type)
+ {
+ 	cache_info_t   *cpuid_cache_info;
++#if defined(SWEET)
++	uint32_t l3size;
++#endif
+ 
+ 	cpuid_cache_info = cache_info_type(cluster_type);
+ 	ml_cpu_info->vector_unit = 0;
+@@ -1317,9 +1350,20 @@
+ #if defined(SWEET)
+ 	/* c_l2size is the outermost cache on SWEET; report private L2 and LLC separately. */
+ 	ml_cpu_info->l2_cache_size = cpuid_cache_info->c_priv_l2size;
+-	ml_cpu_info->l3_settings = (cpuid_cache_info->c_l3size != 0);
+-	ml_cpu_info->l3_cache_size = (cpuid_cache_info->c_l3size != 0) ?
+-	    cpuid_cache_info->c_l3size : 0xFFFFFFFF;
++	if (ml_cpu_info->l2_cache_size == 0) {
++		ml_cpu_info->l2_cache_size = sweet_topology_cache_size(cluster_type, false);
++	}
++	l3size = cpuid_cache_info->c_l3size;
++	if (l3size == 0) {
++		l3size = sweet_topology_cache_size(cluster_type, true);
++	}
++	ml_cpu_info->l3_settings = (l3size != 0);
++	ml_cpu_info->l3_cache_size = (l3size != 0) ? l3size : 0xFFFFFFFF;
++	if (ml_cpu_info->cache_line_size == 0) {
++		/* Line size is uniform on this SoC; an unmeasured cluster still
++		 * has to answer hw.perflevelN.cachelinesize. */
++		ml_cpu_info->cache_line_size = cache_info()->c_linesz;
++	}
+ #else
+ 	ml_cpu_info->l2_cache_size = cpuid_cache_info->c_l2size;
+ 	ml_cpu_info->l3_settings = 0;
+--- a/bsd/kern/kern_mib.c
++++ b/bsd/kern/kern_mib.c
+@@ -624,10 +624,21 @@
+ 	cachesize[3] = ml_cpu_cache_size(3);
+ #elif __arm64__
+ 	cluster_type_t min_perflevel_cluster_type = cpu_type_for_perflevel(__builtin_popcount(ml_get_cpu_types()) - 1);
++#if defined(SWEET)
++	ml_cpu_info_t cpu_info = { 0 };
++#endif
+ 
+ 	cachesize[0] = ml_get_machine_mem();
+ 	cachesize[1] = cache_info_type(min_perflevel_cluster_type)->c_dsize; /* Using the DCache */
++#if defined(SWEET)
++	/* c_l2size is the outermost cache here, which is the shared L3; report
++	 * the private L2 of the lowest perflevel instead. The ADT fallback in
++	 * ml_cpu_get_info_type() also covers a perflevel that never booted. */
++	ml_cpu_get_info_type(&cpu_info, min_perflevel_cluster_type);
++	cachesize[2] = cpu_info.l2_cache_size;
++#else
+ 	cachesize[2] = cache_info_type(min_perflevel_cluster_type)->c_l2size;
++#endif
+ #else
+ #error unknown architecture
+ #endif

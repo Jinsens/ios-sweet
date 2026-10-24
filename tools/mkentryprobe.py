@@ -21,6 +21,11 @@ import mkbootimg
 from xnu_breakpoint import early_vector_pa, high_vector_pa, high_vector_sync_va, bootstrap_clean_range, bootstrap_ttbr0_pa
 
 PREFIX_SIZE = 2 << 20
+# `sctlr` is SCTLR_EL1 at the shim entry point, i.e. the controls LK handed
+# over (the probe clears M/C/I first, so it normally reads 0x30d00980). It is a
+# handoff snapshot, NOT the state XNU runs in: by the time a BRK checkpoint in
+# the kernel fires, XNU has installed its own SCTLR_EL1 with M/C/I set. Do not
+# read this field as evidence about the running kernel's MMU or caches.
 FIELDS = ('el', 'midr', 'mpidr', 'freq', 'dtb', 'sctlr', 'stage',
           'fault', 'esr', 'far', 'pc', 'gicd', 'vtimer', 'fb', 'x0',
           'x16', 'spsr')

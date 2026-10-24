@@ -105,7 +105,9 @@ Do not label a stage hardware-tested merely because an emulator passed it.
    this LK a 64 MiB fastboot transfer previously wedged USB.
 4. Read back the entire written prefix and compare it, then reboot recovery.
 5. Read `dmesg` with `adb exec-out`; search for `SWEET-ENTRY`. Do not use a
-   reset-dependent old log as evidence of this boot.
+   reset-dependent old log as evidence of this boot. `sctlr` in that record is
+   SCTLR_EL1 as LK handed it to the shim (M/C/I clear, MMU off), not the state
+   XNU runs in; use the `pc`/`esr`/`far` fields for kernel checkpoints.
 6. Restore the original backup when finished and verify the full partition.
    A failed test needs Power+VolumeDown to fastboot, then restoration.
 
