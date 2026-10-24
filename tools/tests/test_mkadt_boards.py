@@ -65,6 +65,14 @@ class BoardProfileTests(unittest.TestCase):
         self.assertIn(b'mediatek,mt6983-mtu3\0', usb.prop('compatible'))
         self.assertEqual(words(usb.prop('reg')),
                          (0x11201000, 0x2e00, 0x11203e00, 0x100))
+        keys = child(root, 'sweet-keys')
+        self.assertIn(b'mediatek,mt6363-keys\0', keys.prop('compatible'))
+        self.assertEqual(words(keys.prop('reg')),
+                         (0x1c015000, 0x900, 0x1c00e000, 0x1000))
+        self.assertEqual(words(keys.prop('spmi-sid'), 32), (4,))
+        self.assertEqual(words(keys.prop('power-bit'), 32), (1,))
+        self.assertEqual(words(keys.prop('volup-bit'), 32), (3,))
+        self.assertEqual(words(keys.prop('voldown-index'), 32), (0,))
         self.assertEqual(root.prop('model'), b'iPhone10,3\0')
         self.assertIn(b'D22AP\0', root.prop('compatible'))
         self.assertIn(b'xiaomi,matisse\0', root.prop('compatible'))
@@ -76,7 +84,7 @@ class BoardProfileTests(unittest.TestCase):
     def test_matisse_payload_disables_qualcomm_drivers(self):
         blob = adt.serialize(self.build(board='matisse'))
         args = mkpayload.platform_cmdline(blob, 'debug=0xc serial=3 cpus=1')
-        for token in ('cpus=1', 'sweetkeys=0', 'sweettouch=0',
+        for token in ('cpus=1', 'sweetkeys=2', 'sweettouch=0',
                       'sweetbattery=0', 'sweetusb=2', 'ufsrw=0', '-noprogress'):
             self.assertIn(token, args.split())
         self.assertEqual(args, mkpayload.platform_cmdline(blob, args))
@@ -84,8 +92,10 @@ class BoardProfileTests(unittest.TestCase):
         self.assertIn('cpus=8', mkpayload.platform_cmdline(blob, 'cpus=8').split())
         for usb in ('sweetusb=0', 'sweetusb=1', 'sweetusb=2'):
             self.assertIn(usb, mkpayload.platform_cmdline(blob, usb).split())
-        for unsafe in ('cpus=9', 'cpus=0', 'cpus=bad', 'sweetkeys=1',
-                       'sweetusb=3', 'sweetusb=-1', 'ufsrw=1'):
+        for keys in ('sweetkeys=0', 'sweetkeys=1', 'sweetkeys=2'):
+            self.assertIn(keys, mkpayload.platform_cmdline(blob, keys).split())
+        for unsafe in ('cpus=9', 'cpus=0', 'cpus=bad', 'sweetkeys=3',
+                       'sweetkeys=-1', 'sweetusb=3', 'sweetusb=-1', 'ufsrw=1'):
             with self.assertRaises(ValueError):
                 mkpayload.platform_cmdline(blob, unsafe)
         with self.assertRaises(ValueError):
@@ -104,6 +114,7 @@ class BoardProfileTests(unittest.TestCase):
             self.assertNotIn(prop, [name for name, _, _ in cpus[0].props])
         self.assertEqual(words(child(root, 'sweet-ufs').prop('reg')), (0x1d84000, 0x3000))
         self.assertNotIn('sweet-usb', [c.name for c in root.children])
+        self.assertNotIn('sweet-keys', [c.name for c in root.children])
         gic = child(child(root, 'arm-io'), 'gic')
         self.assertEqual(words(gic.prop('virtual-timer-intid'), 32), (19,))
         self.assertEqual(mkpayload.adt_dram(adt.serialize(root)), (0xb0000000, 0x4d000000))

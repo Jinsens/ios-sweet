@@ -257,6 +257,19 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         ('reg', u64(0x11201000, 0x2e00, 0x11203e00, 0x100)),
     ])]
 
+    # bsd/dev/sweet_mt_keys.c: MT6363 PON keys (power, volume-up) behind the
+    # MT6983 PMIF at spmi@1c015000, plus volume-down on the SoC keypad
+    # controller. LK leaves both blocks clocked and scanning.
+    keys = [] if board != 'matisse' else [node('sweet-keys', [
+        ph(),
+        ('compatible', cstr('mediatek,mt6363-keys')),
+        ('reg', u64(0x1c015000, 0x900, 0x1c00e000, 0x1000)),
+        ('spmi-sid', u32(4)),
+        ('power-bit', u32(1)),
+        ('volup-bit', u32(3)),
+        ('voldown-index', u32(0)),
+    ])]
+
     # bsd/dev/sweet_ufs.c: the UFS host the bootloader leaves running.
     # matisse is MediaTek ufshci@112b0000; sweet is the Qualcomm host.
     if board == 'matisse':
@@ -299,7 +312,7 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + display + usb + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + display + usb + keys + product + ([] if qemu else [ufs]))
 
 
 if __name__ == '__main__':

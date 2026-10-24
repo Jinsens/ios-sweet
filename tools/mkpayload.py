@@ -150,10 +150,10 @@ def platform_cmdline(adt_blob, cmdline):
     if b'xiaomi,matisse' not in (root.prop('compatible') or b'').split(b'\0'):
         return cmdline
     cpu_count = len(next(c for c in root.children if c.name == 'cpus').children)
-    required = {'sweetkeys': 0, 'sweettouch': 0,
-                'sweetbattery': 0, 'ufsrw': 0}
+    required = {'sweettouch': 0, 'sweetbattery': 0, 'ufsrw': 0}
     # sweetusb: 0 off, 1 report MTU3 state only, 2 (default) run the device
-    ranges = {'sweetusb': (0, 2, 2)}
+    # sweetkeys: 0 off, 1 report TOPSTATUS/keypad only, 2 (default) feed HID
+    ranges = {'sweetusb': (0, 2, 2), 'sweetkeys': (0, 2, 2)}
     tokens = cmdline.split()
     present = set()
     for token in tokens:

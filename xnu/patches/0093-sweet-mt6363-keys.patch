@@ -1,0 +1,382 @@
+--- /dev/null
++++ b/bsd/dev/sweet_mt_keys.c
+@@ -0,0 +1,346 @@
++/*
++ * SWEET: MediaTek MT6363 (matisse, MT6983) keys.
++ *
++ * sweet reads its keys from the Qualcomm PM6150/PM6150L SPMI arbiter. On
++ * matisse the same three keys are split between two MediaTek blocks:
++ *
++ *   - power and volume-up are PON keys of the MT6363 PMIC (SPMI USID 4)
++ *     behind the MT6983 PMIF controller at 0x1c015000. The vendor driver
++ *     (drivers/input/keyboard/mtk-pmic-keys.c) treats them as interrupt
++ *     sources with separate release IRQs, so it never reads the state
++ *     register on this chip. MT6363_TOPSTATUS (0x001e) is active low per
++ *     key: bit1 = PWRKEY, bit3 = HOMEKEY (the board wires RESIN to
++ *     volume-up), bit2 = CHRDET. Both key bits idle high.
++ *   - volume-down is bit 0 of KP_MEM1 in the SoC keypad controller
++ *     (kp@1c00e000, "mediatek,kp"). KP_MEM1..KP_MEM5 hold 72 key bits,
++ *     active low, and the bootloader keymap puts KEY_VOLUMEDOWN there.
++ *
++ * Both blocks are left powered, clocked and scanning by LK, so this driver
++ * only polls: no clock, regulator, IRQ or keymap programming. PMIF gets the
++ * vendor's own init values (all interfaces enabled, AP channel 2) and every
++ * read uses the extended-register-long command the MT6363 regmap uses
++ * (16-bit address, 8-bit data).
++ *
++ * Boot args: sweetkeys=1 reports state only, 2 (default for matisse) also
++ * feeds HID; sweetkpd=0 skips the keypad controller.
++ *
++ * Like sweet_keys.c this is polling from one kernel thread, so it works
++ * before any PMIC interrupt support exists.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void sweet_hid_key(int key, int down);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++
++/* PMIF register map: vendor mt6xxx_regs, AP software interface channel 2. */
++#define PMIF_INIT_DONE      0x0000u
++#define PMIF_INF_EN         0x0024u
++#define PMIF_ARB_EN         0x0150u
++#define PMIF_CMDISSUE_EN    0x03b8u
++#define PMIF_CH_ACC         0x0880u
++#define PMIF_CH_WDATA       0x0884u
++#define PMIF_CH_RDATA       0x0894u
++#define PMIF_CH_VLD_CLR     0x08a4u
++#define PMIF_CH_STA         0x08a8u
++
++#define PMIF_SWINF(sta)     (((sta) >> 1) & 7u)
++#define PMIF_SWINF_IDLE     0u
++#define PMIF_SWINF_WFVLDCLR 6u
++#define PMIF_CMD_EXT_READL  3u   /* SPMI opcode 0x38, 16-bit address */
++
++#define MT6363_SID           4u
++#define MT6363_REG_TOPSTATUS 0x001eu
++#define MT6363_REG_CHIPID    0x0009u
++
++/* Keypad controller (mediatek,kp) */
++#define KP_MEM1       0x0004u
++#define KP_MEM_COUNT  5
++#define KP_EN         0x0024u
++#define KP_KEY_DOWN   0        /* bit 0 of KP_MEM1 = KEY_VOLUMEDOWN */
++
++/* sweet_hid_key() indices */
++#define MTK_KEY_POWER   0
++#define MTK_KEY_VOLUP   1
++#define MTK_KEY_VOLDOWN 2
++#define MTK_KEY_COUNT   3
++
++struct sweet_mt_keys {
++	vm_offset_t pmif;
++	vm_offset_t kp;
++	uint32_t sid;
++	uint32_t power_bit;
++	uint32_t volup_bit;
++	uint32_t voldown_index;
++	int level;
++	int sleep_chan;
++	bool started;
++	bool kp_ok;
++	uint32_t reads, errors;
++};
++
++static struct sweet_mt_keys mtk;
++
++static uint32_t
++mtk_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++mtk_wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static uint16_t
++mtk_rd16(vm_offset_t base, uint32_t off)
++{
++	uint16_t v = *(volatile uint16_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++/*
++ * One SPMI register read. PMIF runs a small FSM per software interface:
++ * wait for IDLE, write the command word into ACC, wait for WFVLDCLR, take
++ * RDATA and acknowledge by writing 1 to VLD_CLR. This mirrors
++ * pmif_spmi_read_cmd() in the vendor driver.
++ */
++static bool
++mtk_spmi_read(uint16_t addr, uint8_t *out)
++{
++	uint32_t sta = 0;
++	unsigned i;
++
++	for (i = 0; i < 2000; ++i) {
++		sta = mtk_rd(mtk.pmif, PMIF_CH_STA);
++		if (PMIF_SWINF(sta) == PMIF_SWINF_IDLE) {
++			break;
++		}
++		delay(10);
++	}
++	if (PMIF_SWINF(sta) != PMIF_SWINF_IDLE) {
++		return false;
++	}
++
++	mtk_wr(mtk.pmif, PMIF_CH_ACC,
++	    (PMIF_CMD_EXT_READL << 30) | ((mtk.sid & 0xfu) << 24) | addr);
++
++	for (i = 0; i < 10000; ++i) {
++		sta = mtk_rd(mtk.pmif, PMIF_CH_STA);
++		if (PMIF_SWINF(sta) == PMIF_SWINF_WFVLDCLR) {
++			uint32_t data = mtk_rd(mtk.pmif, PMIF_CH_RDATA);
++			mtk_wr(mtk.pmif, PMIF_CH_VLD_CLR, 1);
++			*out = (uint8_t)(data & 0xffu);
++			return true;
++		}
++		delay(10);
++	}
++	return false;
++}
++
++static void
++mtk_wait(void)
++{
++	uint64_t deadline;
++
++	clock_interval_to_deadline(20, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&mtk.sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* Volume-down: bit 0 of KP_MEM1, active low. 0x0000/0xffff mean "no scan". */
++static int
++mtk_kpd_voldown(void)
++{
++	uint16_t mem[KP_MEM_COUNT];
++	unsigned i, zero = 0;
++	uint32_t bit;
++
++	if (!mtk.kp_ok) {
++		return 0;
++	}
++	for (i = 0; i < KP_MEM_COUNT; ++i) {
++		mem[i] = mtk_rd16(mtk.kp, KP_MEM1 + 2u * i);
++		if (mem[i] == 0) {
++			zero++;
++		}
++	}
++	if (zero == KP_MEM_COUNT) {
++		return 0;   /* controller not scanning */
++	}
++	bit = mtk.voldown_index;
++	if (bit >= 16u * KP_MEM_COUNT) {
++		return 0;
++	}
++	return (mem[bit / 16u] & (uint16_t)(1u << (bit % 16u))) == 0;
++}
++
++static void
++mtk_report(int key, int down, uint32_t raw)
++{
++	static const char *const names[MTK_KEY_COUNT] = { "power", "volup", "voldown" };
++
++	printf("SWEET MT KEYS: %s down=%d topstatus=0x%02x kpd=%d\n",
++	    names[key], down, raw, mtk.kp_ok);
++	if (mtk.level >= 2) {
++		sweet_hid_key(key, down);
++	}
++}
++
++static void
++mtk_keys_thread(void *arg, wait_result_t result)
++{
++	int state[MTK_KEY_COUNT] = { 0, 0, 0 };
++	int pending[MTK_KEY_COUNT] = { 0, 0, 0 };
++	(void)arg;
++	(void)result;
++
++	for (;;) {
++		uint8_t top = 0;
++		bool ok = mtk_spmi_read(MT6363_REG_TOPSTATUS, &top);
++		int now[MTK_KEY_COUNT];
++
++		if (ok) {
++			mtk.reads++;
++		} else if ((mtk.errors++ % 100u) == 0) {
++			printf("SWEET MT KEYS: TOPSTATUS read failed (sta=0x%08x reads=%u)\n",
++			    mtk_rd(mtk.pmif, PMIF_CH_STA), mtk.reads);
++		}
++		/* A failed read says nothing about the keys: keep the last state. */
++		now[MTK_KEY_POWER] = ok ?
++		    (((top >> mtk.power_bit) & 1u) == 0) : state[MTK_KEY_POWER];
++		now[MTK_KEY_VOLUP] = ok ?
++		    (((top >> mtk.volup_bit) & 1u) == 0) : state[MTK_KEY_VOLUP];
++		now[MTK_KEY_VOLDOWN] = mtk_kpd_voldown();
++
++		for (int k = 0; k < MTK_KEY_COUNT; ++k) {
++			if (now[k] == state[k]) {
++				pending[k] = 0;
++				continue;
++			}
++			/* 2 x 20 ms: the PMIC debounces, the keypad may not. */
++			if (++pending[k] < 2) {
++				continue;
++			}
++			state[k] = now[k];
++			pending[k] = 0;
++			mtk_report(k, state[k], top);
++		}
++		mtk_wait();
++	}
++}
++
++/*
++ * Returns 1 when the device tree describes the MT6363 keys (matisse), so
++ * sweet_keys_init() does not fall through to the Qualcomm path.
++ */
++int
++sweet_mt_keys_start(int level)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	uint32_t const *prop = NULL;
++	unsigned int size = 0, reg_size = 0;
++	uint8_t chip = 0, top = 0;
++	bool cok, tok;
++	thread_t thread;
++
++	if (mtk.started) {
++		return 1;
++	}
++	if (SecureDTLookupEntry(NULL, "/sweet-keys", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		return 0;
++	}
++	reg_size = size;
++	mtk.started = true;
++	mtk.sid = MT6363_SID;
++	mtk.power_bit = 1;
++	mtk.volup_bit = 3;
++	mtk.voldown_index = KP_KEY_DOWN;
++	mtk.level = level;
++
++	if (SecureDTGetProperty(node, "spmi-sid", (void const **)&prop, &size) == kSuccess &&
++	    size >= sizeof(uint32_t)) {
++		mtk.sid = *prop;
++	}
++	if (SecureDTGetProperty(node, "power-bit", (void const **)&prop, &size) == kSuccess &&
++	    size >= sizeof(uint32_t)) {
++		mtk.power_bit = *prop;
++	}
++	if (SecureDTGetProperty(node, "volup-bit", (void const **)&prop, &size) == kSuccess &&
++	    size >= sizeof(uint32_t)) {
++		mtk.volup_bit = *prop;
++	}
++	if (SecureDTGetProperty(node, "voldown-index", (void const **)&prop, &size) == kSuccess &&
++	    size >= sizeof(uint32_t)) {
++		mtk.voldown_index = *prop;
++	}
++
++	mtk.pmif = ml_io_map(reg[0], 0x1000);
++	if (mtk.pmif == 0) {
++		printf("SWEET MT KEYS: PMIF map failed at 0x%lx\n", (unsigned long)reg[0]);
++		return 1;
++	}
++
++	/* The vendor PMIF probe values; LK normally leaves them like this. */
++	mtk_wr(mtk.pmif, PMIF_INF_EN, 0xffffffffu);
++	mtk_wr(mtk.pmif, PMIF_ARB_EN, 0xffffffffu);
++	mtk_wr(mtk.pmif, PMIF_CMDISSUE_EN, 1u);
++	mtk_wr(mtk.pmif, PMIF_INIT_DONE, 1u);
++
++	if (reg_size >= 4 * sizeof(uintptr_t) && reg[2] != 0 && reg[3] != 0) {
++		int kpd = 1;
++		(void)PE_parse_boot_argn("sweetkpd", &kpd, sizeof(kpd));
++		if (kpd) {
++			uint16_t en;
++			mtk.kp = ml_io_map(reg[2], 0x1000);
++			en = mtk.kp ? mtk_rd16(mtk.kp, KP_EN) : 0;
++			if (mtk.kp != 0 && (en & 1u) == 0) {
++				*(volatile uint16_t *)(mtk.kp + KP_EN) = 1;
++				__asm__ volatile("dsb osh" ::: "memory");
++				en = mtk_rd16(mtk.kp, KP_EN);
++			}
++			mtk.kp_ok = mtk.kp != 0 && (en & 1u) != 0;
++			printf("SWEET MT KEYS: keypad 0x%lx KP_EN=0x%04x%s\n",
++			    (unsigned long)reg[2], en,
++			    mtk.kp_ok ? "" : " (not scanning, volume-down unavailable)");
++		}
++	}
++
++	cok = mtk_spmi_read(MT6363_REG_CHIPID, &chip);
++	tok = mtk_spmi_read(MT6363_REG_TOPSTATUS, &top);
++	printf("SWEET MT KEYS: PMIF 0x%lx sid=%u chip=0x%02x/%d topstatus=0x%02x/%d "
++	    "power-bit=%u volup-bit=%u voldown-index=%u level=%d\n",
++	    (unsigned long)reg[0], mtk.sid, chip, cok, top, tok,
++	    mtk.power_bit, mtk.volup_bit, mtk.voldown_index, mtk.level);
++	if (!cok || !tok) {
++		printf("SWEET MT KEYS: SPMI reads fail; polling retained for recovery\n");
++	}
++	if (mtk.level < 2) {
++		printf("SWEET MT KEYS: sweetkeys=%d, reporting only\n", mtk.level);
++	}
++	if (kernel_thread_start(mtk_keys_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET MT KEYS: kernel_thread_start failed\n");
++	}
++	return 1;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -15,6 +15,9 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
++/* bsd/dev/sweet_mt_keys.c: matisse's MT6363 + keypad keys. Returns 0 when
++ * the device tree has no /sweet-keys node (sweet). */
++extern int sweet_mt_keys_start(int level);
+ void sweet_keys_init(void);
+ 
+ #define KEYS_CORE_PA     0x0c440000u
+@@ -136,6 +139,10 @@
+ 		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		return;
+ 	}
++	/* matisse: MT6363 PON keys over MediaTek SPMI plus keypad volume-down. */
++	if (sweet_mt_keys_start(enabled)) {
++		return;
++	}
+ 	keys_core = ml_io_map(KEYS_CORE_PA, 0x2000);
+ 	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x1000);
+ 	keys_obs = ml_io_map(KEYS_OBS_PA, 0x10000);
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,6 +107,7 @@
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
++bsd/dev/sweet_mt_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
