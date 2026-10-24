@@ -1,6 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-24: GPT signature check fails; UFS I/O through READ(10) works <<<
+## >>> ACTIVE 2026-10-24: UFS root device WORKS (LUN 2 + `userdata`); next: HFS mount <<<
+
+**Test 3 (0088 LUN scan) hardware PASS.** Banner after the probe boot
+(`ufs-0088-lunscan-dmesg.txt`):
+`SWEET-ENTRY v1 el=1 stage=0x87 fault=1 esr=f2005357
+pc=fffffe0007a42c88 x0=0 x16=fffffe000702e078 spsr=60400204`. The BRK fired
+at the `cbnz w0` with **x0=0**, so `sweet_ufs_rootdev` found the GPT on LUN 2
+via the scan, found the `userdata` partition, registered `/dev/ufsroot0` and
+its char device, and returned success before the HFS mount is reached.
+Stock `boot_a` was restored immediately after and verified `2931647a...`.
+Log: `research/matisse/20261024-ufs-wdt/flash-0088-lunscan.log`.
 
 **Device (verified after test 2): root ADB in Recovery, slot `_a`, `boot_a`
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.**
@@ -41,7 +51,7 @@ after `bl _sweet_ufs_rootdev` is now 0xfffffe0007a42c88 (PA 0x101a42c88);
 BRK #0x5357 inserted there (payload offset 0x5b6800 from entry, file offset
 10743928 in the payload).
 
-**Probe ready (NOT flashed).**
+**Probe (flashed and tested, PASS).**
 `research/matisse/20261024-ufs-wdt/entryprobe-el1-xnu-0088-lunscan-ufs-brk.img`,
 26,570,752 B, SHA256
 `8c67bac892817ee7381b042f96a26368bed1b407c4ee2e35e67abc7eb8d08b39`; payload
