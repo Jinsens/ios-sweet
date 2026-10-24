@@ -1,6 +1,13 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (keys): MT6363 PON keys + keypad volume-down (patch 0093) <<<
+## >>> ACTIVE 2026-10-25 (keys): MT6363 PON keys + keypad volume-down (patch 0094) <<<
+
+**Numbering.** This landed as `0093-sweet-mt6363-keys.patch` at 03:50 and was
+CI-validated as such (run 40127176212); a parallel session then produced
+`0093-sweet-log-readonly.patch` (04:00, sweet_ufs.c only, uncommitted at the
+time of writing), so this patch was renamed to **0094** to keep one patch per
+number. Only the filename changed - the diff and the built kernel are the
+same.
 
 **Request (user): "帮我移植按键功能" then "设备在线 你可以直接参考设备的".**
 sweet's `bsd/dev/sweet_keys.c` polls the Qualcomm PM6150/PM6150L SPMI
@@ -35,7 +42,7 @@ to be re-hosted, not recompiled.
   lines' timestamps. The ADT carries `power-bit`/`volup-bit`, so a swap
   costs a new payload, not a new kernel build.
 
-**Driver (patch `xnu/patches/0093-sweet-mt6363-keys.patch`,
+**Driver (patch `xnu/patches/0094-sweet-mt6363-keys.patch`,
 `bsd/dev/sweet_mt_keys.c`).** `sweet_keys_init()` keeps its name and now
 tries `sweet_mt_keys_start(level)` first; it returns 0 when the ADT has no
 `/sweet-keys` node, so sweet still runs the Qualcomm path unchanged.
