@@ -143,19 +143,28 @@ def adt_dram(adt_blob):
 def platform_cmdline(adt_blob, cmdline):
     """Do not let an MT6983 payload accidentally probe Qualcomm hardware.
 
-    Keep the existing sweet/QEMU behavior unchanged. The measured matisse
-    profile is single-core bring-up only; reject conflicting overrides.
+    Keep the existing sweet/QEMU behavior unchanged. The matisse ADT
+    declares every core, and cpus=N selects a 1..N prefix (default: all).
     """
     root, _ = adt.parse(adt_blob)
     if b'xiaomi,matisse' not in (root.prop('compatible') or b'').split(b'\0'):
         return cmdline
-    required = {'cpus': 1, 'sweetkeys': 0, 'sweettouch': 0,
+    cpu_count = len(next(c for c in root.children if c.name == 'cpus').children)
+    required = {'sweetkeys': 0, 'sweettouch': 0,
                 'sweetbattery': 0, 'sweetusb': 0, 'ufsrw': 0}
     tokens = cmdline.split()
     present = set()
     for token in tokens:
         key, sep, value = token.partition('=')
-        if key in required:
+        if key == 'cpus':
+            try:
+                safe = sep and 1 <= int(value, 0) <= cpu_count
+            except ValueError:
+                safe = False
+            if not safe:
+                raise ValueError(f'matisse requires cpus=1..{cpu_count}')
+            present.add(key)
+        elif key in required:
             try:
                 safe = sep and int(value, 0) == required[key]
             except ValueError:
@@ -164,6 +173,8 @@ def platform_cmdline(adt_blob, cmdline):
                 raise ValueError(f'matisse bring-up requires {key}={required[key]}')
             present.add(key)
     tokens += [f'{k}={v}' for k, v in required.items() if k not in present]
+    if 'cpus' not in present:
+        tokens.append(f'cpus={cpu_count}')
     if '-noprogress' not in tokens:
         tokens.append('-noprogress')
     result = ' '.join(tokens)

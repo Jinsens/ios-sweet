@@ -1,5 +1,60 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-25: 8-core matisse probe built (awaiting flash approval) <<<
+
+**Goal (user request): enable all eight cores.** The 0088 kernel already has
+the SMP path (0065 PSCI CPU_ON + legacy IOCPU, 0078 8 cores, 0084 single-CPU
+`ml_wait_max_cpus` early return); matisse never used it because
+`tools/mkadt.py` emitted one `arm,cortex-a510` CPU node, which SweetCPU
+(IONameMatch `qcom,kryo470`) cannot match. Host-side fix:
+
+- `tools/mkadt.py --board matisse` now emits 8 CPUs from the live FDT:
+  cpu@000..300 `arm,cortex-a55`, cpu@100..200 `arm,cortex-a78`, `reg`
+  (MPIDR Aff1:Aff0) 0x000..0x700, compatible = `qcom,kryo470` + real core +
+  `ARM,v8` (Qualcomm string first so the existing driver matches), cpu0
+  `state=running`, cpu1-7 `stopped`.
+- `tools/mkpayload.py` matisse policy now accepts `cpus=1..8` and appends
+  `cpus=<topology count>` when absent (8 by default); the other guards
+  (`sweetkeys=0 ... ufsrw=0 -noprogress`) are unchanged.
+- 48 tools tests pass (`python3 -m unittest discover -s tools/tests -q`).
+
+**Built (not flashed).** Directory `research/matisse/20261025-smp8/`:
+
+- `matisse-8core.adt`, 10,332 B, SHA256 `4c67dbd7...`.
+- `matisse-xnu-0088-smp8.payload`, 16,611,760 B, SHA256 `f2650fdf...`;
+  kernel 0088 (`893ac2a0...`, unchanged), cmdline `debug=0xc serial=0 cpus=8
+  keepsyms=1 -enable_kprintf_spam rd=ufsroot0 ufsrw=0 ufscache=1 -noprogress
+  sweetkeys=0 sweettouch=0 sweetbattery=0 sweetusb=0` (test 4 plus `cpus=8`).
+- `matisse-xnu-0088-smp8-brk.payload`, SHA256 `57f5e212...`: BRK #0x5357 at
+  entry offset 0x2e29b4 (VA `0xfffffe000776ee3c`, PA `0x10176ee3c`, payload
+  file offset 7,778,860) replacing `cbz w0` (0x34000180) after
+  `bl _vfs_mountroot` - the same checkpoint that returned x0=0 in test 4.
+- `entryprobe-el1-xnu-0088-smp8-mountroot-brk.img`, 26,570,752 B, SHA256
+  `8511db44...`, same recipe as the 0088 HFS probe (`--level el1-xnu`,
+  selective vectors, vector offset 0xb78, high vector -0x4488, clean limit
+  0x108000000, TTBR0 restore 0x10117c000, `--ufs-init --ufs-query full`,
+  max image 67,108,864, template `backup/boot_a-stock.img`). Verified: the
+  decompressed kernel (65,558,976 B) contains the payload byte-for-byte at
+  decompressed offset 48,947,216, BRK word 0xd42a6ae0 at 7,778,860, the
+  embedded ADT has 8 CPUs with reg 0/0x100/.../0x700, cmdline has `cpus=8`.
+
+**Why the banner proves SMP.** `machine_conf()` sets
+`machine_info.max_cpus = max_cpu_id + 1 = 8`; `kperf_init_early()` then
+blocks in `ml_wait_max_cpus()` until SweetCPU's startAll publishes
+`ml_set_max_cpus(8)`. startAll waits for every CPU's `initCPU()` and a real
+SGI1 round trip (`sweet_cpu_signal_is_enabled`) and panics on a 5 s timeout
+or a non-zero PSCI CPU_ON rc. Reaching the mountroot BRK therefore means all
+8 cores ran `sweet_secondary_entry`, their own `pe_init_fiq` (GICR, vtimer
+PPI 27, SGI1) and initCPU. Failure modes: panic at `SWEET CPU: ...` (driver
+match, CPU_ON rc, timeout) or a hang before the banner.
+
+**Not yet hardware-tested.** Per AGENTS.md each boot_a write needs explicit
+approval. Flash only after the user connects the phone in recovery root ADB
+(`adb push` + `dd ... of=/dev/block/by-name/boot_a conv=fsync`; this
+bootloader rejects `fastboot boot`). Restore the full 64 MiB
+`backup/recovery-20261021/boot_a-live-20261021.img` immediately after the
+banner is captured and verify `2931647a...`.
+
 ## >>> ACTIVE 2026-10-25: HFS root MOUNTS from UFS (`vfs_mountroot`=0) <<<
 
 **Test 4 (mountroot) hardware PASS.** The 0088 kernel probe was built with a

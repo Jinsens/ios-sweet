@@ -25,12 +25,17 @@ class BoardProfileTests(unittest.TestCase):
         with patch.object(mkadt, 'd22ap_product', return_value=None):
             return mkadt.build(seed=bytes(64), **kwargs)
 
-    def test_matisse_single_cpu_and_timer(self):
+    def test_matisse_eight_cpus_and_timer(self):
         root = self.build(board='matisse')
         cpus = child(root, 'cpus').children
-        self.assertEqual(len(cpus), 1)
-        self.assertEqual(words(cpus[0].prop('reg'), 32), (0,))
-        self.assertIn(b'cortex-a510', cpus[0].prop('compatible'))
+        self.assertEqual(len(cpus), 8)
+        self.assertEqual([words(c.prop('reg'), 32)[0] for c in cpus],
+                         [core << 8 for core in range(8)])
+        for core, cpu in enumerate(cpus):
+            compat = cpu.prop('compatible')
+            self.assertTrue(compat.startswith(b'qcom,kryo470\0'))
+            self.assertIn(b'arm,cortex-a55\0' if core < 4 else b'arm,cortex-a78\0', compat)
+            self.assertEqual(cpu.prop('state'), b'running\0' if core == 0 else b'stopped\0')
         self.assertEqual(words(cpus[0].prop('timebase-frequency'), 32), (13000000,))
         gic = child(child(root, 'arm-io'), 'gic')
         self.assertEqual(words(gic.prop('virtual-timer-intid'), 32), (27,))
@@ -65,7 +70,10 @@ class BoardProfileTests(unittest.TestCase):
                       'sweetbattery=0', 'sweetusb=0', 'ufsrw=0', '-noprogress'):
             self.assertIn(token, args.split())
         self.assertEqual(args, mkpayload.platform_cmdline(blob, args))
-        for unsafe in ('cpus=8', 'sweetkeys=1', 'sweetusb=1', 'ufsrw=1', 'cpus=bad'):
+        self.assertIn('cpus=8', mkpayload.platform_cmdline(blob, 'debug=0xc').split())
+        self.assertIn('cpus=8', mkpayload.platform_cmdline(blob, 'cpus=8').split())
+        for unsafe in ('cpus=9', 'cpus=0', 'cpus=bad', 'sweetkeys=1',
+                       'sweetusb=1', 'ufsrw=1'):
             with self.assertRaises(ValueError):
                 mkpayload.platform_cmdline(blob, unsafe)
         with self.assertRaises(ValueError):

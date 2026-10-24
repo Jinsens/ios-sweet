@@ -96,9 +96,19 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         timebase, timer_intid = 13000000, 27
         fb, fb_size = 0xfcb3f000, 0x34c0000
         fb_w, fb_h, fb_stride = 1440, 3200, 5760
-        cpu_count = 1  # Only LK's boot CPU, affinity bits MPIDR[39:0]=0.
-        cpu_compat = cstr('arm,cortex-a510') + cstr('ARM,v8')
+        # Live FDT: cpu@000..300 = cortex-a55, cpu@100..200 = cortex-a78,
+        # reg (MPIDR Aff1:Aff0) 0x000..0x700. LK boots the core at Aff 0.
+        cpu_count = 8
         hardware_compat = cstr('xiaomi,matisse') + cstr('mediatek,mt6983')
+
+    def cpu_compatible(core):
+        if board != 'matisse':
+            return cpu_compat
+        # SweetCPU matches IONameMatch "qcom,kryo470" (KernelConfigTables.cpp);
+        # the real core name is descriptive, as in the live FDT.
+        core_name = cstr('arm,cortex-a55') if core < 4 else cstr('arm,cortex-a78')
+        return cstr('qcom,kryo470') + core_name + cstr('ARM,v8')
+
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -146,16 +156,16 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         # with CSR_ALLOW_UNRESTRICTED_FS (vm_unix.c shared region checks).
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
-    # The original SWEET SMP profile uses all eight cores (0-5 Cortex-A55,
-    # 6-7 Cortex-A76), one homogeneous cluster. The kernel defaults to one
-    # and uses cpus=N to select an initial prefix (N <= 8).
+    # The SWEET SMP profile uses all eight cores of one homogeneous cluster;
+    # the kernel starts those not marked "running" via PSCI CPU_ON and uses
+    # cpus=N to select an initial prefix (N <= 8).
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
     cpu_nodes = []
     for core in range(cpu_count):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cpu_compat),
+            ('compatible', cpu_compatible(core)),
             ('reg', u32(core << 8)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology

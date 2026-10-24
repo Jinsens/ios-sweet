@@ -137,18 +137,22 @@ shim/out/host_logstore
 
 ## XNU payload profile (CI-built; not yet hardware-booted)
 
-`tools/mkadt.py OUT --board matisse` now supplies the measured single-core
-A510 / 13 MHz / INTID27 profile, correct GIC region sizes, framebuffer
-geometry and the 0x100000000..0x22e000000 kernel RAM window. It retains
+`tools/mkadt.py OUT --board matisse` now supplies the measured eight-core
+4x A55 (cpu@000..300) + 4x A78 (cpu@100..200) topology at MPIDR
+0x000..0x700, 13 MHz / INTID27, correct GIC region sizes, framebuffer
+geometry and the 0x100000000..0x22e000000 kernel RAM window. Each CPU's
+compatible list starts with `qcom,kryo470` so SweetCPU matches it; cpu0 is
+`running` and the other seven are `stopped` for PSCI CPU_ON. It retains
 `iPhone10,3` / `D22AP` identity, 1125x2436 logical display canvas, and the
 `xiaomi,sweet` compatibility string required by the existing platform expert.
 It does **not** expose the Qualcomm UFS host. This is not a daumier profile.
 
-`mkpayload.py` recognizes that ADT and automatically requires/adds `cpus=1
-sweetkeys=0 sweettouch=0 sweetbattery=0 sweetusb=0 ufsrw=0 -noprogress`.
-Conflicting arguments or truncation are rejected; sweet/QEMU behavior is
-unchanged. These flags are a guard, **not** proof that the existing XNU is
-safe to boot on MediaTek.
+`mkpayload.py` recognizes that ADT and automatically requires/adds
+`sweetkeys=0 sweettouch=0 sweetbattery=0 sweetusb=0 ufsrw=0 -noprogress`,
+and accepts `cpus=1..8` (default `cpus=8`, the full topology). Conflicting
+arguments or truncation are rejected; sweet/QEMU behavior is unchanged.
+These flags are a guard, **not** proof that the existing XNU is safe to boot
+on MediaTek.
 
 Patch 0082 now replaces that early path with validated boot_args.Video
 geometry and a final-TTBR1 mapping. CI run 39595694178 built the DEVELOPMENT
