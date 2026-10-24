@@ -34,7 +34,7 @@
  	arm_cache_clidr_info.value = machine_read_clidr();
  
  	/*
-@@ -350,7 +369,17 @@
+@@ -350,7 +369,18 @@
  
  	if ((arm_cache_clidr_info.bits.Ctype3 == 0x4) ||
  	    (arm_cache_clidr_info.bits.Ctype2 == 0x4) || (arm_cache_clidr_info.bits.Ctype2 == 0x2)) {
@@ -46,13 +46,14 @@
 +			arm_cache_ccsidr_info.value = machine_read_ccsidr();
 +			linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
 +			assoc = arm_cache_ccsidr_info.bits.Assoc + 1;
-+			cpuid_cache_info_p->c_priv_l2size = (arm_cache_ccsidr_info.bits.NumSets + 1) *
-+			    linesz * assoc;
++			/* Another core of this type may run do_cacheid() concurrently. */
++			os_atomic_max(&cpuid_cache_info_p->c_priv_l2size,
++			    (arm_cache_ccsidr_info.bits.NumSets + 1) * linesz * assoc, relaxed);
 +
  			/* Select L3 (LLC) if the SoC is new enough to have that.
  			 * This will be the second-level cache for the highest-performing ACC. */
  			machine_write_csselr(CSSELR_L3, CSSELR_DATA_UNIFIED);
-@@ -360,9 +389,16 @@
+@@ -360,9 +390,17 @@
  		}
  		arm_cache_ccsidr_info.value = machine_read_ccsidr();
  
@@ -67,20 +68,12 @@
 +		if (arm_cache_clidr_info.bits.Ctype3 == 0x4) {
 +			cpuid_cache_info_p->c_l3size = cpuid_cache_info_p->c_l2size;
 +		} else {
-+			cpuid_cache_info_p->c_priv_l2size = cpuid_cache_info_p->c_l2size;
++			os_atomic_max(&cpuid_cache_info_p->c_priv_l2size,
++			    cpuid_cache_info_p->c_l2size, relaxed);
 +		}
  		cpuid_cache_info_p->c_inner_cache_size = cpuid_cache_info_p->c_dsize;
  		cpuid_cache_info_p->c_bulksize_op = cpuid_cache_info_p->c_l2size;
  
-@@ -384,6 +420,8 @@
- 		kprintf(" vm_cache_geometry_colors: %d\n", vm_cache_geometry_colors);
- 	} else {
- 		cpuid_cache_info_p->c_l2size = 0;
-+		cpuid_cache_info_p->c_priv_l2size = 0;
-+		cpuid_cache_info_p->c_l3size = 0;
- 
- 		cpuid_cache_info_p->c_inner_cache_size = cpuid_cache_info_p->c_dsize;
- 		cpuid_cache_info_p->c_bulksize_op = cpuid_cache_info_p->c_dsize;
 --- a/osfmk/arm/cpuid.h
 +++ b/osfmk/arm/cpuid.h
 @@ -220,6 +220,8 @@
@@ -92,8 +85,8 @@
  } cache_info_t;
  
  typedef struct {
---- a/osfmk/arm/machine_routines_common.c
-+++ b/osfmk/arm/machine_routines_common.c
+--- a/osfmk/arm/machine_routines_common.c	2026-10-25 01:02:05
++++ b/osfmk/arm/machine_routines_common.c	2026-10-25 01:02:33
 @@ -1314,12 +1314,20 @@
  
  #if (__ARM_ARCH__ >= 8)
@@ -117,8 +110,8 @@
  }
  
  /*
---- a/osfmk/arm64/machine_routines.c
-+++ b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c	2026-10-25 01:02:05
++++ b/osfmk/arm64/machine_routines.c	2026-10-25 01:02:40
 @@ -1430,18 +1430,27 @@
  #else /* HAS_CLUSTER */
  	this_cpu_datap->cluster_master = is_boot_cpu;
@@ -152,8 +145,8 @@
  		assert(pset != PROCESSOR_SET_NULL);
  #endif /* __AMP__ */
  	}
---- a/pexpert/pexpert/arm64/board_config.h
-+++ b/pexpert/pexpert/arm64/board_config.h
+--- a/pexpert/pexpert/arm64/board_config.h	2026-10-25 01:02:05
++++ b/pexpert/pexpert/arm64/board_config.h	2026-10-25 01:02:08
 @@ -102,7 +102,13 @@
  
  #define MAX_L2_CLINE                   6
