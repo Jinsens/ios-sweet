@@ -48,12 +48,31 @@ or a non-zero PSCI CPU_ON rc. Reaching the mountroot BRK therefore means all
 PPI 27, SGI1) and initCPU. Failure modes: panic at `SWEET CPU: ...` (driver
 match, CPU_ON rc, timeout) or a hang before the banner.
 
-**Not yet hardware-tested.** Per AGENTS.md each boot_a write needs explicit
-approval. Flash only after the user connects the phone in recovery root ADB
-(`adb push` + `dd ... of=/dev/block/by-name/boot_a conv=fsync`; this
-bootloader rejects `fastboot boot`). Restore the full 64 MiB
-`backup/recovery-20261021/boot_a-live-20261021.img` immediately after the
-banner is captured and verify `2931647a...`.
+**Hardware PASS (2026-10-25).** Pushed the probe (device-side SHA256 matched),
+`dd bs=1M conv=fsync` to `boot_a`; the written 64 MiB partition hashed
+`27107856...`, the expected image + original tail. `adb reboot recovery`
+brought recovery back 66 s later; `dmesg-smp8.txt` holds the banner:
+
+```
+SWEET-ENTRY v1 el=1 midr=410fd462 mpidr=81000000 stage=0x87 fault=1
+esr=f2005357 pc=fffffe000776ee3c x0=0 x16=0x182b spsr=62400204
+```
+
+x0=0 is the same vfs_mountroot success as test 4, now with `cpus=8`. Since
+`kperf_init_early()` only proceeds after `ml_set_max_cpus(8)` and SweetCPU
+publishes that only after every one of the 8 CPUs completed initCPU and
+answered SGI1, this proves all eight cores (MPIDR 0x000..0x700) started via
+PSCI CPU_ON, initialized their own GICR + vtimer INTID 27 and entered XNU,
+and that UFS rootdev + HFS mount still work. MIDR 0x410fd462 (part 0xd46) is
+a Cortex-A510 boot core; the live FDT's `a55`/`a78` names are descriptive
+(the real MT6983 cores are A510/A710/X2). Stock `boot_a` was restored
+immediately after and verified `2931647a...` (full 64 MiB), device back in
+recovery, slot `_a`.
+
+**Next for SMP.** CPU_OFF/quiesce and heterogeneous cluster reporting remain
+unimplemented (SweetCPU panics). A non-BRK 8-core payload is
+`matisse-xnu-0088-smp8.payload` for the next real-root boot; it still uses
+`rd=ufsroot0` (the 64 MiB HFS test volume).
 
 ## >>> ACTIVE 2026-10-25: HFS root MOUNTS from UFS (`vfs_mountroot`=0) <<<
 

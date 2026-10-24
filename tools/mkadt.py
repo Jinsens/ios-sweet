@@ -105,7 +105,7 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         if board != 'matisse':
             return cpu_compat
         # SweetCPU matches IONameMatch "qcom,kryo470" (KernelConfigTables.cpp);
-        # the real core name is descriptive, as in the live FDT.
+        # the FDT's a55/a78 names are descriptive (real cores: A510/A710/X2).
         core_name = cstr('arm,cortex-a55') if core < 4 else cstr('arm,cortex-a78')
         return cstr('qcom,kryo470') + core_name + cstr('ARM,v8')
 
