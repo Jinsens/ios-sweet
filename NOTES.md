@@ -98,6 +98,12 @@ BRK cave probe. Writing `boot_a` needs explicit approval. (3) HID only
 reaches something once a real iOS root runs; on the 64 MiB HFS test volume
 `sweet_hid_key()` has no consumer and the log lines are the whole proof.
 
+**Note on 0093 (parallel work).** The other session's
+`0093-sweet-log-readonly.patch` drops the `su.writable` gate, i.e. exactly
+the blocker in (2): with it the ring flushes at `ufsrw=0`, so a keys boot
+can be read back from recovery without making the root writable. Read the
+ring with `tools/sweet-log-pull.sh` and look for `SWEET MT KEYS:`.
+
 ## >>> ACTIVE 2026-10-25 (USB): first boot FAILED - no enumeration, 31 s logo loop <<<
 
 **Run 1 (approved): `entryprobe-el1-xnu-0092-usb.img`, SHA256 `d0c37b35...`,
