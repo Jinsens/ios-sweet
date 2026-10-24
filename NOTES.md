@@ -1,44 +1,75 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (USB): MTU3 handoff snapshot built, flash pending <<<
+## >>> ACTIVE 2026-10-25 (USB): handoff PASS - MTU3 powered, HS device, soft-connected <<<
 
 **Request (user): "帮我移植 USB 功能，尽可能把 USB 功能恢复，然后输出日志".**
 matisse USB is MediaTek MTU3 (usb0@11201000 MAC, ippc@11203e00) + XSPHY,
 not sweet's Qualcomm DWC3, so the existing USB patches cannot drive it. The
 vendor recovery driver proves HS device mode works (ADB over bulk
-ep1in/ep1out, `gadget (high-speed) pullup D+`); LK itself logged
-"USB enum timeout ... cannot detect tools", so its final handoff state is
-unknown and is the next thing to measure.
+ep1in/ep1out, `gadget (high-speed) pullup D+`); LK logged
+"USB enum timeout ... cannot detect tools", so its handoff state was unknown.
 
-**Probe built (NOT flashed):** `research/matisse/20261025-usb/entryprobe-usb-snapshot.img`,
-20,832,256 B, SHA256 `0480bcc8f84e06979d42d6214861597db34cb30e9314c1be7d9d324c91eb7f8b`,
-new level `usb` (`ENTRY_LEVEL=1` + `ENTRY_USB_SNAPSHOT`) in
-`tools/mkentryprobe.py` / `shim/entryprobe.c`. It is read-only and runs right
-after `board_probe`, resolving MAC/IPPC from the live usb0 node
-(compatible `mediatek,mtu3`, reg-names `mac`, `ippc`). Fields are pairs,
-lower address in the high half (see `USB_FIELDS`):
+**Probe PASS (2026-10-25).** `research/matisse/20261025-usb/`:
+`entryprobe-usb-snapshot.img`, 20,832,256 B, SHA256 `0480bcc8...`; new level
+`usb` (`ENTRY_LEVEL=1` + `ENTRY_USB_SNAPSHOT` in `tools/mkentryprobe.py` /
+`shim/entryprobe.c`), read-only, taken right after `board_probe` with
+MAC/IPPC resolved from the live usb0 node. The full 64 MiB `boot_a` was
+written, read back and verified (`01f6765a...`), then restored to
+`2931647a...` and re-verified; exactly one record:
 
-- always: IPPC PW_CTRL0..3, PW_STS1..2, OTG_STS, SPM_CTRL, U3_CTRL_0P,
-  U2_CTRL_0P, REF_CK_CTRL, DEV_RST_CTRL, HW_ID, HW_SUB_ID;
-- only if IPPC PW_CTRL2 bit0 (SSUSB_IP_DEV_PDN) is clear, because the MAC
-  may be clock-gated: DEVICE_CONF, MISC_CTRL, POWER_MANAGEMENT,
-  DEVICE_CONTROL, USB3_CONFIG, LINK_STATE_MACHINE, LV1ISR, LV1IER, EP0CSR,
-  RXCOUNT0.
+```
+SWEET-ENTRY v1 el=0000000000000001 midr=00000000410fd462 mpidr=0000000081000000 freq=0000000000c65d40 dtb=16c016c000000000 sctlr=0000000800000048 stage=0000000000006000 fault=000060a100000099 esr=0000001f00000000 far=2018072410060000 pc=5a00000080000003 gicd=1041102000000001 vtimer=0000000000000001 fb=01013d0f00000001 x0=0000000000ff0101 x16=00000020000000ff spsr=0000004000000000
+```
 
-Stage is `(0x60 << 16) | code`: 0 ok, 1 no MTU3 node, 2 unusable mac/ippc
-reg, 3 device power domain down (MAC skipped); 0x5f means a read faulted
-mid-snapshot (recorder fields then hold ESR/FAR/PC). 13 mkentryprobe tests
-pass, and the inlined disassembly shows the expected MAC offsets
-(`0x800/0xc84`, `0x2404/0x240c`, `0x141c/0x1534`, `0x0/0x4`, `0x100/0x108`).
+`stage=0x6000` = complete. Fields are `first register << 32 | second`
+(lower address first), per `USB_FIELDS`; MAC offsets verified in the
+disassembly. Decoded (live recovery values in parentheses for contrast):
 
-**Awaiting explicit user confirmation to flash `boot_a`** (the only
-destructive step). `research/matisse/20261025-usb/run-approved-probe.py` is
-the usual harness with the recovery wait raised 45 -> 120 s: it verifies the
-pre-test partition equals `backup/recovery-20261021/boot_a-live-20261021.img`
-(`2931647a...`), writes the 20.8 MB probe, verifies the full 64 MiB
-readback, boots recovery, captures the single `SWEET-ENTRY` record from
-dmesg, and restores plus re-verifies the original in `finally`. The device
-is connected in recovery and `boot_a` reports 67,108,864 bytes.
+| Field | Register pair | Handoff value | Live recovery |
+| --- | --- | --- | --- |
+| gicd | IPPC PW_CTRL0 / PW_CTRL1 | `0x10411020` / `0x1` | same |
+| vtimer | IPPC PW_CTRL2 / PW_CTRL3 | `0x0` / `0x1` | same |
+| fb | IPPC PW_STS1 / PW_STS2 | `0x01013d0f` / `0x1` | |
+| dtb | IPPC OTG_STS / SPM_CTRL | `0x16c016c0` / `0x0` | same |
+| sctlr | IPPC U3_CTRL_0P / U2_CTRL_0P | `0x8` / `0x48` | `0x88` / `0x48` |
+| esr | IPPC REF_CK_CTRL / DEV_RST_CTRL | `0x1f` / `0x0` | |
+| far | IPPC HW_ID / HW_SUB_ID | `0x20180724` / `0x10060000` | same |
+| pc | MAC DEVICE_CONF / MISC_CTRL | `0x5a000000` / `0x80000003` | `0x59000003` / same |
+| fault | MAC POWER_MANAGEMENT / DEVICE_CONTROL | `0x60a1` / `0x99` | `0x64f1` / `0x99` |
+| x0 | MAC USB3_CONFIG / LINK_STATE_MACHINE | `0x0` / `0x00ff0101` | same |
+| x16 | MAC LV1ISR / LV1IER | `0x20` / `0xff` | `0x0` / `0x37` |
+| spsr | MAC EP0CSR / RXCOUNT0 | `0x40` / `0x0` | `0x00200440` / `0x0` |
+
+**What LK leaves for XNU:**
+
+- **Powered and clocked.** PW_CTRL2 DEV_PDN=0; U3/U2 PORT_PDN=0 and DIS=0;
+  PW_STS1 `0x01013d0f` has SYSPLL_STABLE(0), REF_RST_B(8), SYS125_RST_B(10),
+  XHCI_RST_B(11) and U3_MAC_RST_B(16) all set; PW_STS2 U2_MAC_SYS_RST_B=1;
+  REF_CK_CTRL=`0x1f`; DEV_RST_CTRL=0. No MTK clock/scpsys/XSPHY bring-up is
+  needed for the first enumeration; XNU must simply not reset those domains.
+- **Device mode, HS-only, VBUS forced.** U2_CTRL HOST(2)=0, OTG_SEL(7)=0;
+  U3_CTRL DUAL_MODE(7)=0; USB3_CONFIG=0; POWER_MANAGEMENT SOFT_CONN(6),
+  HS_ENABLE(5), SUSPENDM_ENABLE(0) all 1; DEVICE_CONTROL `0x99`
+  (DC_SESSION=1); MISC_CTRL `0x80000003` = DMA_ADDR_36BIT(31) +
+  VBUS_FRC_EN(0) + VBUS_ON(1); OTG_STS VBUS_VALID(9)=1.
+- **The host had enumerated LK's gadget up to SET_ADDRESS.** DEVICE_CONF
+  `0x5a000000` decodes to DEV_ADDR=0x5a (90), speed field 0 (live ADB:
+  address 0x59, speed 3); EP0 max packet is 64 (`0x40`), no SETUP/RX pending,
+  but LV1ISR EP_CTRL_INTR(5) is pending and LV1IER=`0xff`.
+- **36-bit DMA.** MISC_CTRL bit31 is set, so GPD/TRB addresses must stay
+  below 64 GiB (16-byte aligned, low 4 bits encoded if following the vendor
+  QMU format).
+
+**Takeover plan (next):** mask/clear LV1, pulse IPPC DEV_RST_CTRL bit0 to
+reset only the device function (not the IP/clock domains), set DEVICE_CONF=0,
+EP0 maxpkt 64, then re-enable interrupts and let the host re-enumerate.
+EP0 uses FIFO0 (`0x300`) / EP0CSR (`0x100`) / RXCOUNT0 (`0x108`); CDC-ECM
+data EPs use QMU (vendor/ADB uses ep1in/ep1out bulk). Reuse `sweet_usb.c`'s
+CDC-ECM descriptors, ifnet and UDP live-log code; add a matisse MTU3
+transport and a `sweet-usb` ADT node (MAC/IPPC regs + IRQ 160), and allow
+`sweetusb=1` on matisse in `tools/mkpayload.py`.
+
+## >>> ACTIVE 2026-10-25: per-CPU IRQ probe PASS (IPIs 8/8, timer demand-driven) <<<
 
 ## >>> ACTIVE 2026-10-25: per-CPU IRQ probe PASS (IPIs 8/8, timer demand-driven) <<<
 
