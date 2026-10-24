@@ -51,11 +51,47 @@ CLT SDK substituted for the Xcode SDK) gives 0 errors for `cpuid.c`,
 lines; all 63 host tests pass. `tools/validate-repo.py` still fails on
 pre-existing `[[ ]]` shell syntax in 0019/0020/0026, unrelated to this change.
 
-**Not done / next:** the kernel with 0092 has not been built by CI or booted.
-`0091`'s re-probe (`entryprobe-el1-xnu-0091-hetero-cache-brk.img`) is still
-unbuilt, and any `boot_a` write needs explicit user approval. Once 0091 runs,
-the expected E/P values are those in the section below; 0092 only changes what
-is reported when a type has not run (e.g. `cpus=4`) or when CLIDR has no L3.
+**CI run 40124596123 (0092): success**, artifact
+`xnu/out/ci-40124596123/kernel.development.sweet` (17,239,952 B, SHA256
+`68781200ce96...`). The log shows `Applying patch:
+.../patches/0092-sweet-cache-report-fallback.patch`; `_sweet_topology_cache_size`
+is inlined into `_ml_cpu_get_info_type`, so the kernel size is unchanged.
+
+**Hardware probe PASS (2026-10-25, approval: "上实机测试一下是否能够使用").**
+`research/matisse/20261025-cache-0092/`: ADT, payload, BRK manifest,
+`entryprobe-el1-xnu-0092-cache-brk.img` (26,578,944 B, SHA256 `1ced03d9...`),
+readback/restore images. The runner rewrote 64 MiB, verified
+`07d2c66a...`, restored `2931647a...` and re-verified. One record:
+
+```
+SWEET-ENTRY v1 ... far=fffffe1019310000 pc=fffffe000748d73c esr=00000000f2005357
+x0=0008000000800000 x16=0010000000000000
+```
+
+Decoded (cave VA `0xfffffe000748d714`, checkpoint `0xfffffe00077713a4`):
+
+- E (A510): private L2 `0x80000` = **512 KiB**, L3 `0x800000` = **8 MiB**.
+- P (A710/X2): private L2 `0x100000` = **1 MiB**, L3 **0**.
+
+So the CCIDX fix (0091) produces real geometry (the 0089 values `0x200`/`0x400`
+are gone), per-type sampling works (P's 1 MiB differs from E's 512 KiB), and
+**P really has `c_l3size == 0`** - it is not the race suspected earlier. That
+makes 0092's ADT fallback load-bearing: without it `hw.perflevel0.l3cachesize`
+would be `0xFFFFFFFF` and the sysctl would return `EINVAL`.
+
+The probe also shows the measured A510 L2 is 512 KiB, not the 256 KiB the ADT
+claimed; `tools/mkadt.py` and its test now say `0x80000` (measured geometry is
+still what drives coloring and cache maintenance; the ADT only answers
+reporting before/without a measurement).
+
+**Not exercised on hardware:** the fallback itself is only reachable through
+`ml_cpu_get_info_type()`, and there is no userland to read
+`hw.perflevel0.l3cachesize` yet. A second cave that `bl`s
+`_ml_cpu_get_info_type` would prove it but needs a kernel-stack frame at the
+checkpoint; not done here.
+
+**Not done / next:** any further boot_a write needs new explicit approval; the
+0092 approval is consumed by the run above.
 
 **`sctlr` in SWEET-ENTRY is a handoff value.** It is SCTLR_EL1 at the shim
 entry point (the probe clears M/C/I first, hence `0x30d00980`), not XNU's

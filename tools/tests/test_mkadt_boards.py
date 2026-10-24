@@ -31,7 +31,7 @@ class BoardProfileTests(unittest.TestCase):
         self.assertEqual(len(cpus), 8)
         self.assertEqual([words(c.prop('reg'), 32)[0] for c in cpus],
                          [core << 8 for core in range(8)])
-        l2_sizes = [0x40000] * 4 + [0x80000] * 3 + [0x100000]
+        l2_sizes = [0x80000] * 7 + [0x100000]
         for core, cpu in enumerate(cpus):
             compat = cpu.prop('compatible')
             self.assertTrue(compat.startswith(b'qcom,kryo470\0'))

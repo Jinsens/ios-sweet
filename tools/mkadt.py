@@ -166,8 +166,10 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         if board == 'matisse':
             cluster_id = 0 if core < 4 else 1
             cluster_type = ord('E') if core < 4 else ord('P')
-            # Private L2: A510 256K, A710 512K, X2 1M; DSU L3 is shared.
-            l2_cache_size = 0x40000 if core < 4 else (0x100000 if core == 7 else 0x80000)
+            # Private L2, measured by the 0092 probe: A510 512K, A710 512K,
+            # X2 1M; the DSU L3 is shared (8M). do_cacheid() is authoritative;
+            # these values answer reporting before a core has been measured.
+            l2_cache_size = 0x100000 if core == 7 else 0x80000
             cache_props = [('l2-cache-size', u32(l2_cache_size)),
                            ('l3-cache-size', u32(0x800000))]
         else:
