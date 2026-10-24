@@ -1,5 +1,68 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-25 (cache): E/P L2/L3 probe - FEAT_CCIDX truncation, patch 0091 <<<
+
+**Request (user): "L1、L2、L3 都全开了吗" plus the cache/ADT gap bullets
+ending with "帮我解决".**
+
+**0089 probe ran (approval: "允许，现在刷入探针（推荐）").** Materials in
+`research/matisse/20261025-hetero-cache/`: ADT, payload, BRK cave manifest,
+`entryprobe-el1-xnu-0089-hetero-cache-brk.img` (26,570,752 B, SHA256
+`966a0e56...`), restore image `2931647a...`. The runner rewrote 64 MiB of
+`boot_a`, verified it, and restored the stock image in `finally`; exactly one
+banner survived (`hetero-cache-dmesg.txt`):
+
+```
+... x0=0000020000000400 x16=0000020000000000 ...
+```
+
+`x0` = E entry (A510 boot core): `c_priv_l2size=0x200`, `c_l3size=0x400`;
+`x16` = P entry: `0x200` / `0`. Those are impossible geometries (L2 512 B,
+L3 1 KiB), so 0089 read real data into a broken decode.
+
+**Root cause: FEAT_CCIDX.** With CCIDX, `CCSIDR_EL1` is 64-bit: NumSets
+`[55:32]`, Associativity `[23:3]`; the legacy layout is NumSets `[27:13]`,
+Associativity `[12:3]`. `machine_read_ccsidr()` returns `uint32_t`
+(`osfmk/arm/machine_cpuid.c:56`), so NumSets is lost and
+`arm_cache_ccsidr_t` sees NumSets-1=0. Size becomes `linesz * assoc`:
+8-way L2 -> `64*8 = 0x200`; 16-way L3 -> `64*16 = 0x400`, matching the banner
+byte-for-byte. P's `c_l3size=0` is not yet conclusive: the cave reads
+concurrently with secondaries, and the main path stores `c_priv_l2size`
+(+0x30) before `c_l3size` (+0x34), so a P core may have been sampled
+mid-`do_cacheid`.
+
+**Same truncation in set/way maintenance.** `GET_CACHE_CONFIG` in
+`osfmk/arm64/caches_asm.s` extracts ways `[12:3]` and sets `[27:13]`. Under
+CCIDX it derives one set per way, so `CleanPoC_Dcache`/`FlushPoC_Dcache`
+(`arm64/cpu.c:333` on every CPU; bulk path when
+`length >= cache_info()->c_bulksize_op`) only touch the first set of each
+way. This becomes more visible once `c_bulksize_op` is no longer 0x200.
+
+**Patch `xnu/patches/0091-sweet-ccidx-cache.patch`.** `cpuid.c` gains
+`ccsidr_geometry()`: 64-bit `CCSIDR_EL1` plus `ID_AA64MMFR2_EL1.CCIDX`
+`[23:20]`, decoding CCIDX assoc/nsets `[23:3]`/`[55:32]` and legacy
+`[12:3]`/`[27:13]`; all four decode sites use it. `caches_asm.s` selects the
+same fields with `csel` (x4 = CCIDX version, third scratch is reused only
+after the way increment is final). `proc_reg.h` defines
+`ID_AA64MMFR2_EL1_CCIDX_*`. The legacy branch is bit-identical to the old
+bitfields, so non-CCIDX cores do not change; `c_type` still comes from the
+low word (used only in the boot kprintf).
+
+**Local verification.** Applying 0089 then 0091 to pristine xnu reproduces
+this tree; `clang -fsyntax-only` with the ci-40115544522 flags passes for
+`cpuid.c`; `caches_asm.s` assembles and the disassembly keeps the way
+increment in x11; all 63 host tests pass.
+
+**Expected once 0091 runs** (measured values, not ADT guesses): E private L2
+`0x40000` (256 KiB) and L3 `0x800000` (8 MiB); P private L2 `0x80000`
+(A710 512 KiB) or `0x100000` (X2 1 MiB when that core has run), P L3 TBD -
+likely `0x800000`; the earlier 0 may be the probe race above. `hw.perflevel1`
+maps to E, `perflevel0` to P; the boot-cluster non-perflevel
+`hw.l2cachesize`/`hw.l3cachesize` therefore report E.
+
+**CI run for 0091: pending.** Any new `boot_a` write (a re-built 0091 cache
+probe or the real kernel) still needs explicit user approval.
+
 ## >>> ACTIVE 2026-10-25 (USB): handoff PASS - MTU3 powered, HS device, soft-connected <<<
 
 **Request (user): "帮我移植 USB 功能，尽可能把 USB 功能恢复，然后输出日志".**

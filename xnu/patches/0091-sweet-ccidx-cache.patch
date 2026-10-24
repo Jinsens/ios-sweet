@@ -1,0 +1,183 @@
+--- a/osfmk/arm/cpuid.c
++++ b/osfmk/arm/cpuid.c
+@@ -283,6 +283,27 @@
+ arm_mvfp_info(void)
+ {
+ 	return machine_arm_mvfp_info();
++}
++
++/*
++ * FEAT_CCIDX moves NumSets to CCSIDR_EL1[55:32] and widens Associativity
++ * to [23:3]. machine_read_ccsidr() returns only the low word, which drops
++ * NumSets entirely and collapses every cache to LineSize * Associativity.
++ */
++static void
++ccsidr_geometry(uint32_t *linesz, uint32_t *assoc, uint32_t *nsets)
++{
++	uint64_t ccsidr = __builtin_arm_rsr64("CCSIDR_EL1");
++	uint64_t mmfr2 = __builtin_arm_rsr64("ID_AA64MMFR2_EL1");
++
++	*linesz = 4 * (1 << ((uint32_t)(ccsidr & 0x7) + 2));
++	if ((mmfr2 & ID_AA64MMFR2_EL1_CCIDX_MASK) != 0) {
++		*assoc = (uint32_t)((ccsidr >> 3) & 0x1fffff) + 1;
++		*nsets = (uint32_t)((ccsidr >> 32) & 0xffffff) + 1;
++	} else {
++		*assoc = (uint32_t)((ccsidr >> 3) & 0x3ff) + 1;
++		*nsets = (uint32_t)((ccsidr >> 13) & 0x7fff) + 1;
++	}
+ }
+ 
+ void
+@@ -312,12 +333,12 @@
+ 		if ((arm_cache_clidr_info.bits.Ctype2 == 0x4) ||
+ 		    (arm_cache_clidr_info.bits.Ctype2 == 0x2) ||
+ 		    (arm_cache_clidr_info.bits.Ctype3 == 0x4)) {
++			uint32_t linesz, assoc, nsets;
++
+ 			machine_write_csselr(CSSELR_L2, CSSELR_DATA_UNIFIED);
+-			arm_cache_ccsidr_info.value = machine_read_ccsidr();
+-			uint32_t linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
+-			uint32_t size = (arm_cache_ccsidr_info.bits.NumSets + 1) * linesz *
+-			    (arm_cache_ccsidr_info.bits.Assoc + 1);
+-			os_atomic_max(&cpuid_cache_info_p->c_priv_l2size, size, relaxed);
++			ccsidr_geometry(&linesz, &assoc, &nsets);
++			os_atomic_max(&cpuid_cache_info_p->c_priv_l2size,
++			    nsets * linesz * assoc, relaxed);
+ 		}
+ #endif /* SWEET */
+ 		return;
+@@ -357,29 +378,27 @@
+ 		cpuid_cache_info_p->c_type = CACHE_UNKNOWN;
+ 	}
+ 
+-	cpuid_cache_info_p->c_linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
+-	cpuid_cache_info_p->c_assoc = (arm_cache_ccsidr_info.bits.Assoc + 1);
++	uint32_t nsets;
++	ccsidr_geometry(&cpuid_cache_info_p->c_linesz, &cpuid_cache_info_p->c_assoc, &nsets);
+ 
+ 	/* I cache size */
+-	cpuid_cache_info_p->c_isize = (arm_cache_ccsidr_info.bits.NumSets + 1) * cpuid_cache_info_p->c_linesz * cpuid_cache_info_p->c_assoc;
++	cpuid_cache_info_p->c_isize = nsets * cpuid_cache_info_p->c_linesz * cpuid_cache_info_p->c_assoc;
+ 
+ 	/* D cache size */
+-	cpuid_cache_info_p->c_dsize = (arm_cache_ccsidr_info.bits.NumSets + 1) * cpuid_cache_info_p->c_linesz * cpuid_cache_info_p->c_assoc;
++	cpuid_cache_info_p->c_dsize = nsets * cpuid_cache_info_p->c_linesz * cpuid_cache_info_p->c_assoc;
+ 
+ 
+ 	if ((arm_cache_clidr_info.bits.Ctype3 == 0x4) ||
+ 	    (arm_cache_clidr_info.bits.Ctype2 == 0x4) || (arm_cache_clidr_info.bits.Ctype2 == 0x2)) {
+-		uint32_t linesz, assoc;
++		uint32_t linesz, assoc, nsets;
+ 
+ 		if (arm_cache_clidr_info.bits.Ctype3 == 0x4) {
+ 			/* Sample the private L2 before selecting the L3 (LLC). */
+ 			machine_write_csselr(CSSELR_L2, CSSELR_DATA_UNIFIED);
+-			arm_cache_ccsidr_info.value = machine_read_ccsidr();
+-			linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
+-			assoc = arm_cache_ccsidr_info.bits.Assoc + 1;
++			ccsidr_geometry(&linesz, &assoc, &nsets);
+ 			/* Another core of this type may run do_cacheid() concurrently. */
+ 			os_atomic_max(&cpuid_cache_info_p->c_priv_l2size,
+-			    (arm_cache_ccsidr_info.bits.NumSets + 1) * linesz * assoc, relaxed);
++			    nsets * linesz * assoc, relaxed);
+ 
+ 			/* Select L3 (LLC) if the SoC is new enough to have that.
+ 			 * This will be the second-level cache for the highest-performing ACC. */
+@@ -388,13 +407,11 @@
+ 			/* Select L2 data cache */
+ 			machine_write_csselr(CSSELR_L2, CSSELR_DATA_UNIFIED);
+ 		}
+-		arm_cache_ccsidr_info.value = machine_read_ccsidr();
++		ccsidr_geometry(&linesz, &assoc, &nsets);
+ 
+-		linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
+-		assoc = arm_cache_ccsidr_info.bits.Assoc + 1;
+ 		cpuid_cache_info_p->c_linesz = linesz;
+ 		cpuid_cache_info_p->c_assoc = assoc;
+-		cpuid_cache_info_p->c_l2size = (arm_cache_ccsidr_info.bits.NumSets + 1) * linesz * assoc;
++		cpuid_cache_info_p->c_l2size = nsets * linesz * assoc;
+ 		if (arm_cache_clidr_info.bits.Ctype3 == 0x4) {
+ 			cpuid_cache_info_p->c_l3size = cpuid_cache_info_p->c_l2size;
+ 		} else {
+@@ -418,7 +435,7 @@
+ 		 * TODO: Are there any special considerations for our unusual
+ 		 * cache geometries (3MB)?
+ 		 */
+-		vm_cache_geometry_colors = ((arm_cache_ccsidr_info.bits.NumSets + 1) * cpuid_cache_info_p->c_linesz) / PAGE_SIZE;
++		vm_cache_geometry_colors = (nsets * cpuid_cache_info_p->c_linesz) / PAGE_SIZE;
+ 		kprintf(" vm_cache_geometry_colors: %d\n", vm_cache_geometry_colors);
+ 	} else {
+ 		cpuid_cache_info_p->c_l2size = 0;
+@@ -428,12 +445,12 @@
+ 	}
+ 
+ 	if (cpuid_cache_info_p->c_unified == 0) {
++		uint32_t c_linesz, c_assoc, c_nsets;
++
+ 		machine_write_csselr(CSSELR_L1, CSSELR_INSTR);
+-		arm_cache_ccsidr_info.value = machine_read_ccsidr();
+-		uint32_t c_linesz = 4 * (1 << (arm_cache_ccsidr_info.bits.LineSize + 2));
+-		uint32_t c_assoc = (arm_cache_ccsidr_info.bits.Assoc + 1);
++		ccsidr_geometry(&c_linesz, &c_assoc, &c_nsets);
+ 		/* I cache size */
+-		cpuid_cache_info_p->c_isize = (arm_cache_ccsidr_info.bits.NumSets + 1) * c_linesz * c_assoc;
++		cpuid_cache_info_p->c_isize = c_nsets * c_linesz * c_assoc;
+ 	}
+ 
+ 	if (cpuid_cache_info_p == cpuid_cache_info_boot_cpu) {
+--- a/osfmk/arm64/caches_asm.s
++++ b/osfmk/arm64/caches_asm.s
+@@ -89,14 +89,22 @@
+  *	$1: Output register for set increment
+  *	$2: Output register for last valid set
+  *	$3: Output register for way increment
++ *	$4: Scratch register
+  */
+ .macro GET_CACHE_CONFIG
+ 	lsl		$0, $0, #1
+ 	msr		CSSELR_EL1, $0						// Select appropriate cache
+ 	isb											// Synchronize context
+ 
++	// FEAT_CCIDX moves NumSets to [55:32] and widens Associativity to [23:3].
++	mrs		$4, ID_AA64MMFR2_EL1
++	ubfx	$4, $4, #20, #4						// extract CCIDX version
++
+ 	mrs		$0, CCSIDR_EL1
+ 	ubfx	$1, $0, #3, #10						// extract number of ways - 1
++	ubfx	$3, $0, #3, #21						// CCIDX: number of ways - 1
++	cmp		$4, #0
++	csel	$1, $3, $1, ne
+ 	mov		$2, $1
+ 	add		$1, $1, #1							// calculate number of ways
+ 
+@@ -119,6 +127,9 @@
+ 	lsl		$1, $2, $1							// calculate set increment
+ 
+ 	ubfx	$2, $0, #13, #15					// extract number of sets - 1
++	ubfx	$0, $0, #32, #24					// CCIDX: number of sets - 1
++	cmp		$4, #0
++	csel	$2, $0, $2, ne
+ 	add		$2, $2, #1							// calculate number of sets
+ 	mul		$2, $1, $2							// calculate last valid set
+ .endmacro
+@@ -150,7 +161,7 @@
+ 	cmp		x2, #2
+ 	b.lt		4f			// No data cache at this level, skip to next level
+ 	mov		x2, x1
+-	GET_CACHE_CONFIG x2, x9, x10, x11
++	GET_CACHE_CONFIG x2, x9, x10, x11, x4
+ 	lsl		x2, x1, #1		// level field for cisw/csw, bits 1:3
+ 2:
+ 3:
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -2207,6 +2207,9 @@
+ #define ID_AA64MMFR2_EL1_AT_MASK        (0xfull << ID_AA64MMFR2_EL1_AT_OFFSET)
+ #define ID_AA64MMFR2_EL1_AT_LSE2_EN     (1ull << ID_AA64MMFR2_EL1_AT_OFFSET)
+ 
++#define ID_AA64MMFR2_EL1_CCIDX_OFFSET   20
++#define ID_AA64MMFR2_EL1_CCIDX_MASK     (0xfull << ID_AA64MMFR2_EL1_CCIDX_OFFSET)
++
+ /*
+  * ID_AA64PFR0_EL1 - AArch64 Processor Feature Register 0
+  *  63    60 59    56 55    52 51   48 47   44 43    40 39    36 35   32 31   28 27 24 23     20 19  16 15 12 11  8 7   4 3   0
