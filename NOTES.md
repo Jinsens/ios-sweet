@@ -1,6 +1,18 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (display): BSD entry reached; locating pre-UFS stall <<<
+## >>> ACTIVE 2026-10-25 (display): asm bug fixed; DSI waiting for upstream frame data <<<
+
+Latest: commit `85269a5` fixes Darwin inline assembly losing timer/PAR/SMC
+instructions after semicolons. 0128 now reaches UFS; 0129 mounted root and
+persisted build 0x2305 marks through pre-init-exec. Display is still REDMI.
+0130 proved BUSY persists; 0131/0132 re-arm/solid-green experiments did not
+show pixels. 0133 decoded DSI CMCTL state 0x8: waiting for RDMA frame data.
+0134 is testing OVL FLOW_CTRL/ADDCON/RDMA0 debug registers (same green-fill
+probe). All completed trials restored and verified full boot_a `2931647a...`.
+**Local tree warning:** `xnu/out/local/xnu` and its kernel currently contain
+0131's uncommitted diagnostic refresh (build 0x2306); committed 0097 sources
+are saved in `research/matisse/20261025-display-0131/before/`, kernel there
+as `kernel-before-0131.development.sweet`. No new CI run this session.
 
 User now reports **stuck on REDMI logo**, not the older partial-frame symptom.
 Read-only check: device is `matisse`, Recovery, slot `_a`; full `boot_a`
@@ -279,7 +291,95 @@ Checkpoint is `_sweet_ufs_rootdev` `0xfffffe00074dd2d0`. Embedded payload,
 single BRK, both vectors and bootstrap TTBR0 storage validated. Trial
 launched with ongoing user authorization; full restoration remains required.
 
-Next: validate patch 0097 and test a rebuilt rtcfast checkpoint at UFS entry. Do not infer a DSI hardware fault from the unchanged logo.
+**0128 UFS-entry checkpoint PASS:** PC `0xfffffe00074dd2d0`, ESR
+`0xf2005357`, Recovery return 32.75 s. Full boot_a restored and verified.
+This passes the same rtcfast/UFS checkpoint that 0126 failed before 0097.
+Marks remain unchanged, expected because the checkpoint is before UFS init.
+Patch/tests/handoff committed in `85269a5`; no new CI run.
+Next 0129 uses the exact same rtcfast base and moves only the BRK to
+`_load_init_program` `0xfffffe00077dc0e8`, to collect current display marks.
+0129 image SHA256 `b3ee7648b67a6074709129d445dccf5d111e92fe2258dd9192efffda2d863889`.
+User confirms 0128 still showed only the REDMI logo.
+
+**0129 reached root mount; load-init relay NOT OBSERVED:** no return in 100 s;
+user returned to Recovery and full boot_a restored/verified. Readback after
+recovery has a NEW 63-record mark block, build `0x2305`, ending at mark 60
+(before load_init_program), with successful root mount / VFS_ROOT marks.
+Thus this is NOT evidence of a UFS failure. A late BRK relay may fail after
+thread/CPU changes; the reason is unproven. Marks saved as
+`20261025-display-0129/after-timeout-marks.bin/.txt`. Current framebuffer
+VA `0xfffffe000d4df000` maps PA `0xfcb3f000`; both endpoint PARs have Normal-NC
+attributes `0x44` and correct pages. 4588 refresh calls, 1 push, 0 busy skips,
+last (immediately-after-push) DSI INTSTA `0x80000004`. All later calls may
+have fallen inside the 200 ms throttle window; this remains a hypothesis.
+
+Next 0130 uses the known-returning UFS-entry checkpoint and a guarded
+22-instruction cave in unused early-vector slot 14: mask IRQ to retain this
+CPU, wait 500 ms on CNTVCT, force one display refresh, wait 500 ms, then BRK.
+Capture `x0 = status<<32 | busy_skips`, `x16 = pushes`. No kernel rebuild;
+base is 0128 rtcfast. This distinguishes a missing final push from a busy
+DSI engine. Artifacts in `20261025-display-0130/`.
+
+**0130 PASS / panel unchanged:** returned at cave PC `0xfffffe0007482768`,
+ESR `0xf2005357`, x0 `0x8000000400000001`: DSI remained BUSY after a 500 ms
+wait and the forced refresh skipped once. User still saw only REDMI. Full
+boot_a restored/verified. Image `a02b21df6a89d4f84fc9d59785894e0c46afed9ff41d054c3809863a41b8a145`.
+Correction: the banner's x16 field actually captures interrupted x12; the
+0130 attempt to report pushes through x16 is invalid. Use x12 next time.
+
+**0131 experiment preparing (not production patch):** local source replaces
+the BUSY gate with the previously working shim's per-frame MEM_CONTI/control/
+PHY re-arm, 40 ms bounded TE wait, CFG/mutex pulse, START 0->1, 15 ms drain,
+status clear and mutex stop. Retains corrected timer reads and 5 Hz throttle.
+Counter named busy_skips means TE timeouts only in this diagnostic build.
+Build ID 0x2306; originals saved in `20261025-display-0131/before/` and the
+0x2305 kernel is preserved there. This source experiment is not yet a git
+patch; do not mistake the modified local build tree for committed 0097. Local
+build succeeded (Xcode 16.4, no CI); kernel SHA256 `1d9e24c54ff3d1a1f0eaef950e419c37fa544b06eafe88faa8d93a19972274b6`.
+0131 boot SHA256 `0991ad412f2c4845f15ea4d6557b52b3a41f11b24e7875e780d6e9937d567efe`; 24-instruction cave
+uses x12 for pushes, and guards the updated global layout. First launch
+aborted read-only because device moved to Fastboot; fbraw reboot-recovery
+returned OKAY. Runner will recheck Recovery/device/slot/full boot_a before
+launch. No new write occurred during the aborted preflight.
+
+**0131 hardware PASS relay, no visible change:** after successful re-preflight,
+returned at `0xfffffe0007482770` in 33.76 s, x0 `0x8000000000000000`
+(status BUSY, zero TE timeouts), x12/banner x16=2 pushes. User saw only REDMI.
+Full boot_a restored/verified. Full shim sequence alone has not fixed display.
+
+Next 0132 fills the verified mapped framebuffer with `0xff00ff00` (1440x3200,
+18,432,000 bytes), forces the same refresh, waits 500 ms, then records live
+DSI_INTSTA in x0 and pushes via x12. 27 guarded instructions fit precisely
+in early-vector slot 14 after its relay stub. Image SHA256
+`127532910603e26acd82b4c7d640921aa9eeb449ab4017e6dd8d5d02fd0a70c2`;
+source/manifest/disassembly/embedded-payload validation in
+`20261025-display-0132/`.
+
+**0132 PASS relay / no green:** full-frame stores completed, forced refresh,
+500 ms wait; live DSI_INTSTA `0x80000004` and 2 pushes. User still saw REDMI.
+This rules out text-console enablement as the sole cause of no output.
+
+**0133 PASS / FSM diagnosis:** DSI_STATE_DBG6 `0x00010008`, DBG7 `1`,
+DEBUG_SEL `0x600`. CMCTL bits14:0 = `8`, which vendor
+`mtk_dsi_cmd_mode_parse_state()` defines as "Waiting frame data from RDMA
+for type-1 command". The engine remains BUSY waiting on its upstream path;
+TE pulses are present. No new screen observation requested for this readback.
+0132: image `127532910603e26acd82b4c7d640921aa9eeb449ab4017e6dd8d5d02fd0a70c2`, Recovery return 32.78 s, expected BRK and full boot_a restore verified.
+0133: image `81a6da96390fafae2a6545fe0257c757970a143f81db699b0890edeed277bd8d`, Recovery return 32.77 s, expected BRK and full boot_a restore verified.
+
+Next 0134 samples OVL0_2L FLOW_CTRL_DBG `0x240`, ADDCON_DBG `0x244`,
+RDMA0_DBG `0x24c` after the same green-fill/rearm test.
+
+**0134 no relay within 100 s:** user returned to Recovery, full boot_a
+restored/verified. Image `bb23ba6b858b5d9e7070766cf085a60c64c0c83b2152077622b3c61a9ad40202`.
+No OVL register result obtained. 0134 used a 64-bit read for the adjacent
+FLOW_CTRL/ADDCON registers; unsupported bus width is one hypothesis, not a
+proven cause. 0135 changes that single LDR to 32-bit, retaining the separate
+32-bit RDMA0_DBG read. Trial launched, result pending. If the relay still
+fails, consider a cpus=1 control to rule out a migrated checkpoint thread
+(the banner MPIDR is the original shim handoff, not the checkpoint CPU).
+
+ Do not infer a DSI hardware fault from the unchanged logo.
 User has authorized ongoing tests ("你可以随时测试"); retain full restoration
 and hash verification for each trial. Normal XNU still lacks `/sbin/launchd`.
 
