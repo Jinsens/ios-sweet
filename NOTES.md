@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (display): 0119 reaches vcattach; locating later stall <<<
+## >>> ACTIVE 2026-10-25 (display): BSD entry reached; locating pre-UFS stall <<<
 
 User now reports **stuck on REDMI logo**, not the older partial-frame symptom.
 Read-only check: device is `matisse`, Recovery, slot `_a`; full `boot_a`
@@ -161,6 +161,52 @@ records full boot_a restoration to `2931647a...`; artifacts are in
 next action is Recovery reboot/readback and 0120 at vcattach's common return
 (`0xfffffe0007457be4`) to determine whether enabling/replaying the console
 completes. No new kernel build or CI run is needed for that breakpoint.
+
+**0120 artifact (hardware result below):** common vcattach epilogue at
+`0xfffffe0007457be4`; image
+`research/matisse/20261025-display-0120/entryprobe-el1-xnu-0120-vcattach-return-brk.img`,
+SHA256 `4bfadc2401a760e1bd1e34c401c8f2f9f127bb4cc8e94085cfbdce40d3f51b6b`.
+Host checks prove exactly one BRK replacement, exact embedded payload, and
+0119's same vector/TTBR0/cache-clean parameters. No new CI run.
+
+**Current macOS Fastboot recovery lesson:** official platform-tools 37 queries
+can work while reboot/flash commands hang. The full-backup flash attempt
+this turn timed out before reporting a transfer; fbraw's first download
+also timed out before DATA, so it never sent image bytes or `flash:boot_a`.
+After attempting libusb endpoint clear (both returned Pipe error), the next
+query returned `FAILRead USB error`; a fresh `fbraw.py getvar:product` returned
+`OKAYmatisse`, then `fbraw.py reboot-recovery` returned `OKAY`. Recovery ADB
+returned; full boot_a hash matched `2931647a...`. Use `tools/fbraw.py` for local
+fastboot commands, as the 2026-10-21 notes already advised; 0120's restore runner now does so. Do not assume
+an official-client timeout means the bootloader did not process the command.
+
+**0120 checkpoint PASS:** `pc=fffffe0007457be4`, ESR `0xf2005357`.
+Full boot_a restored and verified `2931647a...`. This proves vcattach returns,
+not that it draws: its graphics-boot branch can skip screen acquisition and
+message replay. Observed x0 `fffffe0007be5540` is the progress-lock address,
+consistent with that early branch (hypothesis pending the boot-mode check).
+Next 0121 breaks at `_bsd_init` entry `0xfffffe000775d1c4`.
+
+**0121 checkpoint PASS:** `_bsd_init` entry `0xfffffe000775d1c4`,
+ESR `0xf2005357`. Image `7993ec6d86beb908d669b833ae55e7d032d83f1fb54d1cb9d4b6fcf0d2a080aa`;
+artifacts in `research/matisse/20261025-display-0121/`. Full boot_a restored
+and hash verified. Thus VM/IOKit startup and enabling interrupts complete.
+Current loader sets `Video.v_display=1`; payload uses `serial=0 -noprogress`.
+Those source settings explain why vcattach can return without text output;
+changing that alone has not been tested. Next 0122 probes UFS rootdev entry
+`0xfffffe00074dd2d0` (the UFS init function is inlined there).
+
+**0122 UFS-entry checkpoint NOT OBSERVED:** image
+`7d8ce49fa12145ebb6992cde5884ea26bb1f5175159791d976c64d9479361b82`
+did not return within 100 s. User entered Fastboot; the updated fbraw restore
+path restored full boot_a and verified `2931647a...`. Result is in
+`research/matisse/20261025-display-0122/trial-result.json`. This narrows the
+last observed progress to BSD entry (0121) before UFS rootdev (0122), but a
+missing checkpoint alone cannot distinguish hang from failure of the relay.
+0123 prepared at `_kminit` `0xfffffe000792dc08`, inside bsd_autoconf (inlined
+into bsd_init). Initial 0122 launch aborted before writing because the device
+had moved from the prior same-boot recovery to Fastboot; fbraw reboot of the
+restored image returned to Recovery and preflight verified it before testing.
 
 Next: use an earlier code breakpoint to locate the boot failure before the
 UFS mark channel. Do not infer a DSI hardware fault from the unchanged logo.
