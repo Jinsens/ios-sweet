@@ -1,6 +1,226 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (USB): local build + progress marks; the logo loop is not USB <<<
+## >>> ACTIVE 2026-10-25 (display): 0112 built and verified / hardware test authorized <<<
+
+User now reports **stuck on REDMI logo**, not the older partial-frame symptom.
+Read-only check: device is `matisse`, Recovery, slot `_a`; full `boot_a`
+SHA256 matches the verified backup (`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`). No device partition has been written in this session.
+
+The last userdata mark block has 64 records, **no build-ID mark 99**, 4588
+refresh calls / 201 pushes, legacy mark 92 = 201 / 201, and reaches init exec
+ENOENT. This is an older run, not evidence that 0111 executed. Saved locally
+at `research/matisse/20261025-display-0112/before-marks.bin`, SHA256
+`aef91eb4f52a5caa447fbf91cf8de90b022594be8ab4d80487c4cd8715131308`.
+
+**Corrections to the previous handoff (source evidence, not a hardware result):**
+- `start.s` maps the visible framebuffer Normal-NC, and `sweet_early_init`
+  verifies PAR attributes `0x44`. The earlier claim that early drawing is
+  through a cacheable mapping is false for this source tree.
+- `arm_vm_init` replaces TTBR0 before `fbcon_probe` calls display init. 0111
+  then executes `dc cvac` on the physical framebuffer address. That address
+  is no longer a valid CPU VA; the new clean can itself fault. Do not flash
+  0111 as the next test.
+- `HAS_UCNORMAL_MEM` is absent for SWEET. The previous `initialize_screen`
+  change therefore still selects `VM_WIMG_IO`, **not** WCOMB. Make the SWEET
+  mapping explicit and record its translated physical address / attributes.
+- Pre-UFS calls to `sweet_mark` are dropped; marks 90/96/97 cannot diagnose
+  early mappings. Cache those measurements and replay them once UFS is ready.
+- 0111 updates the refresh throttle only on success; a stuck BUSY retries the
+  20 ms wait on every character. Throttle failed attempts too.
+
+**Completed (local build; no new CI run):** patch
+`0095-matisse-display-mapping-and-marks.patch` saves the prior untracked
+USB/root progress marks plus the display fixes in git. Framebuffer aliases
+now explicitly use WCOMB for SWEET; no PA-based cache operation remains.
+DSI uses the vendor 0->1 strobe and a 20 ms BUSY bound, with failed attempts
+also throttled to 5 Hz. This does not make the shared scanout buffer tear-free.
+Marks 90/91/93 record the actual console VA/PA, first/last PAR translation,
+geometry and pre-poll DSI status; 94/95 save LK's DSI command setup. Build ID
+is `0x2303`; mark 92 is busy-skips/status only for IDs >= `0x2302`.
+
+Local build succeeded with Xcode 16.4. Logs and exact packaging commands are
+in `research/matisse/20261025-display-0112/`. 9 patched source files replay
+byte-for-byte onto the source baseline with 0090/0093/0094 applied (0091/0092
+were already present). The local kernel, like 0111, does not contain the
+separate 0094 key driver; `sweetkeys=0` is unchanged for this display test.
+Tests: refresh latency/strobe harness (1), mark decoder (4), entryprobe (13),
+and breakpoint (10) passed. `validate-repo.py` still fails on the disabled
+0085 numbering gap and CRLF shell scripts (3 tools and patches 0019/0020/0026).
+
+Artifacts (all in that research directory except kernel):
+- Kernel `xnu/out/local/fakeroot/System/Library/Kernels/kernel.development.sweet`,
+  16,705,704 B, SHA256 `67841f7d046527f39b99ecb483245cc67b9f8a79c57b4ccdf8c61c766da11263`.
+- Normal payload `matisse-xnu-0112-ncmap.payload`, 16,701,536 B,
+  `ac2f7cac59419c24b9a0dc3974e85b65a0c918abf179a11a68eab6d7f36d5e81`.
+- Normal boot image `entryprobe-el1-xnu-0112-ncmap.img`, 26,615,808 B,
+  `a281d14cbe9e0946459dea0d4550aeac19a017a3f8aca30f1f22c67d67aee2ad`.
+- **Selected test** `entryprobe-el1-xnu-0112-ncmap-brk.img`, 26,615,808 B,
+  `760aa1e8f50346efe209d7c3ab127e82910162085fe52bdf77d8ff89a690a637`.
+  Its payload is `f4fd2748aa3fca36e6cf1400e452aa677508c85bdd2ac4d973ab8beadf1d8054`.
+  Exactly one instruction differs: BRK #0x5357 at `_load_init_program`,
+  VA `0xfffffe00077dc0bc` / PA `0x1017dc0bc` (entry offset `0x35ac34`).
+  Intended to return to Recovery after display/UFS/root-mount diagnostics,
+  before the known missing-init panic. This return has not yet been tested.
+- Both embedded payloads byte-match their source; the early/high vectors,
+  bootstrap TTBR0 and cache-clean bounds match 0111. High vector `-0x3488`;
+  the scan helper prints multiple candidates, so the synchronous-slot guard
+  and old manifest were checked explicitly.
+
+**Authorization for this trial:** user said "现在设备在 recovery 你可以随时测试"
+after the 0112 test/restore plan was described. Proceed with this selected
+image and its full boot_a restoration. Read-only preflight passed;
+`run-display-test.py` defaults to preflight, `--execute-approved` runs the
+trial. It requires a *changed Linux boot ID* before collecting results,
+avoiding the old immediate-ADB-return race. Preserve trial-result.json,
+marks and dmesg locally; do not commit device dumps. On failure to return,
+it waits for manual FASTBOOT and restores the verified backup.
+
+**Unfinished:** run the authorized trial, verify build 0x2303 and expected
+BRK, interpret mapping/DSI marks, get the user's screen observation, restore
+and re-verify boot_a. A normal XNU boot still has no `/sbin/launchd`.
+
+## >>> ACTIVE 2026-10-25 (display): partial frame / color bars fix - BUILT, NOT FLASHED <<<
+
+**New symptom (user): the panel now shows something, but only the top, then
+color bars, with a grey block in the top-right.** This is progress past the
+"stuck on logo" state: frames are being pushed, but torn/corrupt.
+
+**Root cause (three overlapping faults, all in the refresh path):**
+
+1. **D-cache never reached DRAM.** The boot hands `boot_args.Video.v_baseAddr`
+   as a plain physical address (bit 0 clear). `video_console` already has the
+   `makeMapping` write-combining fix (map anything below
+   `VM_MIN_KERNEL_ADDRESS` as `VM_WIMG_WCOMB`), but *before* that runs, the
+   early console draws through the bootstrap identity mapping into D-cache;
+   only evicted lines reach DRAM, so the OVL scans a few top lines then
+   garbage. Fixed by cleaning the framebuffer to the point of coherency
+   (`dc cvac`, 64-byte lines) before each push while identity-mapped.
+2. **In-flight frames were overwritten.** The old refresh waited for TE with a
+   10 ms bound (too short for the ~16.7 ms TE), then forced the push anyway on
+   timeout, and `DSI_START` was written as a level. The result is a torn
+   frame. Fixed to mirror rubens-s-oss `mtk_dsi_poll_for_idle()`: poll
+   `DSI_INTSTA` bit31 (`DSI_BUSY`, *not* FRAME_DONE bit4) with a 20 ms bound
+   and **skip** the frame if the DSIM is still busy.
+3. **`DSI_START` strobe.** `mtk_dsi_start()` writes 0 then 1; a bare 1 only
+   works once per boot (already in the working tree).
+
+**Code changed (build tree `xnu/out/local/xnu/`, mirrored to
+`research/matisse/20261025-usb/display-wip/`):**
+
+- `osfmk/arm64/sweet_matisse_dsi.c`: added `disp_clean_framebuffer()`
+  (`dc cvac` guarded by `disp_fb_needs_clean`); rewrote
+  `sweet_display_refresh()` to poll `DSI_INT_BUSY` and skip when busy; 5 fps
+  throttle (was 20); `sweet_display_set_target(va,phys,stride,height)`
+  replaces the old `sweet_display_probe_va()` magenta-block probe; new
+  counters `sweet_disp_busy_skips` / `sweet_disp_status` (replaces
+  `sweet_disp_te_timeouts`); mutex now only toggles `EN` (LK's MOD/SOF route
+  is left untouched).
+- `osfmk/arm64/sweet_matisse_dsi.h`: declaration/stub renamed to
+  `sweet_display_set_target`; exported counters updated.
+- `osfmk/console/video_console.c`: call site now `sweet_display_set_target`
+  (the WC remap in `initialize_screen` already existed).
+- `bsd/dev/sweet_ufs.c`: `SWEET_BUILD_ID 0x2301 -> 0x2302`; mark 92 now dumps
+  `busy_skips`/`status` instead of `te_timeouts`/`pushes`.
+
+**Build + artifacts (host, nothing written to the phone):**
+
+- Kernel `xnu/out/local/fakeroot/System/Library/Kernels/kernel.development.sweet`,
+  16,705,840 B, SHA256 `10582345406be54d6a7fdce0fd36c5601235118098959d412a846736724de62f`.
+  New symbols `_sweet_display_set_target`, `_sweet_disp_busy_skips`,
+  `_sweet_disp_status` present. Built with
+  `DEVELOPER_DIR=~/Downloads/Xcode.app/Contents/Developer tools/build-xnu-local.sh xnu/out/local kernel`.
+- Payload `research/matisse/20261025-usb/matisse-xnu-0111-cacheclean.payload`,
+  16,701,664 B, SHA256 `77c6a9d467577b96c053b630bd0cead4500dc4824595918a48da4b1e264baa43`
+  (ADT `matisse-usb.adt`, cmdline unchanged).
+- Boot image `research/matisse/20261025-usb/entryprobe-el1-xnu-0111-cacheclean.img`,
+  26,615,808 B, SHA256 `e1bfa8124c4f2bd872c68a83bbe45ebec77283db115f3c9cc1f37db0673ef9e5`.
+
+**High vector offset correction.** The local-build high exception table is at
+**`-0x3488`**, not `-0x4488` (the `-0x4488` in older notes was for CI-era
+kernels). `mkentryprobe` refuses `-0x4488` ("expected branch/NOP padded high
+exception slots"); the correct table is the 12-branch + 4-NOP table at
+`-0x3488` (the 4 NOPs are the AArch64 EL0_32 slots). Early table stays
+`0xb78`. The 0111 image's resolved vector fields byte-match the 0110 json.
+
+**Next: hardware test (needs explicit user approval to write `boot_a`).**
+Flash `entryprobe-el1-xnu-0111-cacheclean.img` via recovery `dd`, then read
+`tools/sweet-marks.py --pull`. Read mark 92 (`a`=`busy_skips`, `b`=last
+`DSI_INTSTA`): `busy_skips` ~= pushes and `status` bit31 stuck set means the
+DSIM never reports idle on this command-mode path and the skip starves the
+panel (then re-enable TE pacing); `busy_skips` low + pushes climbing means the
+busy poll works and the cache-clean should show a full, stable frame. Marks
+70..85 confirm `sweet_display_init()` still accepts LK's state.
+
+## >>> ACTIVE 2026-10-25 (display): why the panel stays on the boot logo <<<
+
+**Short answer: the kernel never gets a frame onto the DSIM, and the code that
+was supposed to try had never been reachable.** Everything below is measured
+on the phone with the new boot progress marks (see the USB section) plus the
+shim's own display probe; none of it is inferred from datasheets.
+
+**What is already correct.** `sweet_display_init()` accepts LK's state on this
+panel (`sweet_matisse_dsi.c`, dumped as marks 70..85, one boot):
+
+    stage 9 (all gates passed)   width 1440  height 3200  stride 5760
+    clk gates 0/0/0 (all on)     DSI mode 0  PSCTRL 0x2c0505a0 (DSC)
+    SIZE_CON 0x0c8001e0          VACT 0x0c80  BUF_CON0 1 (cmd FIFO on)
+    INTSTA 0x4 (TE_RDY set)      OVL_EN 0xe00001
+    OVL_L0_ADDR 0xfcb3f000 == OVL_L0_PITCH 0x1680 == ADT reg[0]
+
+So LK leaves exactly the documented command-mode DSC state, the panel still
+sends TE, and the OVL is scanning the surface the ADT names. `initialize_screen`
+is reached, `gc_initialized && gc_enabled` is true, and `vcputc_options()`
+really draws (mark 86 counted 4588 console characters).
+
+**Three real bugs found on the way, all fixed in the working tree**
+(`research/matisse/20261025-usb/display-wip/` holds the exact sources):
+
+1. `sweet_display_refresh()` had drifted away from the sequence that was
+   hardware-validated in `shim/display.c`: it did not re-arm `DSI_MEM_CONTI`
+   (0x90 = 0x3c), `DSI_CON_CTRL`/PHY per frame, and it dropped the 15 ms
+   panel-drain + mutex stop.
+2. `DSI_START` is a **strobe**, not a level: vendor `mtk_dsi_start()` writes
+   0 then 1. Writing only 1 works once per boot and then every later frame is
+   silently dropped. This is directly observed: the shim's own `display-kick`
+   probe draws a *moving* green bar, and on this device the bar **appears but
+   never moves** (user-confirmed) - exactly one frame per boot.
+3. Mirroring the shim sequence into the kernel made boot unusable: 40 ms TE
+   bound + 15 ms drain per frame, called from every console character, is more
+   than 100% of the CPU at 20 fps and the watchdog resets before `bsd_init`
+   finishes. Nothing after build 9 reached the mark channel at all (the mark
+   block stayed byte-identical to build 9's, which is how this was caught).
+   Even at 10 fps it did not reach it, so the per-frame re-arm itself is
+   suspect on this IP and was reverted.
+
+**Also worth knowing (not yet proven either way):** `video_console` receives
+`boot_args.Video.v_baseAddr` = `0xfcb3f000`, i.e. a plain physical address with
+bit 0 clear. XNU's convention is that bit 0 set means "physical, map it
+yourself" (`makeMapping` in `initialize_screen`); with bit 0 clear it uses the
+value as a *virtual* address, so console draws go through shim/bootstrap
+identity mappings instead of a write-combining kernel mapping. Forcing
+`makeMapping` for addresses below `VM_MIN_KERNEL_ADDRESS` compiled but that
+build also never reached the mark channel, so it is untested, not disproven.
+The cheap alternative is one line in `shim/loader.c`: set
+`ba->Video.v_baseAddr = brd.fb_base | 1`, and mask bit 0 in
+`sweet_early_init()` where the same field is used as a physical address.
+
+**Current tree state: bootable baseline.** `sweet_display_refresh()` is back to
+the pre-experiment body plus the DSI_START strobe and a TE-timeout counter
+(mark 92, `a` = timeouts, `b` = pushes). Build and flash that first: if marks
+reach `sweet_ufs_init` again, the baseline is good, and mark 92 then answers the
+one question that decides the next move - whether the panel still pulses TE
+while the kernel is pushing. Timeouts > 0 means the DSIM link is dead by the
+time XNU runs and the panel needs a real re-init (PLL/PHY, `mtk_mipi_tx.c`;
+`DSI_TXRX_CTRL`, DSC table), not more frame triggering.
+
+**Operational notes for display work specifically.** A 64 KiB
+`ml_io_map_wcomb(fb_phys, 0x10000)` fill inside `sweet_display_init()` (early,
+before `initialize_screen`) is enough to stop the kernel dead - no marks at
+all. Do not touch the framebuffer from there; do it after `bsd_init` if needed.
+`--level display-kick` is the only display check that does not depend on XNU:
+its green bar appearing proves the panel accepts a frame at shim time.
+
+## >>> 2026-10-25 (USB): local build + progress marks; the logo loop is not USB <<<
 
 **Local XNU build works without a KDK and without CI.** `xnu/out/ci-40115544522`
 turned out to be a *complete* build tree (sources, generated headers, every

@@ -1,0 +1,836 @@
+diff --git a/bsd/dev/sweet_mtu3.c b/bsd/dev/sweet_mtu3.c
+--- a/bsd/dev/sweet_mtu3.c
++++ b/bsd/dev/sweet_mtu3.c
+@@ -56,6 +56,13 @@
+ extern void thread_deallocate(thread_t);
+ extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+ extern uint64_t sweet_log_position(void);
++/*
++ * Progress marks (bsd/dev/sweet_ufs.c): appends one record and rewrites the
++ * last block of the partition, so a hang leaves its last step on disk even
++ * though this board has no console. Cheap enough to call between register
++ * accesses.
++ */
++extern void sweet_mark(uint32_t code, uint64_t a, uint64_t b);
+ 
+ int sweet_mtu3_probe(int enabled);
+ 
+@@ -1266,26 +1273,32 @@
+ {
+ 	uint32_t v;
+ 
++	sweet_mark(30, 0, 0);
+ 	/* Pull-up off first, so the host sees one clean reconnect. */
+ 	v = mt_rd(MAC_POWER_MANAGEMENT);
+ 	mt_wr(MAC_POWER_MANAGEMENT, v & ~(PM_SOFT_CONN | PM_SUSPENDM_ENABLE));
+ 	delay(50000);
++	sweet_mark(31, v, 0);
+ 
+ 	/* Reset only the device function; IP/PHY clocks stay as LK left them. */
+ 	v = mt_ird(IPPC_DEV_RST_CTRL);
+ 	mt_iwr(IPPC_DEV_RST_CTRL, v | IPPC_DEV_SW_RST);
+ 	delay(1);
+ 	mt_iwr(IPPC_DEV_RST_CTRL, v & ~IPPC_DEV_SW_RST);
++	sweet_mark(32, v, 0);
+ 
+ 	/* Device port enable (vendor mtu3_device_enable). */
+ 	v = mt_ird(IPPC_PW_CTRL2);
+ 	mt_iwr(IPPC_PW_CTRL2, v & ~IPPC_IP_DEV_PDN);
++	sweet_mark(33, v, 0);
+ 	if (mt.is_u3) {
+ 		v = mt_ird(IPPC_U3_CTRL_0P);
+ 		mt_iwr(IPPC_U3_CTRL_0P, v & ~(IPPC_U3_DIS | IPPC_U3_PDN | IPPC_U3_HOST_SEL));
++		sweet_mark(34, v, 0);
+ 	}
+ 	v = mt_ird(IPPC_U2_CTRL_0P);
+ 	mt_iwr(IPPC_U2_CTRL_0P, v & ~(IPPC_U2_DIS | IPPC_U2_PDN | IPPC_U2_HOST | IPPC_U2_OTG_SEL));
++	sweet_mark(35, v, 0);
+ 
+ 	/* All interrupts off; polled only. Clear every stale status. */
+ 	mt_wr(MAC_LV1IECR, 0xffffffff);
+@@ -1299,6 +1312,7 @@
+ 	mt_wr(MAC_TQERRIR0, 0xffffffff);
+ 	mt_wr(MAC_RQERRIR0, 0xffffffff);
+ 	mt_wr(MAC_RQERRIR1, 0xffffffff);
++	sweet_mark(36, 0, 0);
+ 
+ 	/* Vendor mtu3_csr_init. */
+ 	if (mt.is_u3) {
+@@ -1317,6 +1331,7 @@
+ 	mt_wr(MAC_POWER_MANAGEMENT, v | PM_LPM_HRWE);
+ 	mt_wr(MAC_USB2_EPCTL_LPM, LPM_L1_EXIT_EP0_CHK);
+ 	mt_wr(MAC_EPCTL_LPM_FC_CHK, 0);
++	sweet_mark(37, 0, 0);
+ 
+ 	/* Address 0; force VBUS (LK saw a cable and LK's own force bit set). */
+ 	mt_wr(MAC_DEVICE_CONF, 0);
+@@ -1326,24 +1341,29 @@
+ 	mt_wr(MAC_MISC_CTRL, v | MISC_VBUS_FRC_EN | MISC_VBUS_ON);
+ 	v = mt_ird(IPPC_U2_CTRL_0P);
+ 	mt_iwr(IPPC_U2_CTRL_0P, v & ~IPPC_U2_OTG_SEL);
++	sweet_mark(38, 0, 0);
+ 
+ 	if (mt.gen2cp) {
+ 		mt_wr(MAC_QFCR, 0xffffffff);
+ 	}
+ 	v = mt_rd(MAC_TXDEEMPH);
+ 	mt_wr(MAC_TXDEEMPH, (v & ~0x3ffffu) | 1);
++	sweet_mark(39, 0, 0);
+ 
+ 	/* High speed only: U3 off, HS/FS detected by hardware. */
+ 	v = mt_rd(MAC_USB3_CONFIG);
+ 	mt_wr(MAC_USB3_CONFIG, v & ~USB3_EN);
+ 	v = mt_rd(MAC_POWER_MANAGEMENT);
+ 	mt_wr(MAC_POWER_MANAGEMENT, v | PM_HS_ENABLE);
++	sweet_mark(40, 0, 0);
+ 
+ 	mt_ep0_reset_state();
++	sweet_mark(41, 0, 0);
+ 
+ 	/* Soft connect: D+ pull-up. */
+ 	v = mt_rd(MAC_POWER_MANAGEMENT);
+ 	mt_wr(MAC_POWER_MANAGEMENT, v | PM_SOFT_CONN | PM_SUSPENDM_ENABLE);
++	sweet_mark(42, v, 0);
+ }
+ 
+ static void
+@@ -1482,20 +1502,25 @@
+ {
+ 	thread_t thread;
+ 
++	sweet_mark(20, 0, 0);
+ 	if (kmem_alloc_contig(kernel_map, &mt.dma, MT_DMA_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET MTU3: no DMA memory\n");
+ 		return;
+ 	}
++	sweet_mark(21, (uint64_t)mt.dma, 0);
+ 	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)mt.dma);
+ 	if (!pn) {
+ 		printf("SWEET MTU3: DMA memory not physically mapped\n");
+ 		return;
+ 	}
+ 	mt.dma_pa = ptoa_64(pn);
++	sweet_mark(22, mt.dma_pa, 0);
+ 	mt_if_create();
++	sweet_mark(23, (uint64_t)mt.ifp, 0);
+ 
+ 	mt_hw_init();
++	sweet_mark(24, 0, 0);
+ 
+ 	printf("SWEET MTU3: running, DMA at 0x%llx, EP0CSR 0x%08x PM 0x%08x\n",
+ 	    mt.dma_pa, mt_rd(MAC_EP0CSR), mt_rd(MAC_POWER_MANAGEMENT));
+@@ -1525,23 +1550,30 @@
+ 	if (enabled <= 0) {
+ 		return 0;
+ 	}
++	sweet_mark(1, (uint64_t)enabled, 0);
+ 	if (SecureDTLookupEntry(NULL, "/sweet-usb", &node) != kSuccess ||
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+ 	    size < 4 * sizeof(uintptr_t)) {
+ 		return 0;
+ 	}
++	sweet_mark(2, (uint64_t)reg[0], (uint64_t)reg[2]);
+ 	mt.mac = ml_io_map(reg[0], reg[1]);
++	sweet_mark(3, (uint64_t)mt.mac, 0);
+ 	mt.ippc = ml_io_map(reg[2], reg[3]);
++	sweet_mark(4, (uint64_t)mt.ippc, 0);
+ 	if (mt.mac == 0 || mt.ippc == 0) {
+ 		printf("SWEET MTU3: map failed (mac 0x%lx ippc 0x%lx)\n",
+ 		    (unsigned long)reg[0], (unsigned long)reg[2]);
+ 		return 1;
+ 	}
+ 	hw_id = mt_ird(IPPC_HW_ID);
++	sweet_mark(5, hw_id, 0);
+ 	hw_sub = mt_ird(IPPC_HW_SUB_ID);
++	sweet_mark(6, hw_sub, 0);
+ 	mt.hw_version = (hw_sub >> 16) & 0xffff;
+ 	mt.gen2cp = mt.hw_version >= 0x1003;
+ 	mt.is_u3 = (mt_ird(IPPC_DEV_CAP) & 0xff) != 0;
++	sweet_mark(7, (uint64_t)mt.is_u3, 0);
+ 
+ 	printf("SWEET MTU3: HW_ID 0x%08x HW_SUB_ID 0x%08x (trunk 0x%x, %s IP)\n",
+ 	    hw_id, hw_sub, mt.hw_version, mt.is_u3 ? "U3" : "U2");
+@@ -1553,11 +1585,14 @@
+ 		printf("SWEET MTU3: refusing to touch the MAC until it is powered\n");
+ 		return 1;
+ 	}
++	sweet_mark(8, 0, 0);
+ 	printf("SWEET MTU3: DEVICE_CONF 0x%08x EP0CSR 0x%08x MISC 0x%08x PM 0x%08x\n",
+ 	    mt_rd(MAC_DEVICE_CONF), mt_rd(MAC_EP0CSR), mt_rd(MAC_MISC_CTRL),
+ 	    mt_rd(MAC_POWER_MANAGEMENT));
++	sweet_mark(9, 0, 0);
+ 	printf("SWEET MTU3: CAP ep0 %u tx %u rx %u bytes\n",
+ 	    mt_rd(MAC_CAP_EP0FFSZ), mt_rd(MAC_CAP_EPNTXFFSZ), mt_rd(MAC_CAP_EPNRXFFSZ));
++	sweet_mark(15, 0, 0);
+ 	if (enabled < 2) {
+ 		printf("SWEET MTU3: sweetusb=1, controller not started\n");
+ 		return 1;
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -33,6 +33,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <arm/caches_internal.h>
++#include <arm64/sweet_matisse_dsi.h>
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+@@ -572,6 +573,86 @@
+ 	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);
+ }
+ 
++/*
++ * Boot progress marks.
++ *
++ * The only console on this board is a framebuffer that stays dark, and the
++ * persistent log ring cannot help: it is fed from _cnputs(), which is never
++ * called before a console exists, and its writes go through
++ * ufs_write_blocks(), which refuses everything while the partition is
++ * read-only (ufsrw=0). A bring-up that hangs therefore leaves no evidence
++ * at all - the phone just resets on the watchdog.
++ *
++ * This is the minimal evidence channel that does not depend on any of that:
++ * a 2.3 KiB record kept in BSS and rewritten, one block at a time, into the
++ * LAST block of the partition (inside the log ring area, so no filesystem
++ * block is touched). The write bypasses su.writable on purpose - it is the
++ * only writer that may run on a read-only boot, and it only ever touches
++ * that one block. After the phone resets, a recovery `dd` of the last block
++ * shows how far the kernel got.
++ */
++#define SWEET_MARK_MAX  96
++
++/* Bumped for every locally built kernel that is flashed to the phone. */
++#define SWEET_BUILD_ID 0x2303u
++
++struct sweet_mark_rec {
++	uint32_t code;
++	uint32_t pad;
++	uint64_t a, b;
++};
++
++struct sweet_mark_blk {
++	char magic[8];
++	uint32_t version, count;
++	struct sweet_mark_rec rec[SWEET_MARK_MAX];
++};
++
++static struct sweet_mark_blk sweet_marks;
++
++void
++sweet_mark(uint32_t code, uint64_t a, uint64_t b)
++{
++	uint8_t *bounce;
++	uint64_t lba;
++	uint8_t cdb[10];
++
++	if (su.dma == 0 || su.nblocks == 0 || sweet_marks.count >= SWEET_MARK_MAX) {
++		return;
++	}
++	if (sweet_marks.magic[0] == 0) {
++		memcpy(sweet_marks.magic, "SWEETMRK", 8);
++		sweet_marks.version = 1;
++	}
++	sweet_marks.rec[sweet_marks.count].code = code;
++	sweet_marks.rec[sweet_marks.count].a = a;
++	sweet_marks.rec[sweet_marks.count].b = b;
++	sweet_marks.count++;
++
++	bounce = (uint8_t *)(su.dma + DMA_BOUNCE);
++	lba = su.first_block + su.nblocks - 1;
++	/*
++	 * ufs_scsi() owns one UTRL/UCD/PRDT set at the head of the same DMA
++	 * allocation, so marks must not overlap another transfer - after
++	 * mountroot the HFS read path runs concurrently.
++	 */
++	lck_mtx_lock(&sweet_ufs_lock);
++	bzero(bounce, UFS_BLOCK);
++	memcpy(bounce, &sweet_marks, MIN(sizeof(sweet_marks), UFS_BLOCK));
++	cdb[0] = 0x2a;                          /* WRITE(10), one block */
++	cdb[1] = 0;
++	cdb[2] = (uint8_t)(lba >> 24);
++	cdb[3] = (uint8_t)(lba >> 16);
++	cdb[4] = (uint8_t)(lba >> 8);
++	cdb[5] = (uint8_t)lba;
++	cdb[6] = 0;
++	cdb[7] = 0;
++	cdb[8] = 1;
++	cdb[9] = 0;
++	(void)ufs_scsi(cdb, sizeof(cdb), UFS_BLOCK, true);
++	lck_mtx_unlock(&sweet_ufs_lock);
++}
++
+ static int
+ ufs_sync_cache(void)
+ {
+@@ -987,6 +1068,23 @@
+ 	/* Only now, with the partition bounds known, can writes be allowed. */
+ 	su.writable = (rw != 0);
+ 	su.ready = true;
++	/* Partition geometry is known: the mark channel works from here on. */
++	sweet_mark(10, su.first_block, su.nblocks);
++	/* Identifies the kernel image that produced this record: without it an
++	 * unchanged boot path is indistinguishable from a stale record left by
++	 * the previous run. Bump SWEET_BUILD_ID with every flashed kernel. */
++	sweet_mark(99, SWEET_BUILD_ID, __LINE__);
++	/* The panel decision was made long before this point; replay it. */
++	for (uint32_t i = 0; i < 16; i++) {
++		sweet_mark(70 + i, i, sweet_disp_trace[i]);
++	}
++	sweet_mark(86, sweet_disp_calls, sweet_disp_pushes);
++	sweet_mark(92, sweet_disp_busy_skips, sweet_disp_status);
++	sweet_mark(90, sweet_disp_target[0], sweet_disp_target[1]);
++	sweet_mark(91, sweet_disp_target[2], sweet_disp_target[3]);
++	sweet_mark(93, sweet_disp_target[4], sweet_disp_status_before);
++	sweet_mark(94, sweet_disp_cmdq[0], sweet_disp_cmdq[1]);
++	sweet_mark(95, sweet_disp_cmdq[2], sweet_disp_cmdq[3]);
+ 	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
+ 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+@@ -994,8 +1092,12 @@
+ 	sweet_sample_start();
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();
++	sweet_mark(13, 0, 0);
+ 	sweet_touch_init();
++	sweet_mark(14, 0, 0);
++	sweet_mark(11, 0, 0);
+ 	sweet_usb_probe();
++	sweet_mark(12, 0, 0);
+ 	return 0;
+ }
+ 
+@@ -1129,15 +1231,7 @@
+ 	thread_t thread;
+ 
+ 	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
+-	/*
+-	 * The ring is flushed with raw block writes to the last 4 MiB + 4 KiB
+-	 * of the partition, so a read-only userdata (ufsrw=0) can still keep
+-	 * the console: the VFS stays read-only, the mount cannot write, and
+-	 * nothing above that area is touched. Without this the only console
+-	 * on this board is the dark framebuffer, so a hung bring-up leaves no
+-	 * evidence at all.
+-	 */
+-	if (!on || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
++	if (!on || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
+ 		return;
+ 	}
+ 	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -377,6 +377,20 @@
+ 
+ /* To allow these values to be patched, they're globals here */
+ #include <machine/vmparam.h>
++
++/*
++ * Boot progress marks (bsd/dev/sweet_ufs.c). No console exists on this
++ * board, so the mount path reports itself to the last block of the
++ * partition instead of to printf.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern void sweet_mark(uint32_t code, uint64_t a, uint64_t b);
++#else
++static inline void sweet_mark(uint32_t code, uint64_t a, uint64_t b)
++{
++	(void)code; (void)a; (void)b;
++}
++#endif
+ struct rlimit vm_initial_limit_stack = { .rlim_cur = DFLSSIZ, .rlim_max = MAXSSIZ - PAGE_MAX_SIZE };
+ struct rlimit vm_initial_limit_data = { .rlim_cur = DFLDSIZ, .rlim_max = MAXDSIZ };
+ struct rlimit vm_initial_limit_core = { .rlim_cur = DFLCSIZ, .rlim_max = MAXCSIZ };
+@@ -879,9 +893,12 @@
+ #endif
+ 
+ 		bsd_init_kprintf("vfs_mountroot\n");
++		sweet_mark(50, 0, 0);
+ 		if (0 == (err = vfs_mountroot())) {
++			sweet_mark(51, 0, 0);
+ 			break;
+ 		}
++		sweet_mark(52, (uint64_t)(uint32_t)err, 0);
+ 		rootdevice[0] = '\0';
+ #if CONFIG_NETBOOT
+ 		if (netboot) {
+@@ -900,6 +917,7 @@
+ 	}
+ 
+ 	IOSecureBSDRoot(rootdevice);
++	sweet_mark(53, 0, 0);
+ 
+ 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
+ 
+@@ -908,6 +926,7 @@
+ 	if (VFS_ROOT(mountlist.tqh_first, &init_rootvnode, vfs_context_kernel())) {
+ 		panic("bsd_init: cannot find root vnode: %s", PE_boot_args());
+ 	}
++	sweet_mark(54, 0, 0);
+ 	(void)vnode_ref(init_rootvnode);
+ 	(void)vnode_put(init_rootvnode);
+ 
+@@ -1098,7 +1117,9 @@
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++	sweet_mark(60, 0, 0);
+ 	load_init_program(p);
++	sweet_mark(61, 0, 0);
+ 	lock_trace = 1;
+ }
+ 
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6748,9 +6748,20 @@
+  *		word width of the kernel. Once the self-exec completes, the
+  *		initproc might be different.
+  */
++/* Boot progress marks (bsd/dev/sweet_ufs.c): no console on this board. */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern void sweet_mark(uint32_t code, uint64_t a, uint64_t b);
++#else
++static inline void sweet_mark(uint32_t code, uint64_t a, uint64_t b)
++{
++	(void)code; (void)a; (void)b;
++}
++#endif
++
+ static int
+ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
+ {
++	sweet_mark(65, 0, 0);
+ 	int retval[2];
+ 	int error;
+ 	struct execve_args init_exec_args;
+@@ -6873,6 +6884,7 @@
+ void
+ load_init_program(proc_t p)
+ {
++	sweet_mark(62, 0, 0);
+ 	uint32_t i;
+ 	int error;
+ 	vm_map_t map = current_map();
+@@ -6919,6 +6931,7 @@
+ 	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
+ 		printf("load_init_program: attempting to load %s\n", init_programs[i]);
+ 		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i]);
++		sweet_mark(63, (uint64_t)i, (uint64_t)(uint32_t)error);
+ 		if (!error) {
+ 			return;
+ 		} else if (error != ENOENT) {
+@@ -6926,6 +6939,7 @@
+ 		}
+ 	}
+ 
++	sweet_mark(64, (uint64_t)i, (uint64_t)(uint32_t)error);
+ 	panic("Process 1 exec of %s failed, errno %d", ((i == 0) ? "<null>" : init_programs[i - 1]), error);
+ }
+ 
+diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1206,6 +1206,16 @@
+  */
+ extern int (*mountroot)(void);
+ 
++/* Boot progress marks (bsd/dev/sweet_ufs.c); this board has no console. */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern void sweet_mark(uint32_t code, uint64_t a, uint64_t b);
++#else
++static inline void sweet_mark(uint32_t code, uint64_t a, uint64_t b)
++{
++	(void)code; (void)a; (void)b;
++}
++#endif
++
+ int
+ vfs_mountroot(void)
+ {
+@@ -1228,11 +1238,13 @@
+ 	OSMemoryBarrier();
+ 
+ 	KDBG_RELEASE(DBG_MOUNTROOT | DBG_FUNC_START);
++	sweet_mark(55, 0, 0);
+ 	if (mountroot != NULL) {
+ 		/*
+ 		 * used for netboot which follows a different set of rules
+ 		 */
+ 		error = (*mountroot)();
++		sweet_mark(56, (uint64_t)(uint32_t)error, 0);
+ 
+ 		KDBG_RELEASE(DBG_MOUNTROOT | DBG_FUNC_END, error, 0);
+ 		return error;
+diff --git a/osfmk/arm64/sweet_matisse_dsi.c b/osfmk/arm64/sweet_matisse_dsi.c
+--- a/osfmk/arm64/sweet_matisse_dsi.c
++++ b/osfmk/arm64/sweet_matisse_dsi.c
+@@ -36,7 +36,8 @@
+ #define GATE2_DSI_CLK		(1u << 0)
+ 
+ #define DISP_MUTEX		0x1000u
+-#define MUTEX_CFG		(DISP_MUTEX + 0x08u)
++/* LK already programmed MOD0/MOD1 and SOF for OVL -> DSC -> DSI.  The
++ * refresh path only toggles EN; do not replace the live routing mask. */
+ #define MUTEX_EN		(DISP_MUTEX + 0x20u)
+ 
+ #define DISP_OVL0_2L		0x4000u
+@@ -56,11 +57,14 @@
+ #define DSI_BUF_CON0		(DISP_DSI0 + 0x400u)
+ #define DSI_PHY_LCPAT		(DISP_DSI0 + 0x100u)
+ #define DSI_PHY_LCCON		(DISP_DSI0 + 0x104u)
++#define DSI_MEM_CONTI		(DISP_DSI0 + 0x90u)
+ 
+ #define DSI_EN			(1u << 1)
+ #define DSI_CM_WAIT_DATA_LINE_EN (1u << 24)
+ #define DSI_CM_WAIT_FIFO_FULL_EN (1u << 27)
+ #define DSI_INT_TE_RDY		(1u << 2)
++#define DSI_INT_FRAME_DONE	(1u << 4)
++#define DSI_INT_BUSY		(1u << 31)
+ #define DSI_PHY_LC_HS_TX_EN	(1u << 0)
+ #define DSI_PS_SEL_MASK		(0xfu << 16)
+ #define DSI_PS_SEL_DSC		(5u << 16)
+@@ -75,6 +79,29 @@
+ static int disp_ready;
+ static int disp_busy;
+ 
++/*
++ * Why the panel is dark: sweet_display_init() is a chain of "LK's state must
++ * still match the measured working configuration, otherwise leave the panel
++ * alone" checks, and every one of them used to return silently. There is no
++ * console to complain on, and this runs long before the UFS progress marks
++ * exist, so the decision is recorded here and dumped later by
++ * bsd/dev/sweet_ufs.c (marks 70..85) once the mark channel is up.
++ *
++ * [0] stage reached, [1] width<<16|height, [2] stride, [3..5] clock gates,
++ * [6] DSI mode, [7] PSCTRL, [8] SIZE_CON, [9] VACT, [10] BUF_CON0,
++ * [11] INTSTA, [12] OVL_EN, [13] OVL_L0_ADDR, [14] OVL_L0_PITCH,
++ * [15] framebuffer phys.
++ */
++uint32_t sweet_disp_trace[16];
++uint32_t sweet_disp_calls;      /* sweet_display_refresh() invocations */
++uint32_t sweet_disp_pushes;     /* refreshes that actually pushed a frame */
++uint32_t sweet_disp_busy_skips; /* triggers skipped while DSI was busy */
++uint32_t sweet_disp_status;     /* last DSI_INTSTA observed by refresh */
++/* Cached until UFS is ready: VA, PA, PAR(first), PAR(last), stride/height. */
++uint64_t sweet_disp_target[5];
++uint32_t sweet_disp_status_before;
++uint32_t sweet_disp_cmdq[4]; /* CON_CTRL, TXRX_CTRL, CMDQ_SIZE, CMDQ0 */
++
+ static inline uint32_t
+ disp_read(uint32_t off)
+ {
+@@ -115,21 +142,28 @@
+ 	uint32_t ovl_en, ovl_addr, ovl_pitch, intsta;
+ 
+ 	disp_ready = 0;
++	sweet_disp_trace[0] = 1;
++	sweet_disp_trace[1] = (width << 16) | (height & 0xffff);
++	sweet_disp_trace[2] = stride;
++	sweet_disp_trace[15] = (uint32_t)fb_phys;
+ 	if (SecureDTFindEntry("name", "sweet-display", &entry) != kSuccess) {
+ 		return;
+ 	}
+ 	if (SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess ||
+ 	    size < 16 || !reg[0] || (reg[0] & 3) ||
+ 	    reg[1] < DISP_WINDOW_MIN) {
++		sweet_disp_trace[0] = 2;
+ 		return;
+ 	}
+ 	if (!width || !height || !stride || stride < width * 4 ||
+ 	    height != EXPECT_VACT || stride > 32768) {
++		sweet_disp_trace[0] = 3;
+ 		return;
+ 	}
+ 
+ 	disp_base = ml_io_map(reg[0], reg[1]);
+ 	if (!disp_base) {
++		sweet_disp_trace[0] = 4;
+ 		return;
+ 	}
+ 
+@@ -150,21 +184,45 @@
+ 	ovl_pitch = disp_read(OVL_L0_PITCH);
+ 	intsta = disp_read(DSI_INTSTA);
+ 
++	sweet_disp_trace[3] = gates0;
++	sweet_disp_trace[4] = gates1;
++	sweet_disp_trace[5] = gates2;
++	sweet_disp_trace[6] = mode;
++	sweet_disp_trace[7] = ps;
++	sweet_disp_trace[8] = size_con;
++	sweet_disp_trace[9] = vact;
++	sweet_disp_trace[10] = buf;
++	sweet_disp_trace[11] = intsta;
++	sweet_disp_trace[12] = ovl_en;
++	sweet_disp_trace[13] = ovl_addr;
++	sweet_disp_trace[14] = ovl_pitch;
++	sweet_disp_cmdq[0] = ctl;
++	sweet_disp_cmdq[1] = disp_read(DSI_TXRX_CTRL);
++	sweet_disp_cmdq[2] = disp_read(DISP_DSI0 + 0x60u);
++	sweet_disp_cmdq[3] = disp_read(DISP_DSI0 + 0xd00u);
++
+ 	if ((gates0 & (GATE0_MUTEX | GATE0_DSC0 | GATE0_DSI0)) ||
+ 	    (gates1 & GATE1_OVL0_2L) || (gates2 & GATE2_DSI_CLK)) {
++		sweet_disp_trace[0] = 5;
+ 		return;		/* clock gate status 1 = gated off */
+ 	}
+ 	if ((mode & 3u) != 0 || (ps & DSI_PS_SEL_MASK) != DSI_PS_SEL_DSC ||
+ 	    size_con != EXPECT_SIZE_CON || vact != EXPECT_VACT ||
+ 	    (buf & 1u) == 0) {
++		sweet_disp_trace[0] = 6;
+ 		return;
+ 	}
+ 	if ((ovl_en & 1u) == 0 || ovl_addr != (uint32_t)fb_phys ||
+ 	    ovl_pitch != stride) {
+-		return;
+-	}
++		sweet_disp_trace[0] = 7;
++		return;
++	}
++	/* TE_RDY is an edge status, not a stable readiness predicate. Keep it
++	 * for diagnostics; command transfers are gated by DSI_BUSY below. */
+ 	if ((intsta & DSI_INT_TE_RDY) == 0) {
+-		return;		/* panel not sending TE: leave it alone */
++		sweet_disp_trace[0] = 8;
++	} else {
++		sweet_disp_trace[0] = 9;
+ 	}
+ 
+ 	disp_con_ctrl = ctl | DSI_EN | DSI_CM_WAIT_DATA_LINE_EN |
+@@ -178,41 +236,89 @@
+ 	sweet_display_refresh(1);
+ }
+ 
++
+ void
+ sweet_display_refresh(int force)
+ {
+-	uint64_t now;
+-	uint64_t limit;
+-
++	uint64_t now, limit;
++	uint32_t status;
++
++	sweet_disp_calls++;
+ 	if (!disp_ready) {
+ 		return;
+ 	}
+ 	now = disp_counter();
+-	/* At most ~20 frames/s; console bursts must not spin on the panel. */
+-	if (!force && disp_last && now - disp_last < disp_frequency() / 20) {
++	/* Five attempts/s, including timeouts: a stuck engine must not stall
++	 * early boot for 20 ms on every console character. */
++	if (!force && disp_last && now - disp_last < disp_frequency() / 5) {
+ 		return;
+ 	}
+ 	if (__atomic_test_and_set(&disp_busy, __ATOMIC_ACQUIRE)) {
+ 		return;
+ 	}
++
++	/* Recheck under the lock in case another CPU just refreshed. */
++	now = disp_counter();
++	if (!force && disp_last && now - disp_last < disp_frequency() / 5) {
++		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
++		return;
++	}
+ 	disp_last = now;
+ 
+-	/* W0C status: clear the stale TE flag, then pace on the next pulse.
+-	 * A missing TE still gets one trigger per refresh interval. */
+-	disp_write(DSI_INTSTA, ~DSI_INT_TE_RDY);
+-	limit = now + disp_frequency() / 100;	/* 10 ms */
+-	while ((disp_read(DSI_INTSTA) & DSI_INT_TE_RDY) == 0 &&
+-	    disp_counter() < limit) {
++	/* rubens-s-oss mtk_dsi_poll_for_idle(): DSI_BUSY, not FRAME_DONE, is
++	 * the command-mode completion indication. Do not retrigger an active
++	 * transfer. Console writers still share one buffer; this is not a
++	 * double-buffering or tear-free guarantee. */
++	limit = now + disp_frequency() / 50;	/* 20 ms */
++	status = disp_read(DSI_INTSTA);
++	sweet_disp_status_before = status;
++	while ((status & DSI_INT_BUSY) && disp_counter() < limit) {
+ 		__asm__ volatile("yield");
+-	}
+-
+-	/* Vendor per-frame packet: CFG=0, EN 0->1, then DSI_START=1. */
+-	disp_write(MUTEX_CFG, 0);
++		status = disp_read(DSI_INTSTA);
++	}
++	if (status & DSI_INT_BUSY) {
++		sweet_disp_busy_skips++;
++		sweet_disp_status = status;
++		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
++		return;
++	}
++
++	/* Keep LK's MOD/SOF route and DSC configuration.  mtk_dsi_start() is a
++	 * strobe: write 0 then 1 after the mutex 0 -> 1 transition. The console
++	 * mappings are Normal-NC: publish their stores without dereferencing
++	 * the physical framebuffer after TTBR0 has been removed. */
++	__asm__ volatile("dsb sy" ::: "memory");
+ 	disp_write(MUTEX_EN, 0);
+ 	disp_write(MUTEX_EN, 1);
++	disp_write(DSI_START, 0);
+ 	disp_write(DSI_START, 1);
++	sweet_disp_pushes++;
++	sweet_disp_status = disp_read(DSI_INTSTA);
+ 
+ 	__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
+ }
+ 
++/* AT checks translations without reading pixels or faulting on an unmapped
++ * VA. Save the results now; sweet_mark() cannot persist them before UFS init.
++ * All framebuffer aliases must be Normal-NC (PAR attributes 0x44). */
++void
++sweet_display_set_target(uint64_t va, uint64_t phys, uint32_t stride,
++    uint32_t height)
++{
++	sweet_disp_target[0] = va;
++	sweet_disp_target[1] = phys;
++	sweet_disp_target[2] = sweet_disp_target[3] = 1;
++	sweet_disp_target[4] = ((uint64_t)stride << 32) | height;
++	if (!va || !stride || !height || va + (uint64_t)stride * height < va) {
++		return;
++	}
++	uint64_t first, last, end = va + (uint64_t)stride * height - 1;
++	__asm__ volatile("at s1e1w, %1; isb; mrs %0, par_el1"
++	    : "=r"(first) : "r"(va) : "memory");
++	__asm__ volatile("at s1e1w, %1; isb; mrs %0, par_el1"
++	    : "=r"(last) : "r"(end) : "memory");
++	sweet_disp_target[2] = first;
++	sweet_disp_target[3] = last;
++}
++
+ #endif /* SWEET */
+diff --git a/osfmk/arm64/sweet_matisse_dsi.h b/osfmk/arm64/sweet_matisse_dsi.h
+--- a/osfmk/arm64/sweet_matisse_dsi.h
++++ b/osfmk/arm64/sweet_matisse_dsi.h
+@@ -6,10 +6,12 @@
+  * buffer enabled, the OVL scanning the boot framebuffer and the mutex MOD
+  * bits configured. Only the DSI engine is disabled and the mutex is stopped.
+  *
+- * A frame is pushed by enabling the engine once, then pulsing the mutex and
+- * writing DSI_START=1. Completion is not visible in INTSTA bit4 on this
+- * command-mode path (hardware-verified 2026-10-22: the panel refreshed while
+- * FRAME_DONE stayed clear), so refreshes are time-paced instead of polled.
++ * A frame is pushed by pulsing the mutex and writing DSI_START (a 0->1
++ * strobe). Command-mode completion is the DSIM busy bit (DSI_INTSTA bit31),
++ * not FRAME_DONE: rubens-s-oss mtk_dsi_poll_for_idle() waits on DSI_BUSY.
++ * The refresh path therefore polls DSI_BUSY with a bound and skips the frame
++ * if the previous transfer is still leaving the DSIM, instead of overwriting
++ * an in-flight frame (which produces a partial/corrupt panel).
+  */
+ #ifndef _ARM64_SWEET_MATISSE_DSI_H_
+ #define _ARM64_SWEET_MATISSE_DSI_H_
+@@ -23,8 +25,25 @@
+ void sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
+     uint32_t stride);
+ /* Push the current framebuffer to the panel. Cheap no-op when inactive or
+- * called again within 50 ms unless force is non-zero. */
++ * called again within 200 ms unless force is non-zero. */
+ void sweet_display_refresh(int force);
++
++/* Record the console's live mapping and translation attributes for later
++ * diagnostics. Does not read pixels or trigger a transfer. */
++void sweet_display_set_target(uint64_t va, uint64_t phys, uint32_t stride,
++    uint32_t height);
++
++/* Why the panel is (or is not) live: filled by sweet_display_init() long
++ * before the UFS progress-mark channel exists, so bsd/dev/sweet_ufs.c dumps
++ * it once that channel is up. See the table in sweet_matisse_dsi.c. */
++extern uint32_t sweet_disp_trace[16];
++extern uint32_t sweet_disp_calls;
++extern uint32_t sweet_disp_pushes;
++extern uint32_t sweet_disp_busy_skips;
++extern uint32_t sweet_disp_status;
++extern uint32_t sweet_disp_status_before;
++extern uint32_t sweet_disp_cmdq[4];
++extern uint64_t sweet_disp_target[5];
+ #else
+ static inline void sweet_display_init(uint64_t fb_phys, uint32_t width,
+     uint32_t height, uint32_t stride)
+@@ -32,6 +51,11 @@
+ 	(void)fb_phys; (void)width; (void)height; (void)stride;
+ }
+ static inline void sweet_display_refresh(int force) { (void)force; }
++static inline void sweet_display_set_target(uint64_t va, uint64_t phys,
++    uint32_t stride, uint32_t height)
++{
++	(void)va; (void)phys; (void)stride; (void)height;
++}
+ #endif
+ 
+ #endif /* _ARM64_SWEET_MATISSE_DSI_H_ */
+diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -91,6 +91,8 @@
+ #include <console/video_console.h>
+ #include <console/serial_protos.h>
+ 
++#include <arm64/sweet_matisse_dsi.h>
++
+ #include <kern/kern_types.h>
+ #include <kern/kalloc.h>
+ #include <kern/debug.h>
+@@ -1241,6 +1243,9 @@
+ 		abandon_preemption_disable_measurement();
+ #endif /* SCHED_HYGIENE_DEBUG */
+ 		VCPUTC_LOCK_UNLOCK();
++		/* Command-mode DSI: drawing into DRAM is not visible until the
++		 * mutex is pulsed, so push the frame after each console write. */
++		sweet_display_refresh(0);
+ 	}
+ }
+ 
+@@ -2835,7 +2840,13 @@
+ 		 *  If VM is up, we are given a virtual address, unless b0 is set to indicate physical.
+ 		 */
+ 		newVideoVirt = boot_vinfo->v_baseAddr;
+-		makeMapping = (kernel_map == VM_MAP_NULL) || (0 != (1 & newVideoVirt));
++		makeMapping = (kernel_map == VM_MAP_NULL) ||
++		    (0 != (1 & newVideoVirt));
++#if defined(SWEET)
++		/* Our loader supplies an untagged PA. Its early Normal-NC identity
++		 * mapping is gone after arm_vm_init: create a kernel VA alias. */
++		makeMapping |= (newVideoVirt < VM_MIN_KERNEL_ADDRESS);
++#endif
+ 		if (makeMapping) {
+ 			newVideoVirt = 0;
+ 			new_vinfo.v_physaddr = boot_vinfo->v_baseAddr & ~3UL;           /* Get the physical address */
+@@ -2855,7 +2866,7 @@
+ 			gc_acquired = TRUE;
+ 		} else {
+ 			if (makeMapping) {
+-#if HAS_UCNORMAL_MEM
++#if HAS_UCNORMAL_MEM || defined(SWEET)
+ 				/*
+ 				 * Framebuffers would normally use VM_WIMG_RT, which
+ 				 * io_map doesn't support.  However this buffer is set up
+@@ -2876,6 +2887,12 @@
+ 			}
+ 			new_vinfo.v_baseaddr = newVideoVirt + boot_vinfo->v_offset;                     /* Set the new framebuffer address */
+ 		}
++#if defined(SWEET)
++		/* Record before gc_initialize touches pixels, and on address changes. */
++		sweet_display_set_target(new_vinfo.v_baseaddr,
++		    new_vinfo.v_physaddr ? new_vinfo.v_physaddr + boot_vinfo->v_offset : 0,
++		    new_vinfo.v_rowbytes, new_vinfo.v_height);
++#endif
+ 
+ #if defined(__x86_64__)
+ 		// Adjust the video buffer pointer to point to where it is in high virtual (above the hole)
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -844,6 +844,8 @@
+ 	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
+ 	sweet_early_mark(18, "fbcon mapping returned");
+ 	if (fbcon_base != NULL) {
++		sweet_display_set_target((uint64_t)(uintptr_t)fbcon_base,
++		    reg[0], fbcon_stride, fbcon_height);
+ 		register_serial_functions(&sweet_fbcon_serial_functions);
+ 		/* Command-mode DSI: push the console surface LK left scanning.
+ 		 * Headless when the "sweet-display" ADT node is absent. */
