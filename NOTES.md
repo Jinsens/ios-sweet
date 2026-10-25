@@ -208,8 +208,78 @@ into bsd_init). Initial 0122 launch aborted before writing because the device
 had moved from the prior same-boot recovery to Fastboot; fbraw reboot of the
 restored image returned to Recovery and preflight verified it before testing.
 
-Next: use an earlier code breakpoint to locate the boot failure before the
-UFS mark channel. Do not infer a DSI hardware fault from the unchanged logo.
+**0123 kminit checkpoint NOT OBSERVED:** image
+`1849877c2ff839b71f245da5502c00399ed89412b8ef092eec8cb40ec575092c`
+did not return within 100 s. User reported Recovery; runner restored full
+boot_a and verified `2931647a...`. Artifacts in `20261025-display-0123/`.
+Next 0124 probes BSD at `0xfffffe000775d628`, immediately before
+IOKitInitializeTime (after bsd_bufferinit), within the unobserved interval.
+
+**0124 checkpoint PASS:** `pc=fffffe000775d628`, ESR `0xf2005357`,
+immediately before IOKitInitializeTime; full boot_a restored and verified.
+Image `c61d00c23170cc123970ef718a4d57d5bbab022febdda0ade0ee29d70368e308`.
+This reproduces the older 2026-10-23 watchdog/wait issue: entryprobe leaves
+LK's ~31 s AP watchdog running, but this fresh 0117 payload has both 30 s
+RTC/IOBSD waits intact (unlike older rtcfast diagnostic payloads). Thus the
+prior no-return tests do NOT yet locate a new display-driver hang. Next 0125
+keeps the same kernel/ADT/args and changes only the two timeout constants to
+zero (four guarded instructions), preserving matching/cleanup calls, plus
+BRK at load_init_program `0xfffffe00077dc0ac`. Exact changes are saved in
+`research/matisse/20261025-display-0125/wait-patches.json`; not yet a hardware
+result. This is a diagnostic workaround, not a production RTC/watchdog fix.
+
+**0125 zero-timeout / load_init checkpoint NOT OBSERVED:** image
+`14dbcad6269f5c694c5acd3ed0da7285e776c0f2428488d4edfadfc78388fc8e`
+did not return in 100 s. User reported Recovery; full boot_a restored and
+verified. Post-timeout marks still match the old 64-record block (no build
+ID), and dmesg's display probe belongs to the restored backup. This test
+does not establish which stage failed. Next 0126 uses the older hardware-
+passed rtcfast method: bypass the wait calls themselves (three guarded
+instructions) and stop earlier, at UFS rootdev entry. This diagnostic RTC
+NOP leaves one temporary matching dictionary unreleased; do not promote
+that binary patch to a production kernel fix. Records and payloads are in
+`research/matisse/20261025-display-0126/`.
+
+**0126 rtcfast / UFS-entry checkpoint NOT OBSERVED:** image
+`433a56399862688c05cae1a8ea1d935156988fc39a215713aaf0f1477e3d26ac`
+did not return within 100 s. User reported Recovery; the runner restored full boot_a and verified
+`2931647a...` (confirmed again by a live readback). Since bypassing both calls still does not reach UFS, the
+watchdog/waits explanation is not sufficient. Next 0127 uses that same
+rtcfast base with BRK immediately after IOKitInitializeTime (`775d62c`),
+paired with 0124's successful before-call checkpoint (`775d628`).
+
+**0127 checkpoint PASS (saved result recovered):** rtcfast payload returned
+at `0xfffffe000775d62c`, immediately after IOKitInitializeTime, ESR
+`0xf2005357`, in 32.77 s. Image SHA256
+`8e7990b1038e4e10e41049b6621d2b8760d836798bc6c465c70ee096a91ce095`.
+Full boot_a restored and verified; no UFS marks expected at this point.
+
+**Verified machine-code defect, patch 0097 in progress:** Darwin ARM64
+assembly uses semicolons as comments. `disp_counter()` emitted ISB but no
+CNTPCT read, leaving timeout/throttle registers uninitialized. Both PAR
+checks in `sweet_early_init` and `sweet_display_set_target` emitted AT but
+neither ISB nor MRS PAR_EL1, so the source's translation checks were not
+actually performed. `ufs_smc` also lost all instructions after its first
+MOV, including SMC. The normal `ml_get_hwclock` CNTVCT reader is intact.
+These are disassembly observations; their contribution to the visible logo
+and the pre-UFS stall still requires hardware testing. Replace separators
+with explicit newlines, verify emitted instructions and rebuild as 0x2305.
+Preserved pre-fix kernel/sources in `20261025-display-0128/`.
+
+**0097 built and 0128 testing:** all three changed sources replay exactly.
+Darwin assembler regression tests pass for the timer, all four PAR checks,
+and SMC arguments/call; the existing stalled-DSI host test also passes.
+The linked kernel contains 4 CNTPCT reads in refresh, 2 PAR reads in each
+console helper, and 3 inlined UFS SMCs. Kernel SHA256
+`5e43f1a0ae65a95efffc61639b435207b9fe5f4fb9a035bb4e47d3cbcaf13516`, 16705680 bytes; build ID `0x2305`.
+Local build succeeded with Xcode 16.4; no new CI run. 0128 boot image
+`cc5ec95ee064cf5db0b71bcbd32c1f4dafa8616915877c9802686d496564eba7`, 26615808 bytes, with the same RTC/IOBSD diagnostic wait skips
+relocated to the new kernel (manifest in `20261025-display-0128/`).
+Checkpoint is `_sweet_ufs_rootdev` `0xfffffe00074dd2d0`. Embedded payload,
+single BRK, both vectors and bootstrap TTBR0 storage validated. Trial
+launched with ongoing user authorization; full restoration remains required.
+
+Next: validate patch 0097 and test a rebuilt rtcfast checkpoint at UFS entry. Do not infer a DSI hardware fault from the unchanged logo.
 User has authorized ongoing tests ("你可以随时测试"); retain full restoration
 and hash verification for each trial. Normal XNU still lacks `/sbin/launchd`.
 

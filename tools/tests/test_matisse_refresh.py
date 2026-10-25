@@ -18,7 +18,8 @@ class RefreshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             for patch in ('0083-matisse-command-mode-refresh.patch',
-                          '0095-matisse-display-mapping-and-marks.patch'):
+                          '0095-matisse-display-mapping-and-marks.patch',
+                          '0097-sweet-darwin-asm-newlines.patch'):
                 subprocess.run(['git', 'apply',
                                 '--include=osfmk/arm64/sweet_matisse_dsi.c',
                                 str(ROOT / 'xnu/patches' / patch)], cwd=work, check=True)

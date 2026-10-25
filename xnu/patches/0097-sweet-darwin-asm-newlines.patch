@@ -1,0 +1,67 @@
+diff --git a/osfmk/arm64/sweet_matisse_dsi.c b/osfmk/arm64/sweet_matisse_dsi.c
+--- a/osfmk/arm64/sweet_matisse_dsi.c
++++ b/osfmk/arm64/sweet_matisse_dsi.c
+@@ -115,11 +115,13 @@
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++/* Darwin ARM64 treats semicolons as comments: separate instructions with
++ * newlines so the timebase read is emitted, including in polling loops. */
+ static uint64_t
+ disp_counter(void)
+ {
+ 	uint64_t v;
+-	__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(v));
++	__asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(v));
+ 	return v;
+ }
+ 
+@@ -313,9 +315,9 @@
+ 		return;
+ 	}
+ 	uint64_t first, last, end = va + (uint64_t)stride * height - 1;
+-	__asm__ volatile("at s1e1w, %1; isb; mrs %0, par_el1"
++	__asm__ volatile("at s1e1w, %1\n\tisb\n\tmrs %0, par_el1"
+ 	    : "=r"(first) : "r"(va) : "memory");
+-	__asm__ volatile("at s1e1w, %1; isb; mrs %0, par_el1"
++	__asm__ volatile("at s1e1w, %1\n\tisb\n\tmrs %0, par_el1"
+ 	    : "=r"(last) : "r"(end) : "memory");
+ 	sweet_disp_target[2] = first;
+ 	sweet_disp_target[3] = last;
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -45,8 +45,8 @@
+ 	/* start.s may have rejected a RAM collision. Verify both ends before
+ 	 * any store. PAR_EL1 bit0 is the architectural translation fault bit. */
+ 	uint64_t first, last;
+-	__asm__ volatile("at s1e1w, %1; isb; mrs %0, par_el1" : "=r"(first) : "r"(base) : "memory");
+-	__asm__ volatile("at s1e1w, %1; isb; mrs %0, par_el1" : "=r"(last) : "r"(base + stride * height - 4) : "memory");
++	__asm__ volatile("at s1e1w, %1\n\tisb\n\tmrs %0, par_el1" : "=r"(first) : "r"(base) : "memory");
++	__asm__ volatile("at s1e1w, %1\n\tisb\n\tmrs %0, par_el1" : "=r"(last) : "r"(base + stride * height - 4) : "memory");
+ 	if ((first | last) & 1) {
+ 		return;
+ 	}
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -166,8 +166,8 @@
+ 	register uint64_t x0 __asm__("x0") = a0;
+ 	register uint64_t x1 __asm__("x1") = a1;
+ 	register uint64_t x2 __asm__("x2") = a2;
+-	__asm__ volatile("mov x3, xzr; mov x4, xzr; mov x5, xzr; mov x6, xzr;"
+-	    " mov x7, xzr; smc #0" : "+r"(x0), "+r"(x1), "+r"(x2)
++	__asm__ volatile("mov x3, xzr\n\tmov x4, xzr\n\tmov x5, xzr\n\t"
++	    "mov x6, xzr\n\tmov x7, xzr\n\tsmc #0" : "+r"(x0), "+r"(x1), "+r"(x2)
+ 	    : : "x3", "x4", "x5", "x6", "x7", "memory");
+ 	return x0;
+ }
+@@ -594,7 +594,7 @@
+ #define SWEET_MARK_MAX  96
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x2304u
++#define SWEET_BUILD_ID 0x2305u
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;
