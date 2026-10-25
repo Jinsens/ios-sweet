@@ -1,0 +1,420 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
++bsd/dev/sweet_matisse_touch.c		standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -20,6 +20,7 @@
+ extern kern_return_t thread_terminate(thread_t);
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern int sweet_matisse_touch_start(void);
+ void sweet_touch_init(void);
+ 
+ #define TOUCH_SE_PA      0x00a84000u
+@@ -640,6 +641,10 @@
+ {
+ 	int enabled = 1;
+ 	thread_t thread;
++	/* MT6983 uses ST FTS over SPI6, not this Qualcomm GENI path. */
++	if (sweet_matisse_touch_start()) {
++		return;
++	}
+ 	if (st.started) {
+ 		return;
+ 	}
+
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -882,6 +882,16 @@
+ 	bsd_init_kprintf("calling inittodr\n");
+ 	inittodr(0);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * Start Matisse touch before selecting the root device. Its SPI6 poller is
++	 * independent of UFS, so RAM-disk and other non-UFS boots still get input.
++	 * This is a no-op on the original Qualcomm sweet profile.
++	 */
++	extern int sweet_matisse_touch_start(void);
++	(void)sweet_matisse_touch_start();
++#endif
++
+ 	/* Mount the root file system. */
+ 	while (TRUE) {
+ 		int err;
+
+--- /dev/null
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -0,0 +1,364 @@
++/*
++ * Read-only ST FTS touch input for the Redmi K50 Pro (matisse, MT6983).
++ *
++ * The Xiaomi L11_fts_spi driver identifies the panel controller as chip ID
++ * 0x36:0x40, reads eight-byte events with command 0x87, and uses a dummy byte
++ * before returned data. This port polls the event FIFO over SPI6 and reports
++ * contacts through the existing SweetHID service. It does not reset the IC,
++ * change firmware or calibration, or enable PMIC rails.
++ *
++ * This port does not change PMIC rails, touch reset, firmware, or calibration.
++ * SPI6 clock and pin-mux handoff still need hardware validation before
++ * sweettouch=1 is enabled in a normal payload.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern void sweet_mark(uint32_t code, uint64_t a, uint64_t b);
++
++#define MTK_SPI6_PA             0x11016000u
++#define MTK_SPI_CFG1            0x004u
++#define MTK_SPI_TX_DATA         0x010u
++#define MTK_SPI_RX_DATA         0x014u
++#define MTK_SPI_CMD             0x018u
++#define MTK_SPI_STATUS0         0x01cu
++#define MTK_SPI_PAD_SEL         0x024u
++#define MTK_SPI_CFG2            0x028u
++#define MTK_SPI_CFG3            0x040u
++#define MTK_SPI_FIFO_SIZE       32u
++#define MTK_SPI_FINISH_INT_STATUS 0x1u
++#define MTK_SPI_PAUSE_INT_STATUS  0x2u
++
++#define MTK_SPI_CMD_ACT         (1u << 0)
++#define MTK_SPI_CMD_RST         (1u << 2)
++#define MTK_SPI_CMD_PAUSE_EN    (1u << 4)
++#define MTK_SPI_CMD_SAMPLE_SEL  (1u << 6)
++#define MTK_SPI_CMD_CPHA        (1u << 8)
++#define MTK_SPI_CMD_CPOL        (1u << 9)
++#define MTK_SPI_CMD_RX_DMA      (1u << 10)
++#define MTK_SPI_CMD_TX_DMA      (1u << 11)
++#define MTK_SPI_CMD_TXMSBF      (1u << 12)
++#define MTK_SPI_CMD_RXMSBF      (1u << 13)
++#define MTK_SPI_CMD_RX_ENDIAN   (1u << 14)
++#define MTK_SPI_CMD_TX_ENDIAN   (1u << 15)
++#define MTK_SPI_CMD_FINISH_IE   (1u << 16)
++#define MTK_SPI_CMD_PAUSE_IE    (1u << 17)
++#define MTK_SPI_CMD_NONIDLE     (1u << 19)
++#define MTK_SPI_CMD_SPIM_LOOP   (1u << 21)
++#define MTK_SPI_CMD_RESUME      (1u << 1)
++#define MTK_SPI_CMD_DEASSERT    (1u << 5)
++
++#define FTS_CMD_HW_REG_R        0xfbu
++#define FTS_ADDR_DCHIP_ID       0x20000000u
++#define FTS_CMD_FIFO_READ       0x87u
++#define FTS_DUMMY_BYTES         1u
++#define FTS_EVENT_SIZE          8u
++#define FTS_FIFO_DEPTH          32u
++#define FTS_CHIP_ID_0           0x36u
++#define FTS_CHIP_ID_1           0x40u
++#define FTS_MAX_FINGERS         10u
++#define FTS_RAW_X_MAX           14400u
++#define FTS_RAW_Y_MAX           32000u
++#define HID_PANEL_X             1080u
++#define HID_PANEL_Y             2400u
++
++/* sweettouchmark=1 writes probe/down/up records to the existing UFS mark block. */
++
++struct sweet_matisse_touch_state {
++	vm_offset_t spi;
++	bool started;
++	bool trace;
++	bool active[FTS_MAX_FINGERS];
++	int x[FTS_MAX_FINGERS];
++	int y[FTS_MAX_FINGERS];
++};
++
++static struct sweet_matisse_touch_state mt;
++static int mt_sleep_chan;
++
++static uint32_t
++mt_spi_rd(uint32_t off)
++{
++	__asm__ volatile("dmb oshld" ::: "memory");
++	uint32_t value = *(volatile uint32_t *)(mt.spi + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return value;
++}
++
++static void
++mt_spi_wr(uint32_t off, uint32_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(mt.spi + off) = value;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++mt_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&mt_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++mt_spi_reset(void)
++{
++	uint32_t cmd = mt_spi_rd(MTK_SPI_CMD);
++	mt_spi_wr(MTK_SPI_CMD, cmd | MTK_SPI_CMD_RST);
++	mt_spi_wr(MTK_SPI_CMD, cmd & ~MTK_SPI_CMD_RST);
++}
++
++/* One MT6983 FIFO transfer, mode 0, full duplex, at or below 12 MHz. */
++static int
++mt_spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned len)
++{
++	if (!mt.spi || !tx || !rx || len == 0 || len > MTK_SPI_FIFO_SIZE) {
++		return EINVAL;
++	}
++
++	mt_spi_reset();
++	/* STATUS0 has read-to-clear FINISH/PAUSE bits. */
++	(void)mt_spi_rd(MTK_SPI_STATUS0);
++	mt_spi_wr(MTK_SPI_PAD_SEL, 1u); /* SPI6_B, from the live device tree */
++	/* MT6983 enhanced timing: 9 parent-clock cycles per SCK half-period. */
++	mt_spi_wr(MTK_SPI_CFG2, 8u | (8u << 16));
++	uint32_t cfg1 = mt_spi_rd(MTK_SPI_CFG1);
++	cfg1 &= ~(0xffff0000u | 0x0000ff00u | 0x000000ffu);
++	cfg1 |= ((len - 1u) << 16) | 17u;
++	mt_spi_wr(MTK_SPI_CFG1, cfg1);
++	mt_spi_wr(MTK_SPI_CFG3, 0); /* IPM full-duplex transfer. */
++
++	uint32_t cmd = MTK_SPI_CMD_NONIDLE | MTK_SPI_CMD_TXMSBF | MTK_SPI_CMD_RXMSBF;
++	/* Match the Linux MT6983 driver: mode 0, CPU FIFO, one packet, no IRQ/DMA. */
++	cmd &= ~(MTK_SPI_CMD_SAMPLE_SEL | MTK_SPI_CMD_CPHA | MTK_SPI_CMD_CPOL |
++	    MTK_SPI_CMD_RX_DMA | MTK_SPI_CMD_TX_DMA | MTK_SPI_CMD_RX_ENDIAN |
++	    MTK_SPI_CMD_TX_ENDIAN | MTK_SPI_CMD_FINISH_IE | MTK_SPI_CMD_PAUSE_IE |
++	    MTK_SPI_CMD_SPIM_LOOP | MTK_SPI_CMD_DEASSERT | MTK_SPI_CMD_PAUSE_EN |
++	    MTK_SPI_CMD_ACT | MTK_SPI_CMD_RESUME);
++	mt_spi_wr(MTK_SPI_CMD, cmd);
++
++	for (unsigned i = 0; i < len; i += 4) {
++		uint32_t word = 0;
++		for (unsigned b = 0; b < 4 && i + b < len; ++b) {
++			word |= (uint32_t)tx[i + b] << (8u * b);
++		}
++		mt_spi_wr(MTK_SPI_TX_DATA, word);
++	}
++
++	mt_spi_wr(MTK_SPI_CMD, cmd | MTK_SPI_CMD_ACT);
++	bool done = false;
++	for (unsigned i = 0; i < 5000; ++i) {
++		if (mt_spi_rd(MTK_SPI_STATUS0) &
++		    (MTK_SPI_FINISH_INT_STATUS | MTK_SPI_PAUSE_INT_STATUS)) {
++			done = true;
++			break;
++		}
++		delay(1);
++	}
++	if (!done) {
++		mt_spi_reset();
++		return ETIMEDOUT;
++	}
++
++	(void)mt_spi_rd(MTK_SPI_STATUS0);
++	for (unsigned i = 0; i < len; i += 4) {
++		uint32_t word = mt_spi_rd(MTK_SPI_RX_DATA);
++		for (unsigned b = 0; b < 4 && i + b < len; ++b) {
++			rx[i + b] = (uint8_t)(word >> (8u * b));
++		}
++	}
++	mt_spi_wr(MTK_SPI_CMD, cmd | MTK_SPI_CMD_PAUSE_EN);
++	return 0;
++}
++
++static int
++mt_fts_read_id(uint8_t id[2])
++{
++	uint8_t tx[8] = {
++	    FTS_CMD_HW_REG_R,
++	    (uint8_t)(FTS_ADDR_DCHIP_ID >> 24),
++	    (uint8_t)(FTS_ADDR_DCHIP_ID >> 16),
++	    (uint8_t)(FTS_ADDR_DCHIP_ID >> 8),
++	    (uint8_t)FTS_ADDR_DCHIP_ID,
++	    0xff, 0xff, 0xff,
++	};
++	uint8_t rx[sizeof(tx)] = {0};
++	int err = mt_spi_xfer(tx, rx, sizeof(tx));
++	if (!err) {
++		id[0] = rx[6];
++		id[1] = rx[7];
++	}
++	return err;
++}
++
++static int
++mt_fts_read_event(uint8_t event[FTS_EVENT_SIZE])
++{
++	uint8_t tx[1 + FTS_DUMMY_BYTES + FTS_EVENT_SIZE];
++	uint8_t rx[sizeof(tx)];
++	memset(tx, 0xff, sizeof(tx));
++	memset(rx, 0, sizeof(rx));
++	tx[0] = FTS_CMD_FIFO_READ;
++	int err = mt_spi_xfer(tx, rx, sizeof(tx));
++	if (!err) {
++		memcpy(event, rx + 1 + FTS_DUMMY_BYTES, FTS_EVENT_SIZE);
++	}
++	return err;
++}
++
++static void
++mt_release_all(void)
++{
++	for (unsigned id = 0; id < FTS_MAX_FINGERS; ++id) {
++		if (mt.active[id]) {
++			sweet_hid_touch((int)id, 0, mt.x[id], mt.y[id]);
++			mt.active[id] = false;
++		}
++	}
++}
++
++static void
++mt_report_event(const uint8_t event[FTS_EVENT_SIZE])
++{
++	unsigned kind = event[0] >> 4;
++	unsigned id = event[1] >> 4;
++	unsigned type = event[1] & 0x0fu;
++	if (id >= FTS_MAX_FINGERS || type == 0x0fu) {
++		return;
++	}
++
++	if (kind == 1u || kind == 2u) { /* enter/motion */
++		unsigned raw_x = ((unsigned)event[3] << 8) | event[2];
++		unsigned raw_y = ((unsigned)event[5] << 8) | event[4];
++		if (raw_x >= FTS_RAW_X_MAX) raw_x = FTS_RAW_X_MAX - 1u;
++		if (raw_y >= FTS_RAW_Y_MAX) raw_y = FTS_RAW_Y_MAX - 1u;
++		mt.x[id] = (int)((uint64_t)raw_x * HID_PANEL_X / FTS_RAW_X_MAX);
++		mt.y[id] = (int)((uint64_t)raw_y * HID_PANEL_Y / FTS_RAW_Y_MAX);
++		if (kind == 1u && mt.trace) {
++			sweet_mark(97, ((uint64_t)id << 32) | raw_x, raw_y);
++		}
++		mt.active[id] = true;
++		sweet_hid_touch((int)id, 1, mt.x[id], mt.y[id]);
++	} else if (kind == 3u && mt.active[id]) { /* leave */
++		if (mt.trace) {
++			sweet_mark(98, ((uint64_t)id << 32) | (uint32_t)mt.x[id],
++			    (uint32_t)mt.y[id]);
++		}
++		sweet_hid_touch((int)id, 0, mt.x[id], mt.y[id]);
++		mt.active[id] = false;
++	}
++}
++
++static void
++mt_touch_thread(void *arg, wait_result_t result)
++{
++	(void)arg;
++	(void)result;
++	unsigned delay_s = 2;
++	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
++	if (delay_s > 30) delay_s = 30;
++	mt_wait(delay_s * 1000u);
++
++	uint8_t id[2] = {0};
++	int err = mt_fts_read_id(id);
++	uint32_t cfg1 = mt_spi_rd(MTK_SPI_CFG1);
++	uint32_t cfg2 = mt_spi_rd(MTK_SPI_CFG2);
++	printf("SWEET MT TOUCH: SPI6 probe err=%d id=%02x:%02x cfg1=%#x cfg2=%#x cmd=%#x status0=%#x\n",
++	    err, id[0], id[1], cfg1, cfg2, mt_spi_rd(MTK_SPI_CMD), mt_spi_rd(MTK_SPI_STATUS0));
++	if (mt.trace) {
++		sweet_mark(96, ((uint64_t)(uint32_t)err << 32) | ((uint64_t)id[0] << 8) | id[1],
++		    ((uint64_t)cfg1 << 32) | cfg2);
++	}
++	if (err || id[0] != FTS_CHIP_ID_0 || id[1] != FTS_CHIP_ID_1) {
++		printf("SWEET MT TOUCH: expected ST FTS ID 36:40; polling stopped\n");
++		goto out;
++	}
++
++	unsigned errors = 0;
++	while (true) {
++		uint8_t event[FTS_EVENT_SIZE] = {0};
++		err = mt_fts_read_event(event);
++		if (err) {
++			if (++errors == 10) {
++				mt_release_all();
++			}
++			if ((errors % 100u) == 1u) {
++				printf("SWEET MT TOUCH: FIFO read err=%d\n", err);
++			}
++		} else {
++			errors = 0;
++			if (event[0] != 0 && event[0] != 0xff) {
++				unsigned remaining = event[7] & 0x1fu;
++				mt_report_event(event);
++				if (remaining >= FTS_FIFO_DEPTH) remaining = FTS_FIFO_DEPTH - 1;
++				for (unsigned i = 0; i < remaining; ++i) {
++					uint8_t next[FTS_EVENT_SIZE] = {0};
++					if (mt_fts_read_event(next)) {
++						break;
++					}
++					if (next[0] == 0 || next[0] == 0xff) break;
++					mt_report_event(next);
++				}
++			}
++		}
++		mt_wait(5); /* 200 Hz FIFO polling; GPIO/EINT is a later optimization. */
++	}
++
++out:
++	mt_release_all();
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* Returns true for the MT6983 display profile, even when touch is disabled. */
++int
++sweet_matisse_touch_start(void)
++{
++	DTEntry display;
++	if (SecureDTLookupEntry(NULL, "/sweet-display", &display) != kSuccess) {
++		return 0;
++	}
++	if (mt.started) {
++		return 1;
++	}
++	int enabled = 0; /* MT6983 stays off until a user explicitly opts in. */
++	int trace = 0;
++	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
++	(void)PE_parse_boot_argn("sweettouchmark", &trace, sizeof(trace));
++	if (!enabled) {
++		mt.started = true;
++		printf("SWEET MT TOUCH: disabled (set sweettouch=1 to enable)\n");
++		return 1;
++	}
++	mt.trace = trace != 0;
++	if (!mt.spi) {
++		mt.spi = ml_io_map(MTK_SPI6_PA, 0x100u);
++	}
++	if (!mt.spi) {
++		printf("SWEET MT TOUCH: SPI6 mapping failed\n");
++		return 1;
++	}
++	thread_t thread;
++	kern_return_t kr = kernel_thread_start(mt_touch_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		mt.started = true;
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET MT TOUCH: kernel_thread_start failed %d\n", kr);
++	}
++	return 1;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */

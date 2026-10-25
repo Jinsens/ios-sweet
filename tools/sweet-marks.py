@@ -69,6 +69,9 @@ NAMES = {
     93: 'display: a=stride<<32|height b=pre-poll INTSTA',
     94: 'LK DSI: a=CON_CTRL b=TXRX_CTRL',
     95: 'LK DSI: a=CMDQ_SIZE b=CMDQ0',
+    96: 'touch SPI6 probe (a=error/id, b=CFG1/CFG2)',
+    97: 'touch down (a=finger/raw-x, b=raw-y)',
+    98: 'touch up (a=finger/panel-x, b=panel-y)',
     99: 'kernel build ID: a=build b=source line',
 }
 

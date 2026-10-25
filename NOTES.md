@@ -1,5 +1,44 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-25 (matisse touch): ST FTS/SPI6 driver prepared, hardware validation pending <<<
+
+**Device:** the user confirmed it is online in OrangeFox Recovery and available
+for debugging. Read-only preflight sees `recovery`, product `matisse`, slot
+`_a`, and `boot_a` SHA256
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+No partitions were written in this turn.
+
+**Measured touch path:** Recovery exposes input device `fts` at
+`/devices/platform/11016000.spi6/spi_master/spi6/spi6.0`, with module
+`fts_touch_spi`. Its log says screen-off turns touch sensing/IRQ off; firmware
+`st_fts_L11.ftb` is absent in Recovery, but the driver subsequently reports
+sense-on. Do not run firmware/reset/calibration writes from XNU.
+
+**Patch 0099:** add a read-only MT6983 SPI6 PIO poller, ST FTS chip-ID/FIFO
+reader, contact-to-SweetHID mapping, and start it before root selection so the
+RAM-disk path can receive touch too. `sweettouch` and `sweettouchmark` remain
+off by default; a diagnostic image can pass `sweettouch=1 sweettouchdelay=10
+sweettouchmark=1`. The last option records the probe and each down/up through
+the existing last-block boot-mark channel. It does not alter normal touch runs.
+The SPI register setup was corrected against the upstream MediaTek driver:
+enhanced SCK timing belongs in CFG2 and completion is STATUS0 FINISH/PAUSE,
+not STATUS1. The driver leaves chip reset, firmware, calibration and PMIC
+rails untouched; SPI6 clock/pin-mux handoff remains unverified.
+
+**Validation:** `tools/xnu-cc.py` using the 39158169212 CI compile log and
+`xnu/out/local` passed all 3 changed C files (0 failed). Patch 0099 replays
+exactly against the captured pre-touch sources for all 4 XNU files. No test
+suites or full kernel link have run. This Mac has Command Line Tools but no
+full Xcode/iig; use the GitHub `xnu` workflow for a complete kernel build.
+
+**Next:** build the committed patch, package a one-boot diagnostic image, then
+confirm before writing `boot_a` (per the destructive-step rule). Preserve the
+full backup and restore/hash verification from the existing runners. After
+hardware results, decide whether to enable Matisse touch by default. Keep
+unrelated worktree edits unstaged, including `shim/build.sh`, `shim/shim.c`,
+the untracked `xnu/patches/0093-sweet-log-readonly.patch`, `.DS_Store` and
+`.workbuddy/`.
+
 ## >>> ACTIVE 2026-10-25 (display): readable text with 0098; source fix validated <<<
 
 **Latest:** 0146 showed **full-screen green**, and 0150 showed **readable text**,
