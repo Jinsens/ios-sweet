@@ -46,9 +46,46 @@ mutexes; it is NOT a proven production refresh implementation. Original
 0097 sources/kernel are saved under `20261025-display-0131/`. Local Xcode
 16.4 builds succeeded; no new CI run. Latest committed code is `85269a5`.
 
-**Next:** 0140 retains 0139 and reads both OVL FLOW_CTRL_DBG registers after
-the green fill/refresh. Determine which path is stalled before varying the
-trigger ordering or the 15 ms stop. Keep source
+**0140 measured:** both primary and secondary OVL FLOW_CTRL_DBG are
+`0x08041020`: FSM processing, output valid=1, ready=0. Both are stalled by
+backpressure downstream, rather than one OVL simply not starting. Expected
+BRK, return 33.78 s, complete backup restoration verified. Image
+`a0c96f340041bee25d259244c07805130fd51e74866aeb407fd128de4fb4cc97`.
+The first preflight aborted without writes because the phone had moved to
+Fastboot; fbraw reboot-recovery succeeded before the verified test.
+
+**0141 measured:** DSI_STATE_DBG6 `0x10008` still means waiting for RDMA
+frame data, DSC_INTSTA `1` has DONE set (could include an earlier frame; it
+was not cleared before this probe). Expected BRK, return 32.87 s, boot_a
+restored/verified. Image
+`f0645c3d184ad96a430b1feba50593984ddcbd198fcbfd85652798ebba6b57a4`.
+
+**0142 measured:** skipping the initial refresh BL at `0xfffffe000747b6a0`
+was not sufficient to isolate one transfer: push count stayed 2 (another
+console caller triggered refresh). User saw only REDMI; DSI_INTSTA
+`0x80000004`, expected BRK, return 32.81 s, full boot_a restored.
+Image `736acd68853f5c313fcd673e7735486745ec151beddb1c967d9935683cb98dc6`.
+
+**0143 measured:** force==2 gate reduced pushes to exactly **1**, but
+DSI_INTSTA remained `0x80000004` and user saw only REDMI. Thus overlapping
+refreshes alone cannot explain this stall. Expected BRK, return
+33.78 s, full boot_a restoration verified. Image
+`4a5b36b1f8424a28f5012d025dde8f463526ee6fee1b827917ac4d4c891cc08d`.
+This diagnostic replaces only the invocation-counter prologue; readiness,
+throttle, locking and push count remain intact.
+
+**0144 measured:** vendor DSI engine reset before START did not resolve
+one-frame stall: pushes 1, INTSTA `0x80000004`, user saw only REDMI.
+Expected BRK, 33.79 s return, full boot_a restored/verified. Image
+`b48f413a27090040bfe0b8ec837c5c8d70c76e338cca60d4471f918fd76339fb`.
+The guarded reset detour used unused early-vector padding and replayed the
+displaced instruction; the reset did not touch PHY/panel controls.
+
+**Next:** 0145 uses the 0143 single-frame baseline (no 0144 reset) and reads
+primary MMSYS DL_VALID1 `+0xea0` and DL_READY1 `+0xeac`, to identify the
+handshake at DSC inputs/output and DSI input. Runner active; collect result
+and restoration before continuing. Image
+`254db51843c0c5218bd25de6a979213379fa8d7222b7147c3e77fa7b6bea705b`. Keep source
 experiments reproducible and do not reinstate the disproven PA cache-clean
 claim in the historical handoff below. User has authorized ongoing test
 boots; each trial uses the established full boot_a backup/restore procedure.
