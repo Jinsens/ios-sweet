@@ -1,10 +1,11 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (display): 0112 built and verified / hardware test authorized <<<
+## >>> ACTIVE 2026-10-25 (display): 0119 reaches vcattach; locating later stall <<<
 
 User now reports **stuck on REDMI logo**, not the older partial-frame symptom.
 Read-only check: device is `matisse`, Recovery, slot `_a`; full `boot_a`
-SHA256 matches the verified backup (`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`). No device partition has been written in this session.
+SHA256 matches the verified backup (`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`). This was the initial preflight; the authorized trials below temporarily replaced
+`boot_a` and restored its complete verified backup after every test.
 
 The last userdata mark block has 64 records, **no build-ID mark 99**, 4588
 refresh calls / 201 pushes, legacy mark 92 = 201 / 201, and reaches init exec
@@ -134,6 +135,32 @@ Build ID is now `0x2304`. 0095 was also corrected to retain the existing
 it); that change alone still does not bypass `ufs_write_blocks`' rw gate.
 New sources compiled successfully; 0096 patch replay matches both inputs.
 Next test: 0117, returning at `_load_init_program` (`0xfffffe00077dc0ac`).
+
+**0117 test FAIL:** image `6240fdc4d14180d5378bcb556e431d9b5aeb9262507df5541301ccc84a24fd93`
+did not return within 100 s. Boot_a restored and full hash verified. The
+allocator correction (commit `98c72a1`) is valid, but it is not sufficient to
+resolve the current stall. Build kernel SHA256
+`a8a9fd618078f44a946db52a1986483fb3531b8298dbed903df6969b67df9c5d`;
+normal payload `401562f6ca601a002582a48cb7a47d97caf9231d965fdc7095e4981f6261fb31`.
+Next 0118 breaks at `_PE_init_printf`, called just after PE_create_console,
+to check whether the first initialize_screen call returns.
+
+**0118 checkpoint PASS:** `_PE_init_printf` entry at `0xfffffe0007a5c664`
+with x0=0 confirms the first `initialize_screen` call **returned**. Thus the
+stall is later than initial console setup. Full boot_a restored/verified.
+Image `30b0a34ad5b06beca0de506bd72b2a56d1e4f795f0a9ad50681c4efde5d1aaa4`;
+artifacts in `research/matisse/20261025-display-0118/`. Next 0119 probes
+`vcattach`, where the video console is enabled after VM initialization.
+
+**0119 checkpoint PASS (recovered from the previous agent's saved result):**
+`_vcattach` entry at `0xfffffe00074579fc`, ESR `0xf2005357`, Recovery return
+29.58 s. Image SHA256 `4a10bd07ead6ac054eaa86112853016cbc93ecaef921f25b4a17eee4ca4fef8c`.
+The mark block is unchanged as expected before UFS. `trial-result.json`
+records full boot_a restoration to `2931647a...`; artifacts are in
+`research/matisse/20261025-display-0119/`. User subsequently reports Fastboot;
+next action is Recovery reboot/readback and 0120 at vcattach's common return
+(`0xfffffe0007457be4`) to determine whether enabling/replaying the console
+completes. No new kernel build or CI run is needed for that breakpoint.
 
 Next: use an earlier code breakpoint to locate the boot failure before the
 UFS mark channel. Do not infer a DSI hardware fault from the unchanged logo.
