@@ -1,12 +1,12 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (matisse touch): ST FTS/SPI6 driver prepared, hardware validation pending <<<
+## >>> ACTIVE 2026-10-26 (matisse touch): local Xcode build and diagnostic image ready <<<
 
 **Device:** the user confirmed it is online in OrangeFox Recovery and available
-for debugging. Read-only preflight sees `recovery`, product `matisse`, slot
-`_a`, and `boot_a` SHA256
+for debugging. Read-only preflight on 2026-10-26 sees `recovery`, product
+`matisse`, slot `_a`, and `boot_a` SHA256
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
-No partitions were written in this turn.
+No partitions or userdata mark records were written during this turn.
 
 **Measured touch path:** Recovery exposes input device `fts` at
 `/devices/platform/11016000.spi6/spi_master/spi6/spi6.0`, with module
@@ -27,17 +27,43 @@ rails untouched; SPI6 clock/pin-mux handoff remains unverified.
 
 **Validation:** `tools/xnu-cc.py` using the 39158169212 CI compile log and
 `xnu/out/local` passed all 3 changed C files (0 failed). Patch 0099 replays
-exactly against the captured pre-touch sources for all 4 XNU files. No test
-suites or full kernel link have run. This Mac has Command Line Tools but no
-full Xcode/iig; use the GitHub `xnu` workflow for a complete kernel build.
+exactly against the captured pre-touch sources for all 4 XNU files. The full
+local build succeeded with Xcode 16.4 (16F6):
+`DEVELOPER_DIR="$HOME/Downloads/Xcode.app/Contents/Developer" tools/build-xnu-local.sh xnu/out/local kernel`.
+Kernel is 16,705,944 bytes, SHA256
+`24d6f2c658a2d001fdd23c5f88cc3b283ff7bdbd4df52aa8c43bed131ce81d26`; the
+linked symbol table contains `sweet_matisse_touch_start` and
+`mt_touch_thread`. Xcode emitted optional-header/`strip --minimize` warnings,
+but the build ended `done building xnu` with status 0.
 
-**Next:** build the committed patch, package a one-boot diagnostic image, then
-confirm before writing `boot_a` (per the destructive-step rule). Preserve the
-full backup and restore/hash verification from the existing runners. After
-hardware results, decide whether to enable Matisse touch by default. Keep
-unrelated worktree edits unstaged, including `shim/build.sh`, `shim/shim.c`,
-the untracked `xnu/patches/0093-sweet-log-readonly.patch`, `.DS_Store` and
-`.workbuddy/`.
+**Diagnostic image:**
+`research/matisse/20261025-touch/matisse-xnu-touch-diagnostic.img`, 7,057,408
+bytes, SHA256
+`2690c88eb247e56ba88c8f736f45285e8314479b67a097c14e3e99c2d0d980de`.
+Payload SHA256 is
+`46de96c7285f87caca9417e5bc366fc44f28cc9080857599dcea6e6ef7076815`.
+The v4 image embeds that exact payload, retains the stock Recovery ramdisk
+and signature, and uses `sweettouch=1 sweettouchdelay=10 sweettouchmark=1`.
+The shim was rebuilt from `git archive HEAD` in an ignored staging directory,
+so the pre-existing local edits in `shim/` were not included. The dedicated
+`run-touch-test.py` has a read-only default; its preflight passed on the
+connected Recovery device and confirmed the full `boot_a` backup hash.
+
+No hardware touch result or CI build yet. The diagnostic run writes the image
+to `boot_a` and intentionally stores probe/down/up marks 96/97/98 in the
+existing last 4 KiB userdata mark block; preserve and restore full `boot_a`
+from the verified backup after the run. Run
+`python3 research/matisse/20261025-touch/run-touch-test.py --execute-approved`
+only after explicit user confirmation per the destructive-step rule. During
+the trial, the user should tap the screen for about 30 seconds after XNU boot
+begins so the event FIFO can be observed.
+
+**Next:** get that explicit confirmation, run the one-boot image, inspect the
+touch probe/contact marks and persistent console log, and restore/hash-verify
+`boot_a`. After hardware results, decide whether to enable Matisse touch by
+default. Keep unrelated worktree edits unstaged, including `shim/build.sh`,
+`shim/shim.c`, the untracked `xnu/patches/0093-sweet-log-readonly.patch`,
+`.DS_Store` and `.workbuddy/`.
 
 ## >>> ACTIVE 2026-10-25 (display): readable text with 0098; source fix validated <<<
 
