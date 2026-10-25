@@ -49,14 +49,27 @@ so the pre-existing local edits in `shim/` were not included. The dedicated
 `run-touch-test.py` has a read-only default; its preflight passed on the
 connected Recovery device and confirmed the full `boot_a` backup hash.
 
-No hardware touch result or CI build yet. The diagnostic run writes the image
-to `boot_a` and intentionally stores probe/down/up marks 96/97/98 in the
-existing last 4 KiB userdata mark block; preserve and restore full `boot_a`
-from the verified backup after the run. Run
-`python3 research/matisse/20261025-touch/run-touch-test.py --execute-approved`
-only after explicit user confirmation per the destructive-step rule. During
-the trial, the user should tap the screen for about 30 seconds after XNU boot
-begins so the event FIFO can be observed.
+**First hardware trial (2026-10-26):** the user explicitly authorized flashing
+and testing. The diagnostic image was written to `boot_a`; full partition
+readback matched expected image-plus-backup-tail SHA256
+`3f800eb357fa84f2cb12545232f7b7a043ca2964135acec69f61aa9fc2dcba47`. The
+runner did not see a changed Recovery boot ID within 180 s. It restored the
+full backup through ADB and verified
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`; current
+read-only check is Recovery, `matisse`, slot `_a`, same hash.
+
+The mark block grew from 63 to 69 records and reached root-mounted/init lookup
+and the known missing-init panic path, so the new XNU image ran. No touch probe
+or contact marks 96/97/98 were present, and the userdata console area had no
+`SWEETLOG` header. This does **not** distinguish a start/boot-arg/thread issue
+from an SPI access issue. The image carried `sweettouch=1`,
+`sweettouchdelay=10`, and `sweettouchmark=1`; the user tapped during the
+diagnostic window. Do not call this a touch-controller failure yet.
+
+No CI build. Next add a persisted stage marker for profile/argument parsing,
+thread creation/wakeup and SPI probe, then run another single-boot diagnostic
+with the same verified restore path. After a confirmed chip ID and input
+events, decide whether to enable Matisse touch by default.
 
 **Next:** get that explicit confirmation, run the one-boot image, inspect the
 touch probe/contact marks and persistent console log, and restore/hash-verify
