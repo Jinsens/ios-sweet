@@ -17,8 +17,9 @@ recorded build `0x2308`. In 0150 the user saw readable text; its runner did
 not detect a changed Recovery boot ID within 180 s, then restored `boot_a`
 through ADB and verified the full backup hash. A post-run read-only check
 confirmed Recovery, `matisse`, slot `_a`, and the same hash. The 0150 return
-timeout means its checkpoint was not independently verified. No new CI run.
-Commit the source, ADT and test changes; keep device dumps out of git.
+timeout means its checkpoint was not independently verified. Commit
+`d5b3146` contains the source, ADT and test changes. No new CI run. Device
+dumps remain outside git.
 
 **Measured:** DSC0 CON = `0x10089` selects two upstream display pipelines.
 DISPSYS1 at `0x14400000` is in the live FDT; 0137 read mutex MOD0 `0x7fff5`,
@@ -112,13 +113,13 @@ full boot_a restored/verified. Image
 `66d667144255438f6707ad306cb7c094677a35ff21bec1971459d7bca7ad565a`.
 No separate screen report was requested for this intermediate run.
 
-**Next:** commit the validated 0098 source/ADT/tests and this handoff. The
-display output is now confirmed readable during the source-build boot. If
-continuing into a full OS boot, first address the separate missing `launchd`
-test-root limitation; keep source experiments reproducible and do not
-reinstate the disproven PA cache-clean claim in the historical handoff below.
-User authorized test boots; each trial uses the established full `boot_a`
-backup/restore procedure.
+**Next:** if validating beyond the display, package a normal boot image using
+the committed 0098 source without the diagnostic wait skips. The display
+output is confirmed readable; a full OS boot still has the separate missing
+`launchd` test-root limitation. Keep source experiments reproducible and do
+not reinstate the disproven PA cache-clean claim in the historical handoff
+below. User authorized test boots; each trial uses the established full
+`boot_a` backup/restore procedure.
 
 User now reports **stuck on REDMI logo**, not the older partial-frame symptom.
 Read-only check: device is `matisse`, Recovery, slot `_a`; full `boot_a`
