@@ -1,0 +1,66 @@
+--- a/bsd/dev/sweet_matisse_touch.c
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -81,6 +81,7 @@
+ 	bool trace;
+ 	unsigned start_calls;
+ 	unsigned start_status;
++	volatile unsigned stage;
+ 	bool active[FTS_MAX_FINGERS];
+ 	int x[FTS_MAX_FINGERS];
+ 	int y[FTS_MAX_FINGERS];
+@@ -273,16 +274,21 @@
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	if (delay_s > 30) delay_s = 30;
+ 	mt_wait(delay_s * 1000u);
++	mt.stage = 2; /* delay expired; the worker reached SPI setup */
+ 	if (mt.trace) {
+ 		sweet_mark(88, delay_s, (uint64_t)mt.spi);
+ 	}
+ 
+ 	uint8_t id[2] = {0};
+ 	int err = mt_fts_read_id(id);
++	mt.stage = 3; /* chip-ID transfer returned */
+ 	uint32_t cfg1 = mt_spi_rd(MTK_SPI_CFG1);
+ 	uint32_t cfg2 = mt_spi_rd(MTK_SPI_CFG2);
++	uint32_t cmd = mt_spi_rd(MTK_SPI_CMD);
++	uint32_t status = mt_spi_rd(MTK_SPI_STATUS0);
++	mt.stage = 4; /* diagnostic register reads returned */
+ 	printf("SWEET MT TOUCH: SPI6 probe err=%d id=%02x:%02x cfg1=%#x cfg2=%#x cmd=%#x status0=%#x\n",
+-	    err, id[0], id[1], cfg1, cfg2, mt_spi_rd(MTK_SPI_CMD), mt_spi_rd(MTK_SPI_STATUS0));
++	    err, id[0], id[1], cfg1, cfg2, cmd, status);
+ 	if (mt.trace) {
+ 		sweet_mark(96, ((uint64_t)(uint32_t)err << 32) | ((uint64_t)id[0] << 8) | id[1],
+ 		    ((uint64_t)cfg1 << 32) | cfg2);
+@@ -348,7 +354,8 @@
+ 	if (mt.started) {
+ 		if (invocation != 0 && (enabled || trace || mt.trace)) {
+ 			sweet_mark(89, ((uint64_t)(uint32_t)enabled << 32) | (uint32_t)trace,
+-			    ((uint64_t)mt.start_status << 32) | invocation);
++			    ((uint64_t)mt.start_status << 48) |
++			    ((uint64_t)(invocation & 0xffffu) << 32) | mt.stage);
+ 		}
+ 		return 1;
+ 	}
+@@ -368,18 +375,21 @@
+ 		return 1;
+ 	}
+ 	thread_t thread;
++	mt.stage = 1; /* creation accepted; worker may still be queued */
+ 	kern_return_t kr = kernel_thread_start(mt_touch_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		mt.started = true;
+ 		mt.start_status = 4; /* kernel thread started */
+ 		thread_deallocate(thread);
+ 	} else {
++		mt.stage = 0;
+ 		mt.start_status = 3; /* thread creation failed */
+ 		printf("SWEET MT TOUCH: kernel_thread_start failed %d\n", kr);
+ 	}
+ 	if (invocation != 0 && (enabled || trace)) {
+ 		sweet_mark(89, ((uint64_t)(uint32_t)enabled << 32) | (uint32_t)trace,
+-		    ((uint64_t)mt.start_status << 32) | invocation);
++		    ((uint64_t)mt.start_status << 48) |
++		    ((uint64_t)(invocation & 0xffffu) << 32) | mt.stage);
+ 	}
+ 	return 1;
+ }
