@@ -1,0 +1,82 @@
+--- a/bsd/dev/sweet_matisse_touch.c
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -79,6 +79,8 @@
+ 	vm_offset_t spi;
+ 	bool started;
+ 	bool trace;
++	unsigned start_calls;
++	unsigned start_status;
+ 	bool active[FTS_MAX_FINGERS];
+ 	int x[FTS_MAX_FINGERS];
+ 	int y[FTS_MAX_FINGERS];
+@@ -271,6 +273,9 @@
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	if (delay_s > 30) delay_s = 30;
+ 	mt_wait(delay_s * 1000u);
++	if (mt.trace) {
++		sweet_mark(88, delay_s, (uint64_t)mt.spi);
++	}
+ 
+ 	uint8_t id[2] = {0};
+ 	int err = mt_fts_read_id(id);
+@@ -328,18 +333,28 @@
+ sweet_matisse_touch_start(void)
+ {
+ 	DTEntry display;
+-	if (SecureDTLookupEntry(NULL, "/sweet-display", &display) != kSuccess) {
+-		return 0;
+-	}
+-	if (mt.started) {
+-		return 1;
+-	}
+-	int enabled = 0; /* MT6983 stays off until a user explicitly opts in. */
++	int enabled = 0;
+ 	int trace = 0;
++	unsigned invocation = mt.start_calls++;
+ 	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("sweettouchmark", &trace, sizeof(trace));
++	if (SecureDTLookupEntry(NULL, "/sweet-display", &display) != kSuccess) {
++		if (invocation != 0 && (enabled || trace)) {
++			sweet_mark(89, ((uint64_t)(uint32_t)enabled << 32) | (uint32_t)trace,
++			    invocation);
++		}
++		return 0;
++	}
++	if (mt.started) {
++		if (invocation != 0 && (enabled || trace || mt.trace)) {
++			sweet_mark(89, ((uint64_t)(uint32_t)enabled << 32) | (uint32_t)trace,
++			    ((uint64_t)mt.start_status << 32) | invocation);
++		}
++		return 1;
++	}
+ 	if (!enabled) {
+ 		mt.started = true;
++		mt.start_status = 1; /* disabled */
+ 		printf("SWEET MT TOUCH: disabled (set sweettouch=1 to enable)\n");
+ 		return 1;
+ 	}
+@@ -348,6 +363,7 @@
+ 		mt.spi = ml_io_map(MTK_SPI6_PA, 0x100u);
+ 	}
+ 	if (!mt.spi) {
++		mt.start_status = 2; /* SPI6 register mapping failed */
+ 		printf("SWEET MT TOUCH: SPI6 mapping failed\n");
+ 		return 1;
+ 	}
+@@ -355,10 +371,16 @@
+ 	kern_return_t kr = kernel_thread_start(mt_touch_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		mt.started = true;
++		mt.start_status = 4; /* kernel thread started */
+ 		thread_deallocate(thread);
+ 	} else {
++		mt.start_status = 3; /* thread creation failed */
+ 		printf("SWEET MT TOUCH: kernel_thread_start failed %d\n", kr);
+ 	}
++	if (invocation != 0 && (enabled || trace)) {
++		sweet_mark(89, ((uint64_t)(uint32_t)enabled << 32) | (uint32_t)trace,
++		    ((uint64_t)mt.start_status << 32) | invocation);
++	}
+ 	return 1;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

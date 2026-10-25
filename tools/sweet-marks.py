@@ -64,6 +64,8 @@ NAMES = {
     65: 'load_init_program_at_path entry',
     86: 'display refresh: a=calls b=pushes',
     87: 'legacy display white probe',
+    88: 'touch thread woke (a=delay seconds, b=SPI virtual address)',
+    89: 'touch init re-entry (a=enabled|trace, b=status|call count)',
     90: 'console mapping: a=VA b=physical address',
     91: 'console PAR: a=first pixel b=last pixel',
     93: 'display: a=stride<<32|height b=pre-poll INTSTA',
