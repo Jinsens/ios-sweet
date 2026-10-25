@@ -1,0 +1,130 @@
+--- a/osfmk/arm64/sweet_matisse_dsi.c
++++ b/osfmk/arm64/sweet_matisse_dsi.c
+@@ -3,7 +3,9 @@
+  *
+  * Register map and sequence were measured on the attached K50 Pro at LK
+  * handoff and validated by a shim entry probe that made the panel show new
+- * frames (2026-10-22). Vendor reference: Xiaomi_Kernel_OpenSource
++ * frames (2026-10-22). Both upstream pipelines are required; primary-first
++ * mutex ordering was verified with a full green frame on 2026-10-25.
++ * Vendor reference: Xiaomi_Kernel_OpenSource
+  * rubens-s-oss drivers/gpu/drm/mediatek/mediatek_v2/{mtk_dsi.c,mtk_drm_ddp.c,
+  * mtk_disp_ovl.c} and drivers/clk/mediatek/clk-mt6983-mm.c.
+  *
+@@ -20,7 +22,8 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/device_tree.h>
+ 
+-/* One register window covers clock gates, mutex, OVL0_2L and DSI0. */
++/* Primary window covers clocks, mutex, OVL0_2L, DSC0 and DSI0.
++ * The optional secondary window supplies the right half of the frame. */
+ #define DISP_WINDOW_MIN		0x18000u
+ 
+ #define DISP_CLK_STA0		0x100u	/* bit=1: gated, bit=0: enabled */
+@@ -44,6 +47,9 @@
+ #define OVL_EN			(DISP_OVL0_2L + 0x0cu)
+ #define OVL_L0_PITCH		(DISP_OVL0_2L + 0x44u)
+ #define OVL_L0_ADDR		(DISP_OVL0_2L + 0xf40u)
++
++#define DISP_DSC0		0x15000u
++#define DSC_IN_SRC_SEL		(1u << 3)
+ 
+ #define DISP_DSI0		0x17000u
+ #define DSI_START		(DISP_DSI0 + 0x00u)
+@@ -73,7 +79,7 @@
+ #define EXPECT_SIZE_CON		((3200u << 16) | 480u)
+ #define EXPECT_VACT		3200u
+ 
+-static uintptr_t disp_base;
++static uintptr_t disp_base, disp_secondary_base;
+ static uint32_t disp_con_ctrl;
+ static uint64_t disp_last;
+ static int disp_ready;
+@@ -115,6 +121,19 @@
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++static uint32_t
++secondary_read(uint32_t off)
++{
++	return *(volatile uint32_t *)(disp_secondary_base + off);
++}
++
++static void
++secondary_write(uint32_t off, uint32_t value)
++{
++	*(volatile uint32_t *)(disp_secondary_base + off) = value;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ /* Darwin ARM64 treats semicolons as comments: separate instructions with
+  * newlines so the timebase read is emitted, including in polling loops. */
+ static uint64_t
+@@ -144,6 +163,7 @@
+ 	uint32_t ovl_en, ovl_addr, ovl_pitch, intsta;
+ 
+ 	disp_ready = 0;
++	disp_secondary_base = 0;
+ 	sweet_disp_trace[0] = 1;
+ 	sweet_disp_trace[1] = (width << 16) | (height & 0xffff);
+ 	sweet_disp_trace[2] = stride;
+@@ -227,6 +247,31 @@
+ 		sweet_disp_trace[0] = 9;
+ 	}
+ 
++	/* DSC_IN_SRC_SEL uses both 720-pixel display pipelines. LK leaves
++	 * the right pipeline configured but stopped; it needs its own mutex. */
++	if (disp_read(DISP_DSC0) & DSC_IN_SRC_SEL) {
++		if (SecureDTGetProperty(entry, "secondary-reg", (void const **)&reg,
++		    &size) != kSuccess || size < 16 || !reg[0] ||
++		    (reg[0] & 3) || reg[1] < 0x5000 || (width & 1)) {
++			sweet_disp_trace[0] = 10;
++			return;
++		}
++		disp_secondary_base = ml_io_map(reg[0], reg[1]);
++		if (!disp_secondary_base) {
++			sweet_disp_trace[0] = 11;
++			return;
++		}
++		if ((secondary_read(DISP_CLK_STA0) & GATE0_MUTEX) ||
++		    (secondary_read(DISP_CLK_STA1) & GATE1_OVL0_2L) ||
++		    !(secondary_read(OVL_EN) & 1) ||
++		    secondary_read(OVL_L0_ADDR) != (uint32_t)(fb_phys + width * 2) ||
++		    secondary_read(OVL_L0_PITCH) != stride) {
++			sweet_disp_trace[0] = 12;
++			disp_secondary_base = 0;
++			return;
++		}
++	}
++
+ 	disp_con_ctrl = ctl | DSI_EN | DSI_CM_WAIT_DATA_LINE_EN |
+ 	    DSI_CM_WAIT_FIFO_FULL_EN;
+ 	disp_write(DSI_PHY_LCPAT, 0x55);
+@@ -291,7 +336,16 @@
+ 	 * the physical framebuffer after TTBR0 has been removed. */
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	disp_write(MUTEX_EN, 0);
++	if (disp_secondary_base) {
++		secondary_write(MUTEX_EN, 0);
++	}
++	/* MT6983: start the primary path before the secondary. Reversing
++	 * these writes stalls both OVL outputs and leaves DSI waiting for
++	 * data. This ordering completed a full frame on matisse (0146). */
+ 	disp_write(MUTEX_EN, 1);
++	if (disp_secondary_base) {
++		secondary_write(MUTEX_EN, 1);
++	}
+ 	disp_write(DSI_START, 0);
+ 	disp_write(DSI_START, 1);
+ 	sweet_disp_pushes++;
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -594,7 +594,7 @@
+ #define SWEET_MARK_MAX  96
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x2305u
++#define SWEET_BUILD_ID 0x2308u
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;

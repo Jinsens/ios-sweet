@@ -1,14 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (display): dual pipeline shows partial frame; 0139 green test <<<
+## >>> ACTIVE 2026-10-25 (display): readable text with 0098; source fix validated <<<
 
-**Latest user observation:** 0138 showed content at the top and blocks/garbage
-below. This is the first confirmed visible change in the current 0112+ series.
-0139 completed automatically; the user missed the first run. The identical
-image was repeated in `20261025-display-0139/repeat-01/`: user saw only REDMI,
-DSI_INTSTA again `0x80000004`, 2 pushes, expected BRK, 32.96 s return,
-full boot_a restore verified. Thus the early-dual sequence does NOT reproduce
-0138's visible partial frame. Do not conflate their screen observations.
+**Latest:** 0146 showed **full-screen green**, and 0150 showed **readable text**,
+both confirmed by the user. Root cause: the primary mutex must start before
+the secondary. Reversed order (0139+) stalls both OVL outputs. Earlier partial
+frame in 0138 came from its different, delayed secondary start; it was not the
+0139 result. 0147 also completed two normal refreshes with DSI_INTSTA `0x6`.
+
+Patch `0098-matisse-dual-pipeline-refresh.patch` and mkadt's secondary-reg
+are prepared. Local source/kernel now contain 0098, build `0x2308`; Xcode
+16.4 build succeeded, 24 targeted tests passed, both changed kernel files
+replay exactly. 0148 source-build reached its BRK in 32.71 s with status
+`0x16` and two pushes. 0149 reached `_load_init_program` in 70.34 s and
+recorded build `0x2308`. In 0150 the user saw readable text; its runner did
+not detect a changed Recovery boot ID within 180 s, then restored `boot_a`
+through ADB and verified the full backup hash. A post-run read-only check
+confirmed Recovery, `matisse`, slot `_a`, and the same hash. The 0150 return
+timeout means its checkpoint was not independently verified. No new CI run.
+Commit the source, ADT and test changes; keep device dumps out of git.
 
 **Measured:** DSC0 CON = `0x10089` selects two upstream display pipelines.
 DISPSYS1 at `0x14400000` is in the live FDT; 0137 read mutex MOD0 `0x7fff5`,
@@ -35,16 +45,16 @@ No new UFS marks are expected (the probes stop at UFS entry).
   `869099f462e084925ade3e9afd678294bc3724192c99c4013bb59c092d706560`.
   BUSY remains set, so frame completion is not established.
 
-**Local tree warning:** `xnu/out/local/xnu` and its kernel now contain
-uncommitted diagnostics from 0131 AND 0139 (build `0x2307`), not committed
-0097. Kernel SHA256 `076c80fa66a83f8ecb6062ee4c4d4839d14f459773c25e1ba7b4a7227c352bdf`.
-0139's `diagnostic-source.diff`, `before/`, ADT, build commands and
-host-validation.json preserve the exact experiment. Its ADT has a local
-`secondary-reg` property absent from tools/mkadt.py. The current sequence
-waits for TE then unconditionally triggers, waits 15 ms, and stops both
-mutexes; it is NOT a proven production refresh implementation. Original
-0097 sources/kernel are saved under `20261025-display-0131/`. Local Xcode
-16.4 builds succeeded; no new CI run. Latest committed code is `85269a5`.
+**Source/artifact lineage:** the old 0131/0139 diagnostic source and 0x2307
+kernel are preserved in `20261025-display-0148/before/` and
+`kernel-before-0148.development.sweet`. The current 0098 is based on 0097's
+bounded BUSY poll/throttle, with validated secondary mapping and primary-
+before-secondary triggering; it does not include the unconditional TE/rearm
+loop or fixed 15 ms stop. 0148 preserves the unchanged RTC/IOBSD diagnostic
+wait skips and green probe separately in payloads, not production source.
+The unmodified kernel and ADT are packaged as `matisse-xnu-0148-dual.payload`.
+The project still lacks launchd in its test root; this display task does not
+install userland.
 
 **0140 measured:** both primary and secondary OVL FLOW_CTRL_DBG are
 `0x08041020`: FSM processing, output valid=1, ready=0. Both are stalled by
@@ -81,14 +91,34 @@ Expected BRK, 33.79 s return, full boot_a restored/verified. Image
 The guarded reset detour used unused early-vector padding and replayed the
 displaced instruction; the reset did not touch PHY/panel controls.
 
-**Next:** 0145 uses the 0143 single-frame baseline (no 0144 reset) and reads
-primary MMSYS DL_VALID1 `+0xea0` and DL_READY1 `+0xeac`, to identify the
-handshake at DSC inputs/output and DSI input. Runner active; collect result
-and restoration before continuing. Image
-`254db51843c0c5218bd25de6a979213379fa8d7222b7147c3e77fa7b6bea705b`. Keep source
-experiments reproducible and do not reinstate the disproven PA cache-clean
-claim in the historical handoff below. User has authorized ongoing test
-boots; each trial uses the established full boot_a backup/restore procedure.
+**0145 no checkpoint observed:** the MMSYS VALID1/READY1 probe did not
+return; Fastboot was detected at about 100 s. SIGTERM invoked the runner's
+finally restoration; full boot_a restored and verified. No register values
+were obtained. Do not infer a specific hardware fault from this trial.
+
+**BREAKTHROUGH 0146 — user confirms FULL GREEN:** changing just the order of
+the two MUTEX_EN=1 writes (primary first, secondary second, as in vendor
+mtk_disp_mutex_enable_cmdq) makes DSI_INTSTA `0x6`: BUSY clears, CMD_DONE set.
+Exactly 1 push, expected BRK, return 32.72 s, full boot_a restored.
+Image `3f7fc2f18ef20734c1efc6c5d6bffbb2c39ace8d8d7342f27380daea0da73e34`.
+This is a controlled two-instruction change from 0143 (no DSI reset): swap
+the two MMIO-base loads at `0xfffffe000747b970` and `0xfffffe000747b980`.
+The binary swap is valid only for the validated dual pipeline; do not ship
+it as general driver code. The production source must implement primary
+before secondary explicitly and preserve the single-pipeline branch.
+
+**0147 repeated-frame result:** expected BRK, DSI_INTSTA `0x6`, pushes 2,
+full boot_a restored/verified. Image
+`66d667144255438f6707ad306cb7c094677a35ff21bec1971459d7bca7ad565a`.
+No separate screen report was requested for this intermediate run.
+
+**Next:** commit the validated 0098 source/ADT/tests and this handoff. The
+display output is now confirmed readable during the source-build boot. If
+continuing into a full OS boot, first address the separate missing `launchd`
+test-root limitation; keep source experiments reproducible and do not
+reinstate the disproven PA cache-clean claim in the historical handoff below.
+User authorized test boots; each trial uses the established full `boot_a`
+backup/restore procedure.
 
 User now reports **stuck on REDMI logo**, not the older partial-frame symptom.
 Read-only check: device is `matisse`, Recovery, slot `_a`; full `boot_a`

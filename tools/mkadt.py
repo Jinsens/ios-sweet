@@ -246,6 +246,8 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         ph(),
         ('compatible', cstr('mediatek,mt6983-dsi')),
         ('reg', u64(0x14000000, 0x18000)),
+        # Right-half OVL and mutex, verified against the matisse live FDT.
+        ('secondary-reg', u64(0x14400000, 0x8000)),
         ('panel', cstr('l11_38_0a_0a_dsc_cmd')),
     ])]
 

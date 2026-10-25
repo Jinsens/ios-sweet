@@ -19,7 +19,8 @@ class RefreshTests(unittest.TestCase):
             work = Path(tmp)
             for patch in ('0083-matisse-command-mode-refresh.patch',
                           '0095-matisse-display-mapping-and-marks.patch',
-                          '0097-sweet-darwin-asm-newlines.patch'):
+                          '0097-sweet-darwin-asm-newlines.patch',
+                          '0098-matisse-dual-pipeline-refresh.patch'):
                 subprocess.run(['git', 'apply',
                                 '--include=osfmk/arm64/sweet_matisse_dsi.c',
                                 str(ROOT / 'xnu/patches' / patch)], cwd=work, check=True)
@@ -38,6 +39,7 @@ class RefreshTests(unittest.TestCase):
 #define DSI_START 0x17000
 static uint64_t ticks = 1000, disp_last;
 static int disp_ready = 1, disp_busy;
+static uintptr_t disp_secondary_base;
 static uint32_t sweet_disp_calls, sweet_disp_pushes, sweet_disp_busy_skips;
 static uint32_t sweet_disp_status, sweet_disp_status_before, status;
 static uint32_t offsets[32], values[32], writes;
@@ -46,6 +48,10 @@ static uint64_t disp_frequency(void) { return 1000000; }
 static uint32_t disp_read(uint32_t off) { assert(off == DSI_INTSTA); return status; }
 static void disp_write(uint32_t off, uint32_t val) {
     assert(writes < 32); offsets[writes] = off; values[writes++] = val;
+}
+static void secondary_write(uint32_t off, uint32_t val) {
+    assert(disp_secondary_base && off == MUTEX_EN);
+    disp_write(0x100000 | off, val);
 }
 void sweet_display_refresh(int force)
 ''' + function + r'''
@@ -83,6 +89,28 @@ int main(void) {
     disp_ready = 0;
     sweet_display_refresh(1);
     assert(writes == 12);
+    /* Hardware trial 0146: the right path must start after the left.
+     * Preserve that ordering on repeated frames and skip BOTH while busy. */
+    disp_ready = 1;
+    disp_secondary_base = 1;
+    writes = 0;
+    sweet_display_refresh(1);
+    assert(writes == 6);
+    assert(offsets[0] == MUTEX_EN && values[0] == 0);
+    assert(offsets[1] == (0x100000 | MUTEX_EN) && values[1] == 0);
+    assert(offsets[2] == MUTEX_EN && values[2] == 1);
+    assert(offsets[3] == (0x100000 | MUTEX_EN) && values[3] == 1);
+    assert(offsets[4] == DSI_START && values[4] == 0);
+    assert(offsets[5] == DSI_START && values[5] == 1);
+    status = DSI_INT_BUSY;
+    sweet_display_refresh(1);
+    assert(writes == 6);
+    status = 0;
+    sweet_display_refresh(1);
+    assert(writes == 12);
+    for (int i = 0; i < 6; i++) {
+        assert(offsets[i] == offsets[i+6] && values[i] == values[i+6]);
+    }
     puts("refresh contracts passed");
 }
 '''
