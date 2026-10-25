@@ -1,18 +1,57 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-25 (display): asm bug fixed; DSI waiting for upstream frame data <<<
+## >>> ACTIVE 2026-10-25 (display): dual pipeline shows partial frame; 0139 green test <<<
 
-Latest: commit `85269a5` fixes Darwin inline assembly losing timer/PAR/SMC
-instructions after semicolons. 0128 now reaches UFS; 0129 mounted root and
-persisted build 0x2305 marks through pre-init-exec. Display is still REDMI.
-0130 proved BUSY persists; 0131/0132 re-arm/solid-green experiments did not
-show pixels. 0133 decoded DSI CMCTL state 0x8: waiting for RDMA frame data.
-0134 is testing OVL FLOW_CTRL/ADDCON/RDMA0 debug registers (same green-fill
-probe). All completed trials restored and verified full boot_a `2931647a...`.
-**Local tree warning:** `xnu/out/local/xnu` and its kernel currently contain
-0131's uncommitted diagnostic refresh (build 0x2306); committed 0097 sources
-are saved in `research/matisse/20261025-display-0131/before/`, kernel there
-as `kernel-before-0131.development.sweet`. No new CI run this session.
+**Latest user observation:** 0138 showed content at the top and blocks/garbage
+below. This is the first confirmed visible change in the current 0112+ series.
+0139 completed automatically; the user missed the first run. The identical
+image was repeated in `20261025-display-0139/repeat-01/`: user saw only REDMI,
+DSI_INTSTA again `0x80000004`, 2 pushes, expected BRK, 32.96 s return,
+full boot_a restore verified. Thus the early-dual sequence does NOT reproduce
+0138's visible partial frame. Do not conflate their screen observations.
+
+**Measured:** DSC0 CON = `0x10089` selects two upstream display pipelines.
+DISPSYS1 at `0x14400000` is in the live FDT; 0137 read mutex MOD0 `0x7fff5`,
+OVL_EN `0xe00001`, right OVL address `0xfcb3fb40` (= left + 720*4), pitch
+`0x1680`. 0138 enabled its mutex before the primary refresh and produced the
+user-visible partial frame. This establishes that the second pipeline matters;
+it does not yet establish why the rest of the frame is corrupt.
+
+**0135-0139 recovered results:** all hit the expected BRK and restored the
+full boot_a backup, SHA256 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+No new UFS marks are expected (the probes stop at UFS entry).
+- 0135: 32-bit MMIO reads returned OVL FLOW_CTRL `0x08041020`, RDMA0_DBG
+  `0x201fe001`; return 32.87 s; image `3a71dfd1f5500afcd76f17dc47e1356aff22b88304f0e91fcaec5a408d3904ef`.
+- 0136: RDMA global `0x101`, DSC CON `0x10089`; return 33.79 s; image
+  `324164a3aae98274f444a87224b462562c0ad1cafd10e72ff9acff998782f80c`.
+- 0137: secondary register readback above; return 32.77 s; image
+  `39e069dfaa2c03cd2e7ea722d8072281b7eaa658aa3fdccbad26d6922e688ba4`.
+- 0138: partial frame; DSI_INTSTA `0x80000006`, secondary OVL FLOW_CTRL
+  `0xc8c02`; return 94.84 s; image
+  `2915b582a373e54ba741cec897121813857dd5d2ea567bbaca9af9d32adf3bf5`.
+- 0139: both mutexes triggered from the first refresh, then all 1440*3200
+  pixels filled green before a forced refresh. DSI_INTSTA `0x80000004`,
+  pushes 2; return 32.78 s; image
+  `869099f462e084925ade3e9afd678294bc3724192c99c4013bb59c092d706560`.
+  BUSY remains set, so frame completion is not established.
+
+**Local tree warning:** `xnu/out/local/xnu` and its kernel now contain
+uncommitted diagnostics from 0131 AND 0139 (build `0x2307`), not committed
+0097. Kernel SHA256 `076c80fa66a83f8ecb6062ee4c4d4839d14f459773c25e1ba7b4a7227c352bdf`.
+0139's `diagnostic-source.diff`, `before/`, ADT, build commands and
+host-validation.json preserve the exact experiment. Its ADT has a local
+`secondary-reg` property absent from tools/mkadt.py. The current sequence
+waits for TE then unconditionally triggers, waits 15 ms, and stops both
+mutexes; it is NOT a proven production refresh implementation. Original
+0097 sources/kernel are saved under `20261025-display-0131/`. Local Xcode
+16.4 builds succeeded; no new CI run. Latest committed code is `85269a5`.
+
+**Next:** 0140 retains 0139 and reads both OVL FLOW_CTRL_DBG registers after
+the green fill/refresh. Determine which path is stalled before varying the
+trigger ordering or the 15 ms stop. Keep source
+experiments reproducible and do not reinstate the disproven PA cache-clean
+claim in the historical handoff below. User has authorized ongoing test
+boots; each trial uses the established full boot_a backup/restore procedure.
 
 User now reports **stuck on REDMI logo**, not the older partial-frame symptom.
 Read-only check: device is `matisse`, Recovery, slot `_a`; full `boot_a`
