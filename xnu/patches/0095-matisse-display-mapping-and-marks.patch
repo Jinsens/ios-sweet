@@ -301,23 +301,6 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	return 0;
  }
  
-@@ -1129,15 +1231,7 @@
- 	thread_t thread;
- 
- 	PE_parse_boot_argn("sweetlog", &on, sizeof(on));
--	/*
--	 * The ring is flushed with raw block writes to the last 4 MiB + 4 KiB
--	 * of the partition, so a read-only userdata (ufsrw=0) can still keep
--	 * the console: the VFS stays read-only, the mount cannot write, and
--	 * nothing above that area is touched. Without this the only console
--	 * on this board is the dark framebuffer, so a hung bring-up leaves no
--	 * evidence at all.
--	 */
--	if (!on || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
-+	if (!on || !su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
- 		return;
- 	}
- 	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c

@@ -28,7 +28,7 @@ at `research/matisse/20261025-display-0112/before-marks.bin`, SHA256
 - 0111 updates the refresh throttle only on success; a stuck BUSY retries the
   20 ms wait on every character. Throttle failed attempts too.
 
-**Completed (local build; no new CI run):** patch
+**Completed (commit `d56e16f`, local build; no new CI run):** patch
 `0095-matisse-display-mapping-and-marks.patch` saves the prior untracked
 USB/root progress marks plus the display fixes in git. Framebuffer aliases
 now explicitly use WCOMB for SWEET; no PA-based cache operation remains.
@@ -75,9 +75,70 @@ avoiding the old immediate-ADB-return race. Preserve trial-result.json,
 marks and dmesg locally; do not commit device dumps. On failure to return,
 it waits for manual FASTBOOT and restores the verified backup.
 
-**Unfinished:** run the authorized trial, verify build 0x2303 and expected
-BRK, interpret mapping/DSI marks, get the user's screen observation, restore
-and re-verify boot_a. A normal XNU boot still has no `/sbin/launchd`.
+**0112 hardware result (FAILED to reach checkpoint):** user saw only the
+REDMI logo. No automatic Recovery return within 100 s. The device appeared
+in Fastboot during restoration; full backup flash succeeded, first
+`reboot recovery` failed, explicit retry succeeded. Recovery then confirmed
+full boot_a SHA256 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+The mark block is byte-identical to before (`aef91eb4...`), still no build ID.
+Thus there is **no evidence 0112 reached UFS init**. The SWEET-ENTRY display
+record in recovered dmesg belongs to the restored backup, not this probe.
+Trial artifacts: `trial-result.json`, `trial-after-marks.bin/.txt`,
+`trial-dmesg.txt`. Written partition hash was
+`eefab04a2e9f8467cf6ffec9079a5689b289134bfe33d116532c2b00770f8374`.
+
+**0113 checkpoint PASS:** BRK at display init entry
+`0xfffffe000747b3cc` / PA `0x10147b3cc` hit with ESR `0xf2005357`.
+Returned to Recovery in 29.57 s; full boot_a restored/verified. Image
+`research/matisse/20261025-display-0113/entryprobe-el1-xnu-0113-display-entry-brk.img`
+SHA256 `5d66e6dc9aef045726c394d5cb93ecc99edd4bfe52ac203780cea3e077a88c74`.
+Thus 0112's boot path reaches the display driver's entry. No new marks are
+expected because this checkpoint is before UFS. Next probe 0114 is at
+`_initialize_screen` entry, after serial/display initialization.
+
+**0114 checkpoint PASS:** `_initialize_screen` at `0xfffffe0007455354`
+hit with ESR `0xf2005357`; returned in 29.56 s, boot_a restored/verified.
+Image SHA256 `d5f344680a638367d80c83d0a4da7beadebd50d98f5473092ea4e78af2fe4330`,
+artifacts in `research/matisse/20261025-display-0114/`. This proves the DSI
+init/first refresh returned. Next 0115 catches `_panic_trap_to_debugger`
+entry so the panic format pointer can name the failure inside/after console
+initialization, instead of merely timing out waiting for root init.
+
+**0115 panic-entry probe did not return** within 100 s; boot_a restored and
+verified through Fastboot/Recovery. Image `a9fa4e6902d00d7d10414a450d29e49b2735d41dc68a0423ddc638ac112ff277`;
+artifacts in `research/matisse/20261025-display-0115/`. This alone does not
+prove absence of a fault, only that the panic-entry checkpoint was not observed.
+User pointed out the userdata tail log: read its last 1025 x 4096 bytes,
+starting at byte 114315718656 of a 114319917056-byte partition. All bytes
+before the final SWEETMRK block are zero, no SWEETLOG header anywhere.
+Dump SHA256 `d03e54b39ee9cd2f28dafc3bca14557b9c4b07ecafa6644171ac23f0b6d6ae5b`.
+Next 0116 targets `initialize_screen` immediately after `ml_io_map_unmappable`
+returns (VA `0xfffffe0007455508`), to narrow the stall further.
+
+**0116 mapping-return checkpoint PASS:** PC `0xfffffe0007455508`,
+ESR `0xf2005357`, returned framebuffer VA `0xfffffe000d4db000` in x0.
+Recovery returned; full boot_a restored/verified. Image SHA256
+`4f92d2701dd05ae5043d2fe7e072e5157837bf22c9cab24b4bfa6f9e5d2a6030`.
+Artifacts in `research/matisse/20261025-display-0116/`.
+
+**New source bug fixed for 0117:** early `io_map()` maps
+`round_page(size + start_offset)` but advanced its VA allocator by only
+`round_page(size)`. Framebuffer PA `0xfcb3f000` has offset `0x3000` in a 16K
+page; it therefore overlaps the next early mapping by a page. Patch 0096
+advances by `alloc_size` instead. This is a verified allocator defect, but
+whether it explains the device stall is still a hypothesis. A harness
+compiled from the real function checked 20,480 adjacent allocations at 4K
+and 16K granules; old code fails the bounds assertion, new code passes.
+Build ID is now `0x2304`. 0095 was also corrected to retain the existing
+0093 log-start change (the initial WIP source had unintentionally reverted
+it); that change alone still does not bypass `ufs_write_blocks`' rw gate.
+New sources compiled successfully; 0096 patch replay matches both inputs.
+Next test: 0117, returning at `_load_init_program` (`0xfffffe00077dc0ac`).
+
+Next: use an earlier code breakpoint to locate the boot failure before the
+UFS mark channel. Do not infer a DSI hardware fault from the unchanged logo.
+User has authorized ongoing tests ("你可以随时测试"); retain full restoration
+and hash verification for each trial. Normal XNU still lacks `/sbin/launchd`.
 
 ## >>> ACTIVE 2026-10-25 (display): partial frame / color bars fix - BUILT, NOT FLASHED <<<
 

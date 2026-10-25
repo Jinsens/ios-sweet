@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -594,7 +594,7 @@
+ #define SWEET_MARK_MAX  96
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x2303u
++#define SWEET_BUILD_ID 0x2304u
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;
+diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
+--- a/osfmk/arm/io_map.c
++++ b/osfmk/arm/io_map.c
+@@ -103,7 +103,10 @@
+ 		 * VM is not initialized.  Grab memory.
+ 		 */
+ 		start = virtual_space_start;
+-		virtual_space_start += round_page(size);
++		/* Include the physical page offset, just as the mapping below does.
++		 * Otherwise a non-page-aligned framebuffer shares its final page
++		 * with the next early I/O allocation. */
++		virtual_space_start += alloc_size;
+ 
+ 		assert(flags == VM_WIMG_WCOMB || flags == VM_WIMG_IO);
+ 
