@@ -56,9 +56,16 @@ with ASan+UBSan: 1080x2400, 1440x3200, native1440x3200 and1125x2436 all PASS,
 including per-pixel destination verification and normalized input bounds.
 Logs: build-kernel-230c.log and test-canvas.log under the userland directory.
 
-Userdata installation is IN PROGRESS: gzip over adb shell -T to raw dd,
-no GPT changes; local SHA256 while streaming, then full16GiB on-device hash.
-Do not reboot until install-result.json has readback_matches=true.
+Userdata installation COMPLETE and readback_matches=true:16GiB raw root,
+gzip over adb shell -T to dd, write223.86s, whole operation249.47s.
+Local and full on-device installed-range SHA256 both
+361cf02f1f2e8b9b710d45270397fda818e39c3f68d2d89911b345b6a6c1c043.
+No GPT changes or userdata backup. Existing diagnostic tail is preserved.
+0x230c v4 boot image7065600B SHA256
+1a9f6bbc6aec439a0fae66516cf5bc84e7f6767c26887fcdc9c121fc180ee81b;
+stock ramdisk/signature and gzip/Image/payload length/content verified.
+Boot cmdline: research/matisse/20261027-userland/userland-cmdline.txt.
+Boot trial and stock restoration are prepared in run-userland.py.
 Next: finish readback, boot 0x230c userland trial, recover full console/marks
 and restore boot_a when possible. No new CI run; full local build passed.
 
