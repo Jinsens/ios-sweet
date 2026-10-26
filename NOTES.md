@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-27 (userland): 0x230e early failure; boot_a restored; 0x230f preparation <<<
+## >>> ACTIVE 2026-10-27 (userland): 0x230f RUNNING; boot_a restoration pending <<<
 
 User request: bring the online device through real iOS userland into UI.
 User explicitly authorized partition/flashing operations in this session
@@ -199,6 +199,14 @@ display-reference-audit.json and {lk,vcp}-display-strings.txt (ignored).
 
 0x230f full CLT build exit0; kernel16723880B SHA2563ccc1849d8e421e0f01d79a99e17461de6d985c94fc4288090529c948e4b02f3.
 No new CI run. 0114 applies cleanly; sampler sanitizer test passes.
+
+0x230f BOOT STARTED (Unix1793044977.1065621); source commit7ccc630.
+Image7069696B SHA256b82ff566cf49c32a07f17a3d35ef0d2dd6746bc52b194eaee90a9db48ffebe2b; full written boot_a
+SHA2563dd1fcc199b10e21310a247a36dbd3058adfb3b509a729bab3478f5469bb3302. Stock sections and embedded payload
+verified. boot-ui-230f-result.json restore_pending=true; runner session39967
+watches1200s and restores on return. Do NOT import its top-level runner.
+Need screen observation, fresh230f marks/MMU/UFS evidence, then verify
+restoration. The230e logs are stale230d and must not be used as230e results.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
