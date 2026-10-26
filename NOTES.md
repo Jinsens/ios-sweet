@@ -146,6 +146,24 @@ observations separate from source-only findings. Native activation and
 UI/input are still unverified. No new CI run; full local CLT build and2
 targeted tests passed for0x230d.
 
+0x230e diagnostic milestone (not booted yet): source audit found no global
+kernel/user RAM NC/Device mapping and no fixed millisecond delay per UFS
+read. The normal embedded XNU shim path jumps with MMU/caches OFF; shim's
+mmu_enable diagnostic mapping is not inherited. XNU expects MAIR
+0x0c08044f00bb44ff, default managed RAM index0=0xff, M/C/I enabled and
+Inner/Outer WB page-table walks. UFS completion polls delay(1us); optional
+50us-spin/200us-sleep mode is absent from0x230d. Gear is not yet observed.
+Report: docs/matisse-mmu-ufs-audit.md. Added opt-in sweetperf register/PTE,
+memcpy, UFS phase/mutex/copy timing and readonly negotiated-link diagnostics.
+Sampler no longer holds task_lock across faulting vm_map_read_user; resident
+managed WB copies only, protected by pmap/PVH locks. Host ASan+UBSan test PASS;
+0113 applies cleanly to saved pre-230e sources. Final full CLT build exit0,
+kernel16723824B SHA256946f623065a621e1de3d892579e506599ec781fae78879a9c6bca7f18d8f76a8.
+No new CI run. cmdline428 bytes adds sweetperf=1 and logd_helper sampling.
+Current device still Recovery; original boot_a restored/verified as above.
+User also points to Documents/{lk,vcp,dtbo}.img for readonly display audit.
+Next: verified230e image trial, actual MMU/UFS evidence, restore boot_a.
+
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
 **Read this before the older entries below: the old PMIC voltage / VTP-LP

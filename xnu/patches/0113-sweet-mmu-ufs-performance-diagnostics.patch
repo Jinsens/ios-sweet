@@ -1,0 +1,384 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -139,6 +139,59 @@
+ static LCK_GRP_DECLARE(sweet_ufs_grp, "sweet_ufs");
+ static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);
+ 
++/* Optional cumulative phase timing; every update/snapshot holds sweet_ufs_lock.
++ * Timestamps are absolute ticks, converted only when reporting outside the lock. */
++static unsigned int sweet_perf;
++static struct sweet_ufs_perf {
++	uint64_t calls, bytes, prep, hw, post, max, polls, sleeps, errors;
++} sweet_perf_scsi[3];
++static uint64_t sweet_perf_lockwait, sweet_perf_copy, sweet_perf_strategy;
++
++static uint64_t
++sweet_perf_us(uint64_t ticks)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(ticks, &ns);
++	return ns / NSEC_PER_USEC;
++}
++
++static void
++sweet_perf_record(uint8_t op, uint32_t len, uint64_t start, uint64_t issued,
++    uint64_t completed, uint64_t end, uint64_t polls, uint64_t sleeps, bool failed)
++{
++	if (!sweet_perf || (op != 0x28 && op != 0x2a && op != 0x35)) {
++		return;
++	}
++	struct sweet_ufs_perf *p = &sweet_perf_scsi[op == 0x28 ? 0 : op == 0x2a ? 1 : 2];
++	p->calls++; p->bytes += len; p->prep += issued - start;
++	p->hw += completed - issued; p->post += end - completed;
++	p->max = MAX(p->max, end - start); p->polls += polls;
++	p->sleeps += sleeps; p->errors += failed;
++}
++
++void sweet_ufs_perf_snapshot(void);
++void
++sweet_ufs_perf_snapshot(void)
++{
++	if (!sweet_perf || !su.ready) {
++		return;
++	}
++	struct sweet_ufs_perf snapshot[3];
++	uint64_t lockwait, copy, strategy;
++	lck_mtx_lock(&sweet_ufs_lock);
++	memcpy(snapshot, sweet_perf_scsi, sizeof(snapshot));
++	lockwait = sweet_perf_lockwait; copy = sweet_perf_copy; strategy = sweet_perf_strategy;
++	lck_mtx_unlock(&sweet_ufs_lock);
++	printf("UFSP strategy %llu lock_us %llu copy_us %llu cache %u wait %u\n",
++	    strategy, sweet_perf_us(lockwait), sweet_perf_us(copy), su.cache, su.wait);
++	for (int i = 0; i < 3; i++) {
++		struct sweet_ufs_perf *p = &snapshot[i];
++		printf("UFSP %c n %llu bytes %llu prep_us %llu hw_us %llu post_us %llu max_us %llu polls %llu sleeps %llu errors %llu\n",
++		    "RWS"[i], p->calls, p->bytes, sweet_perf_us(p->prep), sweet_perf_us(p->hw),
++		    sweet_perf_us(p->post), sweet_perf_us(p->max), p->polls, p->sleeps, p->errors);
++	}
++}
++
+ static inline uint32_t
+ ufs_rd(uint32_t off)
+ {
+@@ -301,6 +354,8 @@
+ 	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
+ 	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
+ 
++	uint64_t perf_start = sweet_perf ? mach_absolute_time() : 0;
++	uint64_t perf_polls = 0, perf_sleeps = 0;
+ 	assert(len <= BOUNCE_SIZE);
+ 	bzero(utrd, sizeof(*utrd));
+ 	bzero(ucd, sizeof(*ucd));
+@@ -353,6 +408,7 @@
+ 	}
+ 	__builtin_arm_dsb(0xf);
+ 
++	uint64_t perf_issued = sweet_perf ? mach_absolute_time() : 0;
+ 	ufs_wr(REG_UTRLDBR, 1);
+ 	uint64_t deadline;
+ 	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
+@@ -366,10 +422,12 @@
+ 		nanoseconds_to_absolutetime(CMD_SLEEP_NS, &sleep_interval);
+ 	}
+ 	while (ufs_rd(REG_UTRLDBR) & 1) {
++		perf_polls++;
+ 		uint64_t now = mach_absolute_time();
+ 		if (now > deadline) {
+ 			ufs_wr(REG_UTRLCLR, ~1u);
+ 			printf("SWEET UFS: command 0x%02x timed out\n", cdb[0]);
++			sweet_perf_record(cdb[0], len, perf_start, perf_issued, now, now, perf_polls, perf_sleeps, true);
+ 			return ETIMEDOUT;
+ 		}
+ 		if (sleepable && now >= spin_until) {
+@@ -377,12 +435,14 @@
+ 			/* Keep the mutex: slot 0 and the bounce buffer are still owned. */
+ 			if (assert_wait_deadline_with_leeway((event_t)&su.wait, THREAD_UNINT,
+ 			    TIMEOUT_URGENCY_SYS_CRITICAL, wake, 0) == THREAD_WAITING) {
++				perf_sleeps++;
+ 				thread_block(THREAD_CONTINUE_NULL);
+ 			}
+ 		} else {
+ 			delay(1);
+ 		}
+ 	}
++	uint64_t perf_completed = sweet_perf ? mach_absolute_time() : 0;
+ 	__builtin_arm_dsb(0xf);
+ 	ufs_wr(REG_IS, ufs_rd(REG_IS));         /* acknowledge completion status */
+ 
+@@ -397,6 +457,9 @@
+ 	}
+ 
+ 	uint32_t ocs = utrd->dw2 & 0xff;
++	sweet_perf_record(cdb[0], len, perf_start, perf_issued, perf_completed,
++	    sweet_perf ? mach_absolute_time() : 0, perf_polls, perf_sleeps,
++	    ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]);
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+ 		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
+@@ -594,7 +657,7 @@
+ #define SWEET_MARK_MAX  160
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x230du
++#define SWEET_BUILD_ID 0x230eu
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;
+@@ -831,7 +894,12 @@
+ 		goto done;
+ 	}
+ 
++	uint64_t perf_wait = sweet_perf ? mach_absolute_time() : 0;
+ 	lck_mtx_lock(&sweet_ufs_lock);
++	if (sweet_perf) {
++		sweet_perf_lockwait += mach_absolute_time() - perf_wait;
++		sweet_perf_strategy++;
++	}
+ 	for (uint32_t done = 0; done < count;) {
+ 		uint64_t pos = off + done;
+ 		uint64_t lba = pos / UFS_BLOCK;
+@@ -842,7 +910,9 @@
+ 		if (rd) {
+ 			error = ufs_read_blocks(su.first_block + lba, blocks);
+ 			if (!error) {
++				uint64_t t = sweet_perf ? mach_absolute_time() : 0;
+ 				memcpy(vaddr + done, (const char *)bounce + skip, want);
++				if (sweet_perf) sweet_perf_copy += mach_absolute_time() - t;
+ 			}
+ 		} else {
+ 			/* Partial device blocks at either end: read, merge, write back. */
+@@ -850,7 +920,9 @@
+ 				error = ufs_read_blocks(su.first_block + lba, blocks);
+ 			}
+ 			if (!error) {
++				uint64_t t = sweet_perf ? mach_absolute_time() : 0;
+ 				memcpy((char *)bounce + skip, vaddr + done, want);
++				if (sweet_perf) sweet_perf_copy += mach_absolute_time() - t;
+ 				error = ufs_write_blocks(su.first_block + lba, blocks);
+ 			}
+ 		}
+@@ -1005,6 +1077,7 @@
+ 	uint32_t cache = 0, wait = 0;
+ 	PE_parse_boot_argn("ufscache", &cache, sizeof(cache));
+ 	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
++	PE_parse_boot_argn("sweetperf", &sweet_perf, sizeof(sweet_perf));
+ 	su.cache = (cache == 1);
+ 	su.wait = (wait == 1);
+ 
+@@ -1022,6 +1095,28 @@
+ 	}
+ 	su.dma_pa = ptoa_64(pn);
+ 	su.secsize = DEV_BSIZE;
++	if (sweet_perf) {
++		extern uint64_t sweet_pmap_sample(pmap_t, vm_map_address_t, void *, size_t);
++		printf("MMU kernel_text_pte 0x%llx dma_pte 0x%llx\n",
++		    sweet_pmap_sample(kernel_pmap, (vm_map_address_t)&sweet_ufs_init, NULL, 0),
++		    sweet_pmap_sample(kernel_pmap, su.dma + DMA_BOUNCE, NULL, 0));
++		uint64_t par, sctlr, mair;
++		__asm__ volatile("mrs %0, mair_el1; mrs %1, sctlr_el1; at s1e1r, %3; isb; mrs %2, par_el1"
++		    : "=&r"(mair), "=&r"(sctlr), "=&r"(par) : "r"(su.dma + DMA_BOUNCE) : "memory");
++		printf("MMU dma_par 0x%llx mair 0x%llx sctlr 0x%llx\n", par, mair, sctlr);
++		/* Dedicated bounce RAM only; no storage write or extra allocation. */
++		void *src = (void *)(su.dma + DMA_BOUNCE);
++		void *dst = (char *)src + BOUNCE_SIZE / 2;
++		memset(src, 0xa5, BOUNCE_SIZE / 2);
++		uint64_t begin = mach_absolute_time();
++		for (int i = 0; i < 64; i++) {
++			memcpy(dst, src, BOUNCE_SIZE / 2);
++			__asm__ volatile("" ::: "memory");
++		}
++		printf("MMU memcpy bytes %u time_us %llu probe 0x%x\n", 32u << 20,
++		    sweet_perf_us(mach_absolute_time() - begin), *(volatile uint32_t *)dst);
++	}
++
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	error = ufs_take_over_host();
+@@ -1068,6 +1163,20 @@
+ 	/* Only now, with the partition bounds known, can writes be allowed. */
+ 	su.writable = (rw != 0);
+ 	su.ready = true;
++	if (sweet_perf) {
++		/* Read negotiated link state; do not change gears, lanes or power. */
++		static const uint16_t attrs[] = { 0x1568, 0x1583, 0x1560, 0x1580, 0x1571, 0x156a };
++		uint32_t values[6], errors[6];
++		lck_mtx_lock(&sweet_ufs_lock);
++		for (unsigned int i = 0; i < 6; i++) {
++			values[i] = 0;
++			errors[i] = ufs_uic(0x01, (uint32_t)attrs[i] << 16, 0, 0, &values[i]);
++		}
++		lck_mtx_unlock(&sweet_ufs_lock);
++		for (unsigned int i = 0; i < 6; i++) {
++			printf("UFSP DME attr 0x%x value 0x%x error 0x%x\n", attrs[i], values[i], errors[i]);
++		}
++	}
+ 	/* Partition geometry is known: the mark channel works from here on. */
+ 	sweet_mark(10, su.first_block, su.nblocks);
+ 	/* Identifies the kernel image that produced this record: without it an
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -23,6 +23,7 @@
+ 
+ extern task_t proc_task(proc_t);
+ extern int hz;
++extern void sweet_ufs_perf_snapshot(void);
+ extern void sweet_sample_start(void);
+ 
+ static char sweet_sample_names[128];
+@@ -86,6 +87,7 @@
+ 		clock_get_uptime(&uptime);
+ 		absolutetime_to_nanoseconds(uptime, &uptime);
+ 		printf("SMP --- sample %d uptime %llu ms\n", i, uptime / 1000000);
++		sweet_ufs_perf_snapshot();
+ 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
+ 		(void)tsleep(&chan, PZERO, "sweetsmp", (int)interval * hz);
+ 	}
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -994,6 +994,7 @@
+  * SWEET process sampler (bsd/dev/sweet_sample.c): user pc/lr/sp and a frame
+  * pointer backtrace of every thread of a task, from the saved user state.
+  */
++extern uint64_t sweet_pmap_sample(pmap_t pmap, vm_map_address_t va, void *dst, size_t len);
+ void sweet_sample_task(const char *name, int pid, task_t task);
+ 
+ void
+@@ -1003,30 +1004,46 @@
+ 	uint64_t slide = 0;
+ 	int tn = 0;
+ 	thread_t thread;
++	struct { uint64_t pc, lr, sp, fp; } states[64];
+ 	vm_shared_region_t sr = vm_shared_region_get(task);
+-
++	unsigned int perf = 0;
++	PE_parse_boot_argn("sweetperf", &perf, sizeof(perf));
+ 	if (sr != NULL) {
+ 		slide = sr->sr_slide;
+ 		vm_shared_region_deallocate(sr);
+ 	}
+ 	printf("SMP %s[%d] slide 0x%llx mh 0x%llx\n", name, pid, slide, task->mach_header_vm_address);
+ 
++	/* vm_map_read_user() may page-fault. Doing that with task_lock held
++	 * can stall the observed process. Snapshot first; read resident RAM only. */
+ 	task_lock(task);
+ 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+ 		arm_saved_state_t *ss = find_user_regs(thread);
++		if (ss == NULL || !is_saved_state64(ss) || tn == 64) {
++			continue;
++		}
++		states[tn].pc = get_saved_state_pc(ss);
++		states[tn].lr = get_saved_state_lr(ss);
++		states[tn].sp = get_saved_state_sp(ss);
++		states[tn++].fp = get_saved_state_fp(ss);
++	}
++	task_unlock(task);
++
++	if (perf && tn) {
++		printf("MMU %s[%d] mh_pte 0x%llx pc_pte 0x%llx sp_pte 0x%llx\n", name, pid,
++		    sweet_pmap_sample(map->pmap, task->mach_header_vm_address, NULL, 0),
++		    sweet_pmap_sample(map->pmap, states[0].pc, NULL, 0),
++		    sweet_pmap_sample(map->pmap, states[0].sp, NULL, 0));
++	}
++	for (int t = 0; t < tn; t++) {
+ 		char line[400];
+-		int n;
+-		uint64_t fp;
+-
+-		if (ss == NULL || !is_saved_state64(ss)) {
+-			continue;
+-		}
+-		fp = get_saved_state_fp(ss);
+-		n = snprintf(line, sizeof(line), "SMP %s t%d pc 0x%llx lr 0x%llx sp 0x%llx bt", name, tn++,
+-		    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss));
++		uint64_t fp = states[t].fp;
++		int n = snprintf(line, sizeof(line), "SMP %s t%d pc 0x%llx lr 0x%llx sp 0x%llx bt", name, t,
++		    states[t].pc, states[t].lr, states[t].sp);
+ 		for (int i = 0; i < 16 && fp != 0 && (fp & 7) == 0 && n < (int)sizeof(line) - 20; i++) {
+ 			uint64_t frame[2];
+-			if (vm_map_read_user(map, fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++			if (!sweet_pmap_sample(map->pmap, fp, &frame[0], sizeof(uint64_t)) ||
++			    !sweet_pmap_sample(map->pmap, fp + 8, &frame[1], sizeof(uint64_t))) {
+ 				break;
+ 			}
+ 			n += snprintf(line + n, sizeof(line) - n, " 0x%llx", frame[1]);
+@@ -1037,7 +1054,6 @@
+ 		}
+ 		printf("%s\n", line);
+ 	}
+-	task_unlock(task);
+ }
+ 
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -6884,6 +6884,54 @@
+ 	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/* Best-effort diagnostic: never page in target memory or copy Device/NC RAM.
++ * Hold pmap and PVH locks only for this bounded resident-page copy. */
++uint64_t sweet_pmap_sample(pmap_t pmap, vm_map_address_t va, void *dst, size_t len);
++uint64_t
++sweet_pmap_sample(pmap_t pmap, vm_map_address_t va, void *dst, size_t len)
++{
++	pt_entry_t entry = 0;
++	pmap_lock(pmap, PMAP_LOCK_SHARED);
++	const pt_attr_t *attr = pmap_get_pt_attr(pmap);
++	for (unsigned int level = attr->pta_root_level; level <= attr->pta_max_level; level++) {
++		tt_entry_t *ptr = pmap_ttne(pmap, level, va);
++		if (ptr == TT_ENTRY_NULL) {
++			break;
++		}
++		entry = *(volatile tt_entry_t *)ptr;
++		if (!(entry & ARM_TTE_VALID)) {
++			entry = 0;
++			break;
++		}
++		if (level != attr->pta_max_level && (entry & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_TABLE) {
++			continue;
++		}
++		if (dst != NULL) {
++			const uint64_t mask = pt_attr_page_size(attr) - 1;
++			pmap_paddr_t pa = pte_to_pa(entry);
++			if (level != attr->pta_max_level || !pa_valid(pa) ||
++			    (entry & ARM_PTE_ATTRINDXMASK) != ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITEBACK) ||
++			    len > pt_attr_page_size(attr) - (va & mask)) {
++				entry = 0;
++				break;
++			}
++			unsigned int pai = pa_index(pa);
++			pvh_lock(pai);
++			if (*(volatile tt_entry_t *)ptr != entry) {
++				entry = 0;
++			} else {
++				memcpy(dst, (const void *)phystokv(pa + (va & mask)), len);
++			}
++			pvh_unlock(pai);
++		}
++		break;
++	}
++	pmap_unlock(pmap, PMAP_LOCK_SHARED);
++	return entry;
++}
++#endif
++
+ #if CONFIG_COREDUMP
+ /* temporary workaround */
+ boolean_t
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -203,6 +203,13 @@
+ 	kprintf("SWEET CPU: cpu=%u entered initCPU mpidr=0x%llx EL%llu IRQs=%u\n",
+ 	    getCPUNumber(), __builtin_arm_rsr64("MPIDR_EL1") & 0xffffULL,
+ 	    __builtin_arm_rsr64("CurrentEL") >> 2, ml_get_interrupts_enabled());
++	unsigned int perf = 0;
++	PE_parse_boot_argn("sweetperf", &perf, sizeof(perf));
++	if (perf) {
++		IOLog("MMU cpu%u mair 0x%llx sctlr 0x%llx tcr 0x%llx\n", getCPUNumber(),
++		    __builtin_arm_rsr64("MAIR_EL1"), __builtin_arm_rsr64("SCTLR_EL1"),
++		    __builtin_arm_rsr64("TCR_EL1"));
++	}
+ 	__atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
+ }
+ 
