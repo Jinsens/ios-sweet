@@ -18,7 +18,8 @@ The wrong opcode is certain; where old writes landed / whether this explains
 all reset events remains unknown. Preserve historical raw results, not their
 old electrical interpretation. See `docs/matisse-touch-report.md`.
 
-Audit milestone commit: `b000e85` (2026-10-27).
+Audit milestone commit: `b000e85`; prepared power trial commit: `998bf3b`
+(2026-10-27). The latter is built and verified, not booted.
 
 Completed changes for this milestone:
 - 0106 restores the missing local diagnostic baseline for existing 0108.
