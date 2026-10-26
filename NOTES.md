@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-27 (touch): SALIXP confirmed; PMIF type1 bug fixed; 0x230a audited; 0x230b power + Sense On image prepared, NOT BOOTED <<<
+## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
 **Read this before the older entries below: the old PMIC voltage / VTP-LP
 conclusions are invalidated by a confirmed PMIF command-addressing bug.**
@@ -18,8 +18,19 @@ The wrong opcode is certain; where old writes landed / whether this explains
 all reset events remains unknown. Preserve historical raw results, not their
 old electrical interpretation. See `docs/matisse-touch-report.md`.
 
-Audit milestone commit: `b000e85`; prepared power trial commit: `998bf3b`
-(2026-10-27). The latter is built and verified, not booted.
+Code commits: audit `b000e85`, guarded touch supply startup `998bf3b`;
+hardware outcome report `8c73962`, prior handoff `c0869aa` (2026-10-27).
+Both 0x230a and 0x230b were booted
+with separate explicit user authorization and restored afterwards.
+
+**0x230b succeeded at kernel touch input:** ID36:40, Ready, A5/01 System
+Info (FW0020/cfg001b), Sense On err0, then 19 down +19 up records, finger0.
+Six down/up pairs have different scaled positions, demonstrating motion
+handling. The driver calls the existing SweetHID path at1080x2400 logical
+coordinates. iOS UI interaction, multitouch and sustained stability are
+not yet verified. After87.86s the host saw fastboot; Recovery reports
+Watchdog. No hold-end mark102 or init-failure mark64 was captured, so do
+not attribute this reset to missing launchd or a particular PMIC operation.
 
 Completed changes for this milestone:
 - 0106 restores the missing local diagnostic baseline for existing 0108.
@@ -28,7 +39,8 @@ Completed changes for this milestone:
   SID5 0009/1bbf/1d23/1e8d/1e35 eight times before mountroot (mark201).
 - Optional `sweettouchinit=1`: correct FA 20 00 00 24 81 reset -> Ready03
   <=100ms -> valid A5/01 System Info + FW -> A0 00 01 Sense On.
-  This trial keeps init=0. 87 is FIFO read, not flush. Fix bitbang short-RX
+  The 0x230a audit used init=0; 0x230b used init=1.
+  87 is FIFO read, not flush. Fix bitbang short-RX
   debug overread; release contacts after Ready/error. Marks202-204 added.
 - Sync SWEET_MARK_MAX=160 and build ID 0x230a. Three new mock tests passed.
 
@@ -56,7 +68,7 @@ Recovery reports Watchdog; do not attribute it to a PMIC write (there were
 none). No SWEETLOG header was found; marks are the valid evidence.
 Seven targeted tests pass (3 hardware mocks +4 mark decoder checks); fixed
 an old test's count97 rejection to count161 for the160-record format.
-Follow-up 0110 is prepared locally (0x230b, not booted): strict cold
+0110 (commit `998bf3b`) was built and booted as0x230b: strict cold
 snapshot73/00/00/0c/04 guard; set selectors while disabled; enable VDD then
 AVDD; verify73/01/01/0c/0d before releasing reset. Dedicated API allows only
 four fixed field targets, preserves other bits, verifies each write, and
@@ -72,13 +84,28 @@ Final local CLT build exit0. Frozen NDK28.2 shim uses b000e85. Artifacts:
 - Cmdline uses audit=1, sweettouchrails=1, sweettouchinit=1, 30s hold;
   keys/battery/USB off. Marks205 cold guard,206 each config,207 powered
   guard,208 reset release, then96 ID,202/203/204 Ready/info/Sense On.
-- `run-power.py` defaults to read-only preflight. Do not pass
-  --execute-approved until the user confirms this **new** boot_a trial.
-No 0x230b boot, PMIC write or new partition write has occurred after the
-restored0x230a audit. This is the next concrete action, after confirmation
-required by AGENTS for each destructive step.
-Recovery readback after restore again returned touch ID36:40. PMIC config
-was read only in0x230a; existing diagnostic records use userdata tail.
+- User authorized0x230b: “你可以刷入并测试”.
+  `run-power.py --execute-approved` completed, exit0, and restored the full
+  64MiB boot_a backup via fbraw. Preflight and final on-device SHA256 both
+  equal `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+- 99 new marks, build0x230b: all four mark206 supply operations err0;
+  mark207 verifies73/01/01/0c/0d; mark208 reset release err0; mark96 ID3640;
+  mark202 Ready=1; mark203 FW0020/cfg001b/A501; mark204 Sense On err0.
+- 19 down /19 up records (97/98), finger0. Raw down X3845..9995,
+  Y12425..19655; six pairs changed position after scaling. Evidence:
+  `power-after-marks.bin` / `.txt`, `power-result.json`, `touch-summary.json`.
+- No SWEETLOG console header. Mark84 here is normal display telemetry;
+  its presence alone is not panic evidence. The Watchdog cause is open.
+- Recovery/matisse/_a is online after restore. A fresh read again returned
+  `{ 000000003640 }`; a final read-only boot_a hash check matched the backup.
+  Both trials used the existing userdata-tail diagnostic record area.
+
+Next concrete work: investigate the Watchdog and incomplete30s hold using
+the retained marks, scheduler/watchdog code and console capture path; then
+prepare a focused stability trial with explicit user authorization for any
+new destructive step. Do not repeat the completed0x230b trial merely to
+prove touch input again. UI/multitouch validation remains separate work.
+No new CI run; complete CLT build and9 targeted tests passed for0x230b.
 
 LK/VCP were statically inspected, not modified. LK known LDO helper xrefs
 use other rails (1b87/1e29/1cce); no confirmed VTP init path found yet.
