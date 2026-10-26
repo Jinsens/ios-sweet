@@ -1,5 +1,156 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-26 13:40 (matisse touch): VRF18 is now really on, VTP is the wall <<<
+
+Three boot_v4 shim images were built with the local CLT toolchain and run
+(boot_a written, restored, hash verified after each: `2931647a...86b1`).
+
+**0108 (`sweetvrf=1 sweetidprobe=1`, image `f9421f03...`) - what it ruled out.**
+Marks 183/194/195/155 show the rail writes: `0x1e8d` read 0x70 at boot, ramped
+to 0x7c, `0x1bbf` 0x00 -> 0x01, no reset. Mark 154 (`a=1` = hi 0, lo 1) shows
+INT still low, and 157/158 show a hand-clocked 0x81 + two chip-ID reads at
+~500 kHz returning all zero. So with VRF18 nominally enabled the controller
+still looks unpowered.
+
+**The vsel byte carries a second field.** XNU reads `0x1e8d = 0x70` and
+`0x1e35 = 0x74/0x75`; Recovery reads `0x0c` / `0x0d`. Bits 4..6 stay set under
+the bootloader and are cleared by the vendor path. Comparing every MT6373 LDO
+in the Recovery dump shows disabled rails keep plain small selectors (VRF13
+0x07, VRF12 0x03, VFP 0x04), so 0x40 is not a plain "disabled" flag - it is a
+mode/range field that the vendor clears when it programs the rail.
+
+**0109 (`sweetvpower=1`, energise from the bottom: `0x1e8d` 0 -> 12, then
+`0x1bbf=1`, then `0x1e35` 0 -> 13, then `0x1d23=1`) - the SoC reset.** Marks
+stop right after 174 (`0x1e8d` reached 0x0c, "ENRI"): no 175, no 184. So the
+fatal step is the VTP sequence, and switching VTP's field at 1.2 V is already
+enough to take the SoC down.
+
+**0109a (`sweetvpower=1`, VRF18 only) - survived, still silent.** 174 reached
+0x0c, 159 shows `0x1bbf` readback 0x01, the boot went all the way to
+`load_init_program` and panicked on the missing launchd. INT still 0 (mark
+154), bit-bang ID still 00 (157/158). **This is the first XNU boot where
+VRF18_AIF is genuinely at 1.8 V with the mode bits cleared, and the chip does
+not answer.**
+
+**0109b (`sweetvpower=3`, VTP ramped inside the bootloader's mode,
+0x75 -> 0x7d) - survived, still silent.** 175 "KEEP" at sel 13, 152 reads back
+`vrf=0x0c/en=1`, `vtp=0x7d/en=3`. INT 0, bit-bang ID 00 again. So raising the
+VTP selector without touching the mode bits changes nothing the chip can see,
+while forcing the mode change (0x0d) resets the SoC.
+
+**Where this leaves it.** VRF18's I/O rail is now provably correct, so the
+remaining single fault is VTP: the controller needs avdd at 3.3 V, the 3.3 V
+setting is a mode change in `0x1e35`, and that mode change resets the SoC even
+when it is made at the bottom of the table with reset held low. Because VTP's
+only device-tree consumer is `spi6.0-avdd`, the reset is not a normal load
+brownout; the two remaining explanations are (a) the touch panel's own
+capacitance inrush when the rail finally comes up, and (b) a PMIC protection
+event that the vendor kernel handles and XNU does not.
+
+**Next options, in order of information per risk.**
+1. Measure VTP (and the touch connector's VDDI) with a meter while an XNU
+   image runs - that settles whether 0x7d is 1.8 V or 3.3 V and whether the
+   mode change is even needed.
+2. Retry the `0x0d` switch with `cpus=1` and the write moved to the earliest
+   hook, to cut VSYS load during the surge (cheap, but the same reset is
+   likely).
+3. Find the vendor's LK PMIC init (or a schematic) for VTP: if LK can leave
+   VTP at 0x0d, XNU never has to touch it.
+
+Artifacts: `research/matisse/20261026-idprobe/` (0108),
+`research/matisse/20261026-vpower/` (0109, 0109a, 0109b) with payloads,
+images, `*.json` hashes and the verifier used for each. New marks 152, 159,
+173-175 are decoded by `tools/sweet-marks.py`.
+
+## >>> ACTIVE 2026-10-26 12:55 (matisse touch, 0108): rail map proven from the stock module, VRF/INT/bit-bang probe built - NOT FLASHED <<<
+
+**Request (user): "/Users/xiaohuasheng/Documents/twrp 有设备树 现在再继续帮我移植触摸功能".**
+The tree at `Documents/twrp/device_xiaomi_matisse-TWRP` is TWRP/OrangeFox for
+matisse with `TARGET_NO_KERNEL` and a prebuilt `prebuilt/dtb`; it carries no
+kernel source, so the useful material was the stock **vendor_boot ramdisk**,
+which is on this Mac at `Documents/twrp/stock-vendor_boot_a.img`.
+
+**Device tree facts (measured).** `prebuilt/dtb` is an MTK `dt_table` with one
+FDT at offset 64. It has `/spi6@11016000` (`mediatek,pad-select = <1>`, IRQ
+0xf1, clocks 0x19/0x3f/0x19/0x95/0x3/0x13) but **no touch child**: the board
+touch node comes from the DTB overlay in the stock ramdisk. The live Recovery
+DTB has it at `/spi6@11016000/fts@0` (`st,spi`): `spi-max-frequency = 12 MHz`,
+`fts,reset-gpio = <&pio 3 0>` (+ `fts,reset-gpio-enable`), `fts,irq-gpio =
+<&pio 8 0>`, `fts,irq-flags = 0x2008` (level low + oneshot), `vdd-supply =
+VRF18_AIF`, `avdd-supply = VTP`, fw `st_fts_L11.ftb`. Its three pinctrl states
+(`pmx_ts_active`, `pmx_ts_suspend`, `pmx_ts_spi_mode`) resolve to **empty
+nodes**, i.e. the vendor kernel does not program those pads at all - LK does.
+
+**The modules answer the power question.** `stock-vendor_boot_a.img` is header
+v4: ramdisk 44,333,100 B LZ4 at 0x1000, `dtb` (25 MB dt_table) after it. The
+ramdisk inflates to 89,466,112 B and holds `lib/modules/mt6373-regulator.ko`,
+`fts_touch_spi.ko`, `xiaomi_touch.ko`, `pinctrl-mt6373.ko` (symbols not
+stripped). From `mt6373-regulator.ko`'s descriptor table (stride 0x220):
+
+| rail | desc | vsel_reg | vsel_mask | enable_reg | enable value | table |
+|---|---|---|---|---|---|---|
+| VRF18_AIF | @.data 0x1910 | `0x1e8d` | `0xf` | `0x1bbf` | `0x01` | `ldo_volt_table3[12] = 1800 mV` |
+| VTP | @.data 0x2960 | `0x1e35` | `0xf` | `0x1d23` | `0x01` | `ldo_volt_table1[13] = 3300 mV` |
+
+So 0x1bbf/0x1d23/0x1e8d/0x1e35 **is** the right mapping (previously inferred),
+and "enable" writes the literal value `0x01`, which clears VTP's LP bit as a
+side effect. `st_spi_ctrdata` = {0, 300, 30} (setup/hold), `fts_system_reset`
+sends one byte `0x81` - both already match the port.
+
+**Golden runtime state from Recovery (read-only, adb root).**
+`regulator_summary`: `mt6373_vrf18_aif` enabled 1800 mV normal, `mt6373_vtp`
+enabled **3300 mV normal**, and each has exactly **one** consumer -
+`spi6.0-vdd` / `spi6.0-avdd`. Nothing else on the SoC shares those rails, so
+the boots that died on a rail write were **not** a load brownout; the write
+sequence/PMIF path is what needs fixing, not the voltage.
+`clk_summary`: spi_sel 208 MHz, spi6_bclk 208 MHz, spi6_hclk 156 MHz (all
+runtime-suspended at idle). `pinconf-pins`: 164 PD, **165 PU**, 166/167 PD,
+7 mA, mux func2; GPIO3 out hi (bias PD); **GPIO8 in hi, bias disabled, input
+enabled**. `gpio`: `gpio-270 (fts_gpio_270) out hi`, `gpio-275 (fts_gpio_275)
+in hi IRQ`.
+
+**Port bug found while reading this back.** The XNU driver never muxes GPIO8
+to GPIO function 0; LK leaves that pad in whatever mode it uses, and a pad
+that is still routed to another block reads 0 in the GPIO DIN register no
+matter what the chip does. Every previous "INT stays low, therefore the chip
+is dead" observation is therefore **not evidence**. Fix is in 0108.
+
+**Change 0108.** `sweetvrf=1` runs a new `mt_vrf_enable_only()` in the
+pre-mount hook: it ramps `0x1e8d` to selector 12 **while VRF18 is still
+disabled**, sets `0x1bbf = 1`, waits 20 ms and re-reads all four registers
+(VTP untouched). `sweetidprobe=1` runs `mt_id_probe()` in the worker: GPIO8 ->
+function 0 + DIR in + IES, 64 DIN samples (mark 154), then a hand-clocked
+`0x81` (156) and two chip-ID reads at ~500 kHz (157/158) with the SPI6
+controller out of the path. Marks 154-158 are decoded by `tools/sweet-marks.py`.
+
+**Build (this Mac, no Xcode.app).** `tools/build-xnu-local.sh` wants
+`Xcode.app`; CLT alone has clang/ld/dsymutil but no `xcodebuild`. New
+`tools/build-xnu-clt.sh` runs the same `make install` against
+`xnu/out/local` with `DEVELOPER_DIR=/Library/Developer/CommandLineTools`:
+one file recompiled, whole kernel relinked, **79 s**. Shim built with NDK
+28.2 clang/lld via `shim/build.sh <payload> --template
+backup/recovery-20261021/boot_a-live-20261021.img --v4` (absolute paths; the
+script `cd`s to `shim/`).
+
+**Artifacts** in `research/matisse/20261026-idprobe/`:
+kernel 16,723,368 B `13cc3aa9...`; payload 16,719,248 B
+`664504c2...`; boot `matisse-xnu-0108-idprobe.img` 7,065,600 B SHA256
+`f9421f035a6332c9251f08c18a2ab4a79caed3c6b81a3f4094b5b722d0659a78`, header
+v4, stock ramdisk and signature verified, payload embedded byte-for-byte
+(`verify-idprobe-image.py`).
+
+**Next (needs the usual one `boot_a` write, restored afterwards).** Same
+`--template` + restore flow as the other touch runners. Read the result:
+154 with `hi=1` = the chip drives its INT line and is alive (then the fault is
+SPI6 controller programming); 154 `hi=0 lo=1` with pull disabled = still dead;
+157/158 non-zero = the chip answers hand-clocked SPI, so only the controller
+is wrong; all-zero bit-bang = the chip itself never boots (VTP at 1.8 V/LP is
+then the remaining suspect, and the pre-charge order in the 2026-10-26 08:40
+section is the next thing to try - do not write 0x1d23 blind).
+Repo note: `xnu/out/` is gitignored, so the driver that carries the 0108-0137
+PMIC work exists only on this Mac; `patches/0108-...` is an incremental diff
+against that state, not something CI can apply on top of 0107.
+
 ## >>> ACTIVE 2026-10-26 (USB): device tree read, diagnostic hold built - NOT FLASHED <<<
 
 **Request (user): "/Users/xiaohuasheng/Documents/twrp 有设备树 现在再继续帮我移植 USB 功能".**

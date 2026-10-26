@@ -1,0 +1,171 @@
+--- a/bsd/dev/sweet_matisse_touch.c
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -121,6 +121,7 @@
+ 	bool trace;
+ 	bool platform_ready;
+ 	bool rails_done;
++	bool vrf_done;
+ 	unsigned start_calls;
+ 	unsigned start_status;
+ 	volatile unsigned stage;
+@@ -1157,7 +1158,57 @@
+ 		}
+ 		sweet_hid_touch((int)id, 0, mt.x[id], mt.y[id]);
+ 		mt.active[id] = false;
++	}
++}
++
++/*
++ * The one rail write that has never taken the SoC down: raise VRF18_AIF to
++ * its device-tree 1.8 V while the LDO is still disabled, then set its enable
++ * bit. mt6373-regulator.ko (Recovery's module, pulled from the stock
++ * vendor_boot ramdisk) gives VRF18_AIF desc.vsel_reg = 0x1e8d, vsel_mask =
++ * 0xf, enable_reg = 0x1bbf, enable value 0x01, ldo_volt_table3[12] = 1800 mV,
++ * so this is byte-for-byte what regulator_enable() does on the working boot.
++ *
++ * VTP is deliberately not touched here: it is already enabled (0x1d23 = 0x03,
++ * EN=1 LP=1) at selector 4 (1.8 V) when XNU starts, every write that changes
++ * 0x1d23 or its selector has reset the SoC, and Recovery's regulator_summary
++ * lists spi6.0-avdd as VTP's only consumer - so the reset is not a load
++ * brownout and the sequence, not the voltage, is what needs fixing.
++ */
++static void
++mt_vrf_enable_only(void)
++{
++	uint8_t vrf = 0, vsel = 0, vtp = 0, a = 0, b = 0, c = 0;
++
++	if (sweet_spmi_init() != 0) {
++		printf("SWEET MT TOUCH: vrf-only skipped, SPMI unavailable\n");
++		return;
++	}
++	int e0 = sweet_spmi_read(5, 0x1bbf, &vrf);
++	int e1 = sweet_spmi_read(5, 0x1e8d, &vsel);
++	int e2 = sweet_spmi_read(5, 0x1d23, &vtp);
++	if (e0 != 0 || e1 != 0) {
++		sweet_mark(155, ((uint64_t)(uint32_t)e0 << 32) | (uint32_t)e1, 0x56524600);
++		printf("SWEET MT TOUCH: vrf-only skipped, read failed %d/%d\n", e0, e1);
++		return;
+ 	}
++
++	int ramp = -1;
++	if ((vsel & 0x0fu) != 12u) {	/* table3[12] = 1.8 V */
++		ramp = mt_rail_ramp(0x1e8d, vsel, 12u, 194);
++	}
++	int en = -1;
++	if ((vrf & 1u) == 0) {
++		en = sweet_spmi_write(5, 0x1bbf, 1u);
++	}
++	delay(20000);
++
++	(void)sweet_spmi_read(5, 0x1bbf, &a);
++	(void)sweet_spmi_read(5, 0x1e8d, &b);
++	(void)sweet_spmi_read(5, 0x1d23, &c);
++	sweet_mark(155, ((uint64_t)a << 32) | vrf, ((uint64_t)b << 32) | vsel);
++	printf("SWEET MT TOUCH: vrf only vsel=%#x->%#x ramp=%d en=%d "
++	    "vrf=%#x->%#x vtp=%#x/%d\n", vsel, b, ramp, en, vrf, a, c, e2);
+ }
+ 
+ /*
+@@ -1171,11 +1222,22 @@
+ void
+ sweet_touch_rails_early(void)
+ {
+-	int power = 0;
++	int power = 0, vrf_only = 0;
+ 	(void)PE_parse_boot_argn("sweettouchpower", &power, sizeof(power));
+-	if (!power || mt.rails_done || !mt.platform_ready) {
++	(void)PE_parse_boot_argn("sweetvrf", &vrf_only, sizeof(vrf_only));
++	if (!mt.platform_ready) {
+ 		return;
+ 	}
++	if (vrf_only && !mt.vrf_done) {
++		mt.vrf_done = true;
++		sweet_mark(183, 0x5652464c, (uint64_t)mt.spi); /* "VRFL" */
++		printf("SWEET MT TOUCH: VRF18-only enable\n");
++		mt_vrf_enable_only();
++		return;
++	}
++	if (!power || mt.rails_done) {
++		return;
++	}
+ 	mt.rails_done = true;
+ 	sweet_mark(183, 0x4541524c, (uint64_t)mt.spi); /* "EARL" */
+ 	printf("SWEET MT TOUCH: early rail sequence start\n");
+@@ -1183,7 +1245,65 @@
+ 	printf("SWEET MT TOUCH: early rail sequence done\n");
+ }
+ 
++/*
++ * Two questions answered with the SPI6 controller out of the path.
++ *
++ * 1. INT. Every earlier sample read GPIO8 without ever selecting GPIO function
++ *    0 for it: LK leaves that pad however the boot firmware set it, and a pin
++ *    that is still muxed to another block reads 0 in the GPIO DIN register
++ *    whatever the chip is doing. Recovery's pinmux shows 'GPIO8: MUX
++ *    UNCLAIMED' (function 0, no bias, input enabled), so this reproduces that
++ *    exactly and samples again - apples to apples with the 'in hi' that
++ *    /sys/kernel/debug/gpio reports while touch works.
++ *
++ * 2. Chip ID over hand-clocked SPI at ~500 kHz, after the vendor driver's
++ *    one-byte system reset (0x81). SCK at 12 MHz is far below any pad limit,
++ *    so a reply here proves the chip is powered and out of reset and puts the
++ *    fault in the controller programming; silence leaves the chip itself.
++ */
+ static void
++mt_id_probe(void)
++{
++	uint32_t win = mt_mmio_rd(mt.pio, MTK_PIO_MODE_WIN(8));
++	uint32_t after = mt_pio_mode_set(8, win & ~0x0fu);
++	mt_gpio_dir(8, false);
++	if (!mt.iocfg_bm2) {
++		mt.iocfg_bm2 = ml_io_map(MTK_IOCFG_BM2_PA, 0x1000u);
++	}
++	uint32_t ies = mt_mmio_rd(mt.iocfg_bm2, 0x0060u);
++	mt_mmio_wr(mt.iocfg_bm2, 0x0060u, ies | (1u << 16));
++	delay(2000);
++
++	unsigned hi = 0, lo = 0;
++	for (unsigned i = 0; i < 64; ++i) {
++		uint32_t v = mt_gpio_din(8);
++		hi |= (uint32_t)(v == 1);
++		lo |= (uint32_t)(v == 0);
++		delay(1);
++	}
++	sweet_mark(154, ((uint64_t)hi << 32) | lo,
++	    ((uint64_t)win << 32) | after);
++	printf("SWEET MT TOUCH: int probe win=%#x->%#x ies=%#x hi=%u lo=%u\n",
++	    win, after, ies, hi, lo);
++
++	uint8_t rst = 0x81, rst_rx = 0;
++	mt_spi_bitbang(&rst, &rst_rx, 1, 156);
++	delay(20000);
++
++	uint8_t tx[8] = {
++	    FTS_CMD_HW_REG_R,
++	    (uint8_t)(FTS_ADDR_DCHIP_ID >> 24),
++	    (uint8_t)(FTS_ADDR_DCHIP_ID >> 16),
++	    (uint8_t)(FTS_ADDR_DCHIP_ID >> 8),
++	    (uint8_t)FTS_ADDR_DCHIP_ID,
++	    0xff, 0xff, 0xff,
++	};
++	uint8_t rx[8];
++	mt_spi_bitbang(tx, rx, sizeof(rx), 157);
++	mt_spi_bitbang(tx, rx, sizeof(rx), 158);
++}
++
++static void
+ mt_touch_thread(void *arg, wait_result_t result)
+ {
+ 	(void)arg;
+@@ -1207,6 +1327,11 @@
+ 	if (sweep && mt.trace) {
+ 		mt_spi_sweep();
+ 	}
++	int idprobe = 0;
++	(void)PE_parse_boot_argn("sweetidprobe", &idprobe, sizeof(idprobe));
++	if (idprobe) {
++		mt_id_probe();
++	}
+ 
+ 	uint8_t id[2] = {0};
+ 	int err = mt_fts_read_id(id);
