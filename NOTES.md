@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-27 (userland): 20H392 installed and verified; 0x230c boot under observation <<<
+## >>> ACTIVE 2026-10-27 (userland): 20H392 userland runs; 0x230c boot_a restored; UI blocked <<<
 
 User request: bring the online device through real iOS userland into UI.
 User explicitly authorized partition/flashing operations in this session
@@ -66,15 +66,19 @@ No GPT changes or userdata backup. Existing diagnostic tail is preserved.
 stock ramdisk/signature and gzip/Image/payload length/content verified.
 Boot cmdline: research/matisse/20261027-userland/userland-cmdline.txt.
 Boot trial and stock restoration are prepared in run-userland.py.
-0x230c boot trial started (boot_requested_unix1793039733.3685188): the
-written full boot_a readback matches7984c03b9df34978311870d2fb744094f630537a048643e07c8c781aa473268c.
-Progress/result: boot-userland-progress.log / boot-userland-result.json.
-At308.0s no host USB surface; screen observation requested
-from user and still pending. This is not proof of UI or of a stable kernel.
-Current boot_a still contains the0x230c experiment; restore is PENDING
-until Recovery/FASTBOOT is reachable. The original full64MiB backup is
-intact and verified. Do not treat this as a completed UI milestone. Recovery/FASTBOOT return triggers
-full stock boot_a restoration and console/mark pull automatically.
+0x230c trial observed real Apple userland: photo IMG20261027025320.jpg and
+persistent console confirm launchd, SpringBoard PID26 and backboardd PID56.
+UI has NOT appeared. There is no AppleCLCD userspace-open trace or swap yet.
+Sample2..7 captured both daemons' stacks; these need symbolication before
+attributing the blocker. CPU-wake resource exception errors are not a proven
+cause. The runner's SystemExit(0) is its600s no-USB timeout, not a kernel crash.
+User returned phone to FASTBOOT; product=matisse verified. Full64MiB original
+boot_a was flashed with fbraw, rebooted Recovery, readback SHA256 verified:
+2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1.
+boot-userland-result.json now has boot_a_restore_pending=false.
+Persistent log recovered: userland-console.txt,49747B, ring4MiB,flush122;
+marks41,build0x230c, launchd exec success. Recovery bootreason=Watchdog after
+user's forced return; do not attribute that reason to a spontaneous XNU reset.
 Prepared but NOT BOOTED: matisse-ui-touch-230c.img7065600B, SHA256
 11dff09b884af56054cdee93ebe2fbe64f2dff367aaa450df729d6577c99c261.
 Same0x230c kernel, touch=1/init=1/rails=1/mark=1/delay3, no diagnostic hold;
@@ -84,13 +88,11 @@ Detached root fsck was explicitly rerun with returncode0: fsck-final.log.
 Commits:057f331 native root tooling;8f98ccc canvas/HID+fsck fix;
 400abc8 verified root installation;30c142c first boot handoff.
 
-Next: obtain the user's screen observation. If stuck, user must hold
-Power+VolumeDown to reach FASTBOOT so the armed runner can restore boot_a
-and pull the persistent console/marks. run-userland.py watches for600s,
-then records running-without-host-usb; use its restore()/pull() path after
-that if the phone returns later. Do not reflash userdata just to retrieve
-logs. Address the actual userland blocker; UI/launchd success is UNVERIFIED.
-No new CI run; full local build and ASan/UBSan host canvas checks passed.
+Next: symbolicate userland-console.txt shared-cache stacks (slide2e264000),
+check early daemon/library initialization before framebuffer open, apply a
+focused fix and repeat boot within existing authorization. Original boot_a
+is restored; Recovery online. No new CI run; full local build and ASan/UBSan
+host canvas checks passed. Prior commits057f331/8f98ccc/400abc8/30c142c/8339d9d.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
