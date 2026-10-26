@@ -114,12 +114,18 @@ existing DSI bounded-busy/pipeline-order test also passes.
 Image matisse-ui-diagnostic-230d.img7065600B SHA256
 cbe88a85d866e5fd3422a930419e29051e888e1f58c2d2f84bc6c9e6b2109b45.
 Stock v4 ramdisk/signature and gzip Image/payload length/content verified.
-Prepared, NOT BOOTED yet. Root unchanged; touch/keys/USB remain disabled;
-next trial samples SpringBoard/backboardd/logd/launchd/notifyd every60s.
+0112 implementation/test commit9b6c6d6; prior restored-userland handoff3ad8269.
+0x230d BOOT STARTED (Unix1793042090.959381); full boot_a write hash verified
+as ec6631103dfe02705bf84121806877d0ff60d2a3f83e15a4b77d1d987cb6d0f9.
+boot-ui-230d-result.json records boot_a_restore_pending=true. run-ui-230d.py
+is watching for1200s and restores via fbraw on FASTBOOT/Recovery return.
+If it times out without USB, manually reuse powertrial.restore() then pull
+ui230d-* logs (never import top-level run-ui-230d.py).
+Root unchanged; touch/keys/USB remain disabled; trial samples
+SpringBoard/backboardd/logd/launchd/notifyd every60s.
 
-Next: boot0x230d under existing authorization, observe UI and collect logd
-samples on FASTBOOT/Recovery return. Original boot_a is currently restored;
-Recovery online. Native activation and UI/input are still unverified.
+Next: observe0x230d UI and collect logd samples on FASTBOOT/Recovery
+return. Current boot_a contains0x230d experiment: RESTORATION PENDING. Native activation and UI/input are still unverified.
 No new CI run; full local CLT build and2 targeted tests passed.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
