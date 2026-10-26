@@ -1,5 +1,34 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-27 (matisse touch): 0117/0118 VTP mode trials both reset the SoC <<<
+
+The device was in OrangeFox Recovery (`matisse`, slot `_a`, serial
+`Q4NVQWVW4DI7EUSW`) before and after both temporary `boot_a` tests. The full
+backup was restored after each test and verified as
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+
+**0117, image `373985c383abf8e220687500526937bde558fcfa1cf342f207f85b53d9926770`.**
+The early hook wrote the vendor-looking unlock bytes (`0x142a=0x43`,
+`0x142b=0x55`) and mark 199 recorded `err=0`. The following full-byte write
+`0x1d23=0x01` returned `err=0` (mark 195), then the SoC stopped before marks
+198/196. Marks were recovered after boot: the last record is 195.
+
+**0118, image `850e1c534ca051c3a82ca91ecd3417586a4a25280a6ae4e90ae893c681a0f6d`.**
+The write was changed to the vendor `regmap_update_bits` shape: read
+`0x1d23=0x03`, preserve all other bits, clear only bit 1, and write `0x01`.
+Mark 200 recorded `old=0x03 new=0x01`; mark 195 again recorded `err=0`, and
+the boot stopped immediately afterward. Recovery reported
+`ro.boot.bootreason=Watchdog`; no XNU panic record was produced. This proves
+the reset is triggered by the physical VTP mode transition, not by the
+unlock-key sequence or by replacing the full-byte write with read-modify-write.
+
+Artifacts are under `research/matisse/20261026-vtpunlock/` and
+`research/matisse/20261027-vtprmw/`; 0118 marks are saved as
+`vtprmw-after-marks.txt`. Do not perform another `0x1d23` write in XNU.
+The next useful work is read-only board-level evidence: measure VTP/touch
+connector voltage or identify the bootloader's PMIC initialization path. The
+working Recovery state remains the reference (`0x1d23=0x01`, `0x1e35=0x0d`).
+
 ## >>> ACTIVE 2026-10-26 13:40 (matisse touch): VRF18 is now really on, VTP is the wall <<<
 
 Three boot_v4 shim images were built with the local CLT toolchain and run
