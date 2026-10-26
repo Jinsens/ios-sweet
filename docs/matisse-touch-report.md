@@ -1,6 +1,7 @@
 # Redmi K50 Pro（matisse / MT6983）触控移植诊断
 
-更新：2026-10-27。代码提交：诊断 `b000e85`，后续供电试验 `998bf3b`（未上机）。
+更新：2026-10-27。代码提交：诊断 `b000e85`，供电与启动修复 `998bf3b`（已上机）。
+`0x230b` 已收到 19 次按下和 19 次抬起，触控内核输入路径通过实机验证；测试后已恢复 Recovery 并核对完整 `boot_a` 哈希。
 旧版报告中的供电结论已被本次 PMIF 寻址审计推翻；下文区分实测记录与尚未验证的解释。
 
 ## 实机 IC 与板级连接
@@ -116,7 +117,7 @@ LK 的 MTK 分段含 `lk` / `bl2_ext` / `aee` / `lk_main_dtb`。
 `0x1b87`、`0x1e29`、`0x1cce`，不是已确认的触控轨寄存器。
 目前未找到可直接采用的 VTP 初始化路径。VCP header 为 `tinysys-vcp-RV55_A`；未运行、未刷写这些固件。
 
-## 构建与镜像校验
+## 0x230a 构建与镜像校验
 
 本地完整 XNU 构建成功（CLT，`tools/build-xnu-clt.sh`，exit 0）。
 七项定向测试通过（三项硬件 mock、四项 mark 解码）；mock 覆盖完整地址命令、完成所有权、禁止写 PMIC，以及 Ready / System Info 对 Sense On 的门控。
@@ -143,7 +144,7 @@ debug=0xc serial=0 cpus=8 keepsyms=1 -enable_kprintf_spam rd=ufsroot0 ufsrw=0 uf
 “PMIC 只读”指不写 PMIC 配置；启动仍会配置 SPI / GPIO，并使用既有 userdata 尾部诊断记录区。
 测试使用临时 `boot_a` 镜像并恢复完整 64 MiB 备份，不改变 GPT。
 
-## 本轮上机状态
+## 0x230a 只读供电审计结果
 
 用户已于 2026-10-27 明确回复“可以启动测试”。本轮产生 57 个新 mark，build ID `0x230a`。
 8 轮 mark201 全部相同且错误位为零：
@@ -167,10 +168,10 @@ Recovery 报告 bootreason Watchdog；本次没有 PMIC 写，不能归因到电
 未取得 SWEETLOG console header；以新 build 的持久 mark 为证据。
 原始结果为 `audit-result.json`、`audit-after-marks.bin` / `.txt`。
 
-**XNU 触控尚未工作。** 下一步应使用正确 type3 写命令完成有边界的 LDO 配置，
-验证读回后，再启用 SALIXP 初始化。该后续镜像尚未上机。
+这次只读审计没有开启两路 LDO，XNU ID 仍为零；后续 `0x230b` 使用正确 type3 写命令
+完成有边界的 LDO 配置和读回校验，再执行 SALIXP 初始化，结果见下文。
 
-## 后续镜像 0x230b：已构建，未上机
+## 0x230b 供电与初始化修复
 
 补丁 `0110-matisse-verified-touch-supplies.patch` 增加单独的
 `sweet_spmi_touch_configure()` API；旧通用写接口继续禁止写入。
@@ -181,7 +182,8 @@ Recovery 报告 bootreason Watchdog；本次没有 PMIC 写，不能归因到电
 `73/00/00/0c/04` 初始快照；在两轨关闭时设置两个 selector；开启 VDD，等 5 ms；
 开启 AVDD，等 10 ms；再检查 `73/01/01/0c/0d`。全部通过才释放复位，
 进入 ID 检查和 SALIXP 初始化。失败时不释放复位、不启动 SPI 轮询。
-这是为已测状态准备的诊断流程，尚未证明实机供电和触控能正常启动。
+这是针对已测冷启动状态的诊断流程；本次上机已通过这些检查，并收到有效触控事件。
+寄存器读回确认的是配置状态，未使用仪表直接测量引脚电压。
 
 新增 mark205 初始状态、206 每步配置返回值/读回、207 供电配置后状态、208 复位释放。
 两项新增 mock 测试验证写操作边界、状态/读回失败时阻止复位释放；合计 9 项定向测试通过。
@@ -197,8 +199,49 @@ Recovery 报告 bootreason Watchdog；本次没有 PMIC 写，不能归因到电
 产物、元数据与默认只读的 `run-power.py` 在研究目录的 `power-230b/` 子目录。
 参数在上一轮基础上改为 `sweettouchinit=1` 并添加 `sweettouchrails=1`，其他诊断开关一致。
 
-此镜像将实际开启触控两路 LDO。此前“可以启动测试”已用于 `0x230a`；
-依据 AGENTS 逐次确认要求，新的 `boot_a` 测试尚待用户确认。执行后仍须恢复完整备份并校验。
+## 0x230b 实机结果：触控事件已收到
+
+用户于 2026-10-27 回复“你可以刷入并测试”，授权本轮独立的 `boot_a` 测试。
+`run-power.py --execute-approved` 已执行完成，退出码为 0，取得 **99 个新 mark，build `0x230b`**：
+
+| 阶段 | 实测证据 |
+|---|---|
+| 冷状态检查，mark205 | `73/00/00/0c/04`，错误位为零 |
+| 四步供电配置，mark206 | 所有操作及读回返回值均为零 |
+| 供电配置后检查，mark207 | `73/01/01/0c/0d`，错误位为零 |
+| 复位释放，mark208 | 返回值为零 |
+| SPI ID，mark96 | `36 40`，SPI 返回值为零 |
+| Controller Ready，mark202 | `ready=1` |
+| System Info，mark203 | 头部 `A5 01`，FW `0x0020`，cfg `0x001b` |
+| Sense On，mark204 | `A0 00 01` 传输返回值为零 |
+| 输入事件，mark97/98 | 19 次按下、19 次抬起，均为 finger 0 |
+
+按下时原始坐标范围为 X `3845..9995`、Y `12425..19655`。
+驱动将原始坐标缩放到既有 SweetHID 的 `1080×2400` 逻辑范围，
+在进入/移动事件中调用 `sweet_hid_touch(..., 1, ...)`，在离开事件中调用
+`sweet_hid_touch(..., 0, ...)`。将按下原始坐标按同一公式缩放后与对应抬起位置比较，
+有 **6 组发生变化**，证明本轮还处理了接触期间的位置变化。
+因此已验证芯片识别、供电配置、复位、扫描启动和内核触控上报路径；
+**尚未验证 iOS 界面交互、多指触控或长时间稳定运行。**
+
+主机在启动后约 **87.86 s** 看到 fastboot，恢复后的 Recovery 报告 `Watchdog`。
+本次没有 mark102（30 s 等待结束）或 mark64（init 失败），因此不能套用
+`0x230a` 的 missing-launchd 解释，也不能据此归因到某次 PMIC 操作。
+mark84 在这份记录中是正常显示遥测，不能仅凭该编号认定 panic。
+Console 提取未找到 SWEETLOG header；上述结论以新 build 的持久 mark 为依据。
+
+脚本使用 fbraw 恢复了完整 **64 MiB** `boot_a` 备份并重启 Recovery。
+恢复后再次独立读取，设备在线、product `matisse`、slot `_a`，`boot_a` SHA256 为：
+
+```text
+2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1
+```
+
+与测试前和备份一致。Recovery 触控 ID 再次读出 `{ 000000003640 }`。
+本轮没有刷写 LK / VCP / DTBO，也未改变 GPT。
+原始证据位于 `power-230b/`：`power-after-marks.bin` / `.txt`、
+`power-result.json`、`touch-summary.json`、`run-power.log`、`chip-id-after-restore.txt`。
+镜像元数据已标记 `device_boot_tested=true`；未产生新的 CI run。
 
 ## 证据位置与下一步
 
@@ -210,4 +253,7 @@ Recovery 报告 bootreason Watchdog；本次没有 PMIC 写，不能归因到电
 关键路径是 `drivers/spmi/spmi-mtk-pmif-core.c`、
 `drivers/input/touchscreen/L11_fts_spi/fts_lib/{ftsHardware.h,ftsCore.c,ftsTool.c}`。
 
-下一步是经确认启动 `0x230b`，按 mark205–208 检查 LDO 配置，再读取 mark96 的 ID 和 mark202–204 的初始化结果；只有实际事件上报到 HID 后，才能确认触控移植工作。
+下一步定位 Watchdog 和未完成 30 s 等待窗口的原因：先核查现有持久记录、
+调度/看门狗代码和 console 捕获路径，再准备针对稳定性的测试。新的破坏性操作
+须另获用户授权；无需为重复证明本次已收到的触控事件而再刷一次相同镜像。
+后续还需验证 iOS 用户界面的输入消费、多指和坐标方向。
