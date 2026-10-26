@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-27 (touch): SALIXP confirmed; PMIF type1 bug fixed; 0x230a audit completed; both LDO enable registers are zero <<<
+## >>> ACTIVE 2026-10-27 (touch): SALIXP confirmed; PMIF type1 bug fixed; 0x230a audited; 0x230b power + Sense On image prepared, NOT BOOTED <<<
 
 **Read this before the older entries below: the old PMIC voltage / VTP-LP
 conclusions are invalidated by a confirmed PMIF command-addressing bug.**
@@ -17,6 +17,8 @@ watchdog resets to the physical VTP LP transition are **not established**.
 The wrong opcode is certain; where old writes landed / whether this explains
 all reset events remains unknown. Preserve historical raw results, not their
 old electrical interpretation. See `docs/matisse-touch-report.md`.
+
+Audit milestone commit: `b000e85` (2026-10-27).
 
 Completed changes for this milestone:
 - 0106 restores the missing local diagnostic baseline for existing 0108.
@@ -53,9 +55,29 @@ Recovery reports Watchdog; do not attribute it to a PMIC write (there were
 none). No SWEETLOG header was found; marks are the valid evidence.
 Seven targeted tests pass (3 hardware mocks +4 mark decoder checks); fixed
 an old test's count97 rejection to count161 for the160-record format.
-Next local work: guarded, type3 touch-LDO configuration and a reviewable
-follow-up artifact. A new boot_a write requires its own AGENTS confirmation.
-PMIC config was read only; existing diagnostic records use userdata tail.
+Follow-up 0110 is prepared locally (0x230b, not booted): strict cold
+snapshot73/00/00/0c/04 guard; set selectors while disabled; enable VDD then
+AVDD; verify73/01/01/0c/0d before releasing reset. Dedicated API allows only
+four fixed field targets, preserves other bits, verifies each write, and
+refuses an enabled rail's selector change. General write API stays blocked.
+Nine targeted tests pass (5 hardware mocks +4 mark checks).
+Final local CLT build exit0. Frozen NDK28.2 shim uses b000e85. Artifacts:
+`research/matisse/20261027-ic-diagnosis/power-230b/`.
+- Kernel 16723464 B SHA256
+  `8b3a9cdda5f7aa7bf3b936ffeea826b22e18c6a14156cd78ea88b7e033b56c76`.
+- Image `matisse-xnu-230b-touch-power.img`, 7065600 B SHA256
+  `a9e52c55d08c6d5896694942eb39a36ff5f7f7f7481d152eae229f55d47f8336`.
+- v4 / stock ramdisk + signature / gzip / embedded payload checks pass.
+- Cmdline uses audit=1, sweettouchrails=1, sweettouchinit=1, 30s hold;
+  keys/battery/USB off. Marks205 cold guard,206 each config,207 powered
+  guard,208 reset release, then96 ID,202/203/204 Ready/info/Sense On.
+- `run-power.py` defaults to read-only preflight. Do not pass
+  --execute-approved until the user confirms this **new** boot_a trial.
+No 0x230b boot, PMIC write or new partition write has occurred after the
+restored0x230a audit. This is the next concrete action, after confirmation
+required by AGENTS for each destructive step.
+Recovery readback after restore again returned touch ID36:40. PMIC config
+was read only in0x230a; existing diagnostic records use userdata tail.
 
 LK/VCP were statically inspected, not modified. LK known LDO helper xrefs
 use other rails (1b87/1e29/1cce); no confirmed VTP init path found yet.

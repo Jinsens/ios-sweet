@@ -166,6 +166,127 @@ int main(void) { mt_pmic_audit(); assert(reads == 40 && marks == 8); }
 '''
         self.compile_run('audit', source)
 
+    def test_touch_supply_writes_are_masked_verified_and_limited(self):
+        defines = '\n'.join(re.findall(
+            r'^#define (?:PMIF_SWINF_\w+|PMIF_CMD_EXT_REG_LONG|SWINF_\w+) .*$',
+            self.spmi, re.M))
+        source = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+typedef uintptr_t vm_offset_t;
+static vm_offset_t sp_pmif = 0x1000;
+static bool sp_ready = true, sp_pmif_ok = true;
+static void *sp_lock = (void *)1;
+static unsigned state, command, writes, data;
+static bool stuck, ignore_write;
+static uint8_t identity = 0x73, en8, en3, sel8 = 0x0c, sel3 = 0x04;
+static void delay(unsigned us) { assert(us == 1); }
+static void IOLockLock(void *lock) { assert(lock == sp_lock); }
+static void IOLockUnlock(void *lock) { assert(lock == sp_lock); }
+static uint8_t *reg(unsigned addr) {
+    switch (addr) {
+    case 9: return &identity;
+    case 0x1bbf: return &en8;
+    case 0x1d23: return &en3;
+    case 0x1e8d: return &sel8;
+    default: assert(addr == 0x1e35); return &sel3;
+    }
+}
+static int sp_pmif_read(unsigned sid, unsigned addr, uint8_t *value) {
+    assert(sid == 5); *value = *reg(addr); return 0;
+}
+''' + defines + r'''
+static uint32_t sp_rd(vm_offset_t base, unsigned off) {
+    assert(base == sp_pmif && off == PMIF_SWINF_STA); return state;
+}
+static void sp_wr(vm_offset_t base, unsigned off, uint32_t value) {
+    assert(base == sp_pmif);
+    if (off == PMIF_SWINF_WDATA) { data = value; return; }
+    assert(off == PMIF_SWINF_ACC && (value & 0xffff0000u) == 0xe5000000u);
+    command = value; writes++;
+    if (!ignore_write) *reg(value & 0xffffu) = data;
+    state = stuck ? 2 : 0;
+}
+''' + function(self.spmi, 'sp_pmif_write_once') + \
+            function(self.spmi, 'sweet_spmi_touch_configure') + r'''
+int main(void) {
+    assert(sweet_spmi_touch_configure(0x142a) != 0 && writes == 0);
+    assert(sweet_spmi_touch_configure(9) != 0 && writes == 0);
+    assert(sweet_spmi_touch_configure(0x1e8d) == 0 && writes == 0);
+    assert(sweet_spmi_touch_configure(0x1e35) == 0 && writes == 1);
+    assert(command == 0xe5001e35u && data == 0x0d);
+    en8 = 0x80;
+    assert(sweet_spmi_touch_configure(0x1bbf) == 0 && en8 == 0x81);
+    assert(command == 0xe5001bbfu && data == 0x81);
+    unsigned before = writes;
+    en3 = 1; sel3 = 4;
+    assert(sweet_spmi_touch_configure(0x1e35) != 0 && writes == before);
+    en3 = 0; identity = 0;
+    assert(sweet_spmi_touch_configure(0x1e35) != 0 && writes == before);
+    identity = 0x73; ignore_write = true;
+    assert(sweet_spmi_touch_configure(0x1e35) != 0);
+    ignore_write = false; stuck = true;
+    assert(sweet_spmi_touch_configure(0x1e35) != 0);
+}
+'''
+        self.compile_run('supply-write', source)
+
+    def test_power_sequence_keeps_reset_low_on_guard_or_transfer_failure(self):
+        source = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <errno.h>
+#define MTK_GPIO_DOUT0_CLR 0x108
+#define MTK_TOUCH_RESET_MASK 8
+static struct { bool platform_ready; uintptr_t pio; } mt = {true, 1};
+static unsigned scenario, updates, releases;
+static bool reset_low;
+static uint8_t values[5];
+static void delay(unsigned us) { assert(us == 5000 || us == 10000); }
+static int sweet_spmi_init(void) { return scenario == 5 ? -1 : 0; }
+static void mt_mmio_wr(uintptr_t base, unsigned off, unsigned value) {
+    assert(base == 1 && off == MTK_GPIO_DOUT0_CLR && value == 8); reset_low = true;
+}
+static void sweet_mark(unsigned code, uint64_t a, uint64_t b) {
+    (void)a; (void)b; assert(code >= 205 && code <= 208);
+}
+static unsigned index_of(unsigned addr) {
+    const unsigned regs[] = {9,0x1bbf,0x1d23,0x1e8d,0x1e35};
+    for (unsigned i=0; i<5; i++) if (addr == regs[i]) return i;
+    assert(false); return 0;
+}
+static int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *value) {
+    assert(sid == 5); *value = values[index_of(addr)];
+    if (scenario == 4 && updates == 4 && addr == 0x1d23) *value = 0;
+    return 0;
+}
+static int sweet_spmi_touch_configure(unsigned addr) {
+    const unsigned order[] = {0x1e8d,0x1e35,0x1bbf,0x1d23};
+    assert(reset_low && updates < 4 && addr == order[updates]); updates++;
+    if (scenario == 3 && updates == 3) return -1;
+    values[index_of(addr)] = updates == 1 ? 12 : (updates == 2 ? 13 : 1);
+    return 0;
+}
+static int mt_touch_reset_init(void) { releases++; reset_low = false; return 0; }
+''' + function(self.touch, 'mt_touch_power_on') + r'''
+int main(void) {
+    for (scenario=0; scenario<=6; scenario++) {
+        values[0]=0x73; values[1]=values[2]=0; values[3]=12; values[4]=4;
+        updates=releases=0; reset_low=false; mt.platform_ready = scenario != 6;
+        if (scenario == 1) values[0]=0;
+        if (scenario == 2) values[1]=1;
+        int err = mt_touch_power_on();
+        if (!scenario) assert(err == 0 && updates == 4 && releases == 1);
+        else assert(err != 0 && releases == 0);
+        if (scenario == 1 || scenario == 2) assert(updates == 0 && reset_low);
+        if (scenario == 3 || scenario == 4) assert(reset_low);
+    }
+}
+'''
+        self.compile_run('power-sequence', source)
+
 
 if __name__ == '__main__':
     unittest.main()

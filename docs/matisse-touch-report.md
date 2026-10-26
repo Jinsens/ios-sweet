@@ -169,6 +169,36 @@ Recovery 报告 bootreason Watchdog；本次没有 PMIC 写，不能归因到电
 **XNU 触控尚未工作。** 下一步应使用正确 type3 写命令完成有边界的 LDO 配置，
 验证读回后，再启用 SALIXP 初始化。该后续镜像尚未上机。
 
+## 后续镜像 0x230b：已构建，未上机
+
+补丁 `0110-matisse-verified-touch-supplies.patch` 增加单独的
+`sweet_spmi_touch_configure()` API；旧通用写接口继续禁止写入。
+新 API 固定 SID5，仅允许 VRF18/VTP selector 的已知目标及 EN bit0，
+以 type3 写入，保留其他位，每笔写后核对读回；若轨已开启且需改变 selector 则拒绝。
+
+`sweettouchrails=1` 的流程：先保持复位为低，检查与本次实测完全一致的
+`73/00/00/0c/04` 初始快照；在两轨关闭时设置两个 selector；开启 VDD，等 5 ms；
+开启 AVDD，等 10 ms；再检查 `73/01/01/0c/0d`。全部通过才释放复位，
+进入 ID 检查和 SALIXP 初始化。失败时不释放复位、不启动 SPI 轮询。
+这是为已测状态准备的诊断流程，尚未证明实机供电和触控能正常启动。
+
+新增 mark205 初始状态、206 每步配置返回值/读回、207 供电配置后状态、208 复位释放。
+两项新增 mock 测试验证写操作边界、状态/读回失败时阻止复位释放；合计 9 项定向测试通过。
+完整本地 CLT 构建 exit0，shim 使用已提交 `b000e85` 的冻结源码与 NDK28.2。
+
+| 产物 | 字节数 | SHA256 |
+|---|---:|---|
+| kernel，build `0x230b` | 16723464 | `8b3a9cdda5f7aa7bf3b936ffeea826b22e18c6a14156cd78ea88b7e033b56c76` |
+| payload | 16719344 | `b52f381cb1383c9b35bdb20beb03c65bf8976fcf7236e9cae2b00fa4f1823e2f` |
+| `matisse-xnu-230b-touch-power.img` | 7065600 | `a9e52c55d08c6d5896694942eb39a36ff5f7f7f7481d152eae229f55d47f8336` |
+
+已通过与上一镜像相同的 v4 / ramdisk / signature / gzip / payload 校验。
+产物、元数据与默认只读的 `run-power.py` 在研究目录的 `power-230b/` 子目录。
+参数在上一轮基础上改为 `sweettouchinit=1` 并添加 `sweettouchrails=1`，其他诊断开关一致。
+
+此镜像将实际开启触控两路 LDO。此前“可以启动测试”已用于 `0x230a`；
+依据 AGENTS 逐次确认要求，新的 `boot_a` 测试尚待用户确认。执行后仍须恢复完整备份并校验。
+
 ## 证据位置与下一步
 
 原始实测、固件反汇编、厂商源码、构建日志、镜像、校验 JSON 和运行脚本都在 ignored：
@@ -179,5 +209,4 @@ Recovery 报告 bootreason Watchdog；本次没有 PMIC 写，不能归因到电
 关键路径是 `drivers/spmi/spmi-mtk-pmif-core.c`、
 `drivers/input/touchscreen/L11_fts_spi/fts_lib/{ftsHardware.h,ftsCore.c,ftsTool.c}`。
 
-下一步首先按 mark201 检查正确寻址后的 MT6373 ID 是否稳定为 `73`，再比较两轨实际寄存器与 Recovery，
-然后判断 XNU SPI ID 是否返回 `36 40`。只有可靠的供电和通信证据到位后，才启用 SALIXP 初始化与实际触摸上报测试。
+下一步是经确认启动 `0x230b`，按 mark205–208 检查 LDO 配置，再读取 mark96 的 ID 和 mark202–204 的初始化结果；只有实际事件上报到 HID 后，才能确认触控移植工作。

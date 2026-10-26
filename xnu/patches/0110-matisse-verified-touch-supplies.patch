@@ -1,0 +1,220 @@
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -1,9 +1,10 @@
+ /*
+  * Shared battery / touch supply diagnostics. Qualcomm uses observer
+  * EXT_READL; MT6983 uses PMIF type 3 (EXT_REG_LONG, 16-bit addresses).
+- * PMIC READ ONLY. MMIO stores issue reads and clear their completion flag.
+- * No interrupt clear, peripheral enable, charger config, or PMIC writes.
+- * Init is serialized by the single built-in SweetBattery personality.
++ * General access is read only. The separate opt-in touch-supply operation
++ * can configure only the four MT6373 LDO fields proven by the Recovery DT.
++ * No interrupt or charger configuration is changed.
++ * Init runs before touch power, or on the SweetBattery start thread.
+  * Battery APIDs are disjoint from the existing keys' 008/4c1 APIDs.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -228,6 +229,57 @@
+ 	return -1;
+ }
+ 
++/* Caller holds sp_lock. One long-address write, with no automatic retry. */
++static int
++sp_pmif_write_once(unsigned addr, uint8_t value)
++{
++	uint32_t sta = sp_rd(sp_pmif, PMIF_SWINF_STA);
++	if (((sta >> 1) & 7u) != SWINF_IDLE) return -1;
++	sp_wr(sp_pmif, PMIF_SWINF_WDATA, value);
++	sp_wr(sp_pmif, PMIF_SWINF_ACC,
++	    (PMIF_CMD_EXT_REG_LONG << 30) | (1u << 29) | (5u << 24) | addr);
++	for (unsigned i = 0; i < 500; ++i) {
++		sta = sp_rd(sp_pmif, PMIF_SWINF_STA);
++		if (((sta >> 1) & 7u) == SWINF_IDLE) return 0;
++		delay(1);
++	}
++	return -1;
++}
++
++/*
++ * Fixed board targets only: selector12=1.8V, selector13=3.3V, EN bit0=1.
++ * Preserve other fields; do not clear LP bits, unlock keys, or change an
++ * enabled rail's selector. The driver separately checks the cold baseline.
++ */
++int
++sweet_spmi_touch_configure(unsigned addr)
++{
++	uint8_t mask, target;
++	unsigned enable = 0;
++	switch (addr) {
++	case 0x1e8du: mask = 0x0f; target = 0x0c; enable = 0x1bbf; break;
++	case 0x1e35u: mask = 0x0f; target = 0x0d; enable = 0x1d23; break;
++	case 0x1bbfu:
++	case 0x1d23u: mask = 0x01; target = 0x01; break;
++	default: return -1;
++	}
++	if (!sp_ready || !sp_pmif_ok || !sp_lock) return -1;
++	IOLockLock(sp_lock);
++	int err = -1;
++	uint8_t identity = 0, old = 0, verify = 0, en = 0;
++	if (sp_pmif_read(5, 0x0009u, &identity) != 0 || identity != 0x73) goto out;
++	if (sp_pmif_read(5, addr, &old) != 0) goto out;
++	uint8_t value = (uint8_t)((old & (uint8_t)~mask) | target);
++	if (value == old) { err = 0; goto out; }
++	if (enable && (sp_pmif_read(5, enable, &en) != 0 || (en & 1u))) goto out;
++	if (sp_pmif_write_once(addr, value) != 0) goto out;
++	if (sp_pmif_read(5, addr, &verify) != 0 || verify != value) goto out;
++	err = 0;
++out:
++	IOLockUnlock(sp_lock);
++	return err;
++}
++
+ /*
+  * Read-only diagnostics: report the arbiter and the APID map entry that owns a
+  * peripheral, so a failed read can be attributed to the lane rather than to
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -21,6 +21,8 @@
+ void sweet_spmi_mst(uint32_t *grp, uint32_t *req);
+ /* Legacy rail trials are disabled; always fails without issuing a write. */
+ int sweet_spmi_write(unsigned sid, unsigned addr, uint8_t val);
++/* Opt-in matisse touch only: four fixed LDO targets, masked and verified. */
++int sweet_spmi_touch_configure(unsigned addr);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsd/dev/sweet_matisse_touch.c
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -1,14 +1,14 @@
+ /*
+- * Read-only ST FTS touch input for the Redmi K50 Pro (matisse, MT6983).
++ * ST FTS touch input for the Redmi K50 Pro (matisse, MT6983).
+  *
+  * The Xiaomi L11_fts_spi driver identifies the panel controller as chip ID
+  * 0x36:0x40, reads eight-byte events with command 0x87, and uses a dummy byte
+  * before returned data. This port polls the event FIFO over SPI6 and reports
+- * contacts through the existing SweetHID service. It does not reset the IC,
+- * change firmware or calibration, or enable PMIC rails. It selects the
++ * contacts through the existing SweetHID service. It selects the
+  * board's SPI6 pins and clock tree from the live MT6983 device tree.
+  *
+- * PMIC reads use extended 16-bit addressing; rail writes are disabled.
++ * PMIC reads use extended 16-bit addressing; sweettouchrails=1 can enable
++ * the two board LDOs after the exact observed cold baseline is checked.
+  * Optional sweettouchinit=1 resets SALIXP and enables scanning after ID check.
+  * Firmware and calibration are never written.
+  */
+@@ -123,6 +123,8 @@
+ 	bool trace;
+ 	bool platform_ready;
+ 	bool rails_done;
++	bool power_requested;
++	bool power_ready;
+ 	unsigned start_calls;
+ 	unsigned start_status;
+ 	volatile unsigned stage;
+@@ -968,15 +970,66 @@
+ 	}
+ }
+ 
++/* Run once before mountroot; leave reset asserted on every power failure. */
++static int
++mt_touch_power_on(void)
++{
++	static const unsigned reg[5] = { 0x0009u, 0x1bbfu, 0x1d23u, 0x1e8du, 0x1e35u };
++	static const uint8_t cold[5] = { 0x73, 0x00, 0x00, 0x0c, 0x04 };
++	static const uint8_t powered[5] = { 0x73, 0x01, 0x01, 0x0c, 0x0d };
++	static const unsigned sequence[4] = { 0x1e8du, 0x1e35u, 0x1bbfu, 0x1d23u };
++	if (!mt.platform_ready || !mt.pio || sweet_spmi_init() != 0) {
++		sweet_mark(205, 0xffu, 0);
++		return EIO;
++	}
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_CLR, MTK_TOUCH_RESET_MASK);
++	delay(10000);
++	uint64_t snapshot = 0;
++	unsigned errors = 0;
++	for (unsigned i = 0; i < 5; ++i) {
++		uint8_t value = 0xff;
++		if (sweet_spmi_read(5, reg[i], &value) != 0 || value != cold[i]) errors |= 1u << i;
++		snapshot |= (uint64_t)value << (8 * i);
++	}
++	sweet_mark(205, errors, snapshot);
++	if (errors) return EIO;
++	for (unsigned i = 0; i < 4; ++i) {
++		int err = sweet_spmi_touch_configure(sequence[i]);
++		uint8_t readback = 0xff;
++		int rd = sweet_spmi_read(5, sequence[i], &readback);
++		sweet_mark(206, ((uint64_t)sequence[i] << 32) | (uint32_t)err,
++		    ((uint64_t)(uint32_t)rd << 32) | readback);
++		if (err || rd) return EIO;
++		if (sequence[i] == 0x1bbfu) delay(5000);
++		if (sequence[i] == 0x1d23u) delay(10000);
++	}
++	snapshot = 0;
++	errors = 0;
++	for (unsigned i = 0; i < 5; ++i) {
++		uint8_t value = 0xff;
++		if (sweet_spmi_read(5, reg[i], &value) != 0 || value != powered[i]) errors |= 1u << i;
++		snapshot |= (uint64_t)value << (8 * i);
++	}
++	sweet_mark(207, errors, snapshot);
++	if (errors) return EIO;
++	int err = mt_touch_reset_init();
++	sweet_mark(208, (uint32_t)err, 0);
++	return err;
++}
++
+ void
+ sweet_touch_rails_early(void)
+ {
+-	int audit = 0;
++	int audit = 0, power = 0, enabled = 0;
+ 	(void)PE_parse_boot_argn("sweetpmicaudit", &audit, sizeof(audit));
+-	if (audit && !mt.rails_done) {
+-		mt.rails_done = true;
+-		mt_pmic_audit();
+-	}
++	(void)PE_parse_boot_argn("sweettouchrails", &power, sizeof(power));
++	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
++	if (mt.rails_done) return;
++	mt.rails_done = true;
++	if (audit) mt_pmic_audit();
++	if (!power || !enabled) return;
++	mt.power_requested = true;
++	mt.power_ready = mt_touch_power_on() == 0;
+ }
+ 
+ /*
+@@ -1051,6 +1104,10 @@
+ 	mt.stage = 2; /* delay expired; the worker reached SPI setup */
+ 	if (mt.trace) {
+ 		sweet_mark(88, delay_s, (uint64_t)mt.spi);
++	}
++	if (mt.power_requested && !mt.power_ready) {
++		printf("SWEET MT TOUCH: supply configuration failed; polling stopped\n");
++		goto out;
+ 	}
+ 
+ 	int sweep = 0;
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -594,7 +594,7 @@
+ #define SWEET_MARK_MAX  160
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x230au
++#define SWEET_BUILD_ID 0x230bu
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;
+@@ -1263,8 +1263,8 @@
+ 			return error;
+ 		}
+ 		/*
+-		 * Read-only MT6373 audit after the mark channel is ready.
+-		 * No-op unless sweetpmicaudit=1; no rail settings are changed.
++		 * MT6373 audit and opt-in touch supplies after marks are ready.
++		 * Rail configuration additionally requires sweettouchrails=1.
+ 		 */
+ 		extern void sweet_touch_rails_early(void);
+ 		sweet_touch_rails_early();
