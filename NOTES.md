@@ -88,11 +88,39 @@ Detached root fsck was explicitly rerun with returncode0: fsck-final.log.
 Commits:057f331 native root tooling;8f98ccc canvas/HID+fsck fix;
 400abc8 verified root installation;30c142c first boot handoff.
 
-Next: symbolicate userland-console.txt shared-cache stacks (slide2e264000),
-check early daemon/library initialization before framebuffer open, apply a
-focused fix and repeat boot within existing authorization. Original boot_a
-is restored; Recovery online. No new CI run; full local build and ASan/UBSan
-host canvas checks passed. Prior commits057f331/8f98ccc/400abc8/30c142c/8339d9d.
+Symbolication complete: research/host-tools/ipsw-3.1.739/ipsw (official
+release checksum7121fce3...3c0e), mounted20H392 cache and userland-symbols.txt.
+Backboardd samples5..7: mach_msg2_trap <- firehose_send_register <-
+firehose_client_reconnect <- os_trace_init_slow <- BKLogCommon <- main.
+Its send to logd has not completed. SpringBoard samples2..7 move through
+dyld notifyDtrace/ObjC map_images/load_categories (still pre-main); this is
+progress, not evidence of one unchanged lockup. No GUI swaps recorded.
+Pulled current16GiB filesystem for diagnostics (334.68s over gzip6,006,002,291B).
+fsck_hfs -fn reports volume appears OK; dirty journal needed a local shadow
+mount, which replayed successfully. No device root writes during diagnosis.
+logd.0.log shows UUID harvesting at~8min, two errno2 assertions at+90880;
+Persist/HighVolume empty; incomplete5.6MiB uuidtext/dsc temp file, no .ips.
+Copied local logs to after230c-*.log. No proven logd root cause yet.
+
+0112 / build0x230d fixes a separate confirmed source omission: GUI present()
+and display fade must call sweet_display_refresh(1) on the command panel;
+old code refreshed only from console, which is muted at first GUI swap.
+Adds C++ C-linkage declarations and configurable sampler timing + uptime.
+Full local CLT build exit0. Kernel16723464B SHA256
+8d6ef2f83cd3b042238a263ab3fd988d2de6a923083ea9a34028572db6584bfe.
+2 targeted tests PASS: actual patched present under ASan+UBSan validates
+all pixels and copy-before-transfer across four geometries/two frames;
+existing DSI bounded-busy/pipeline-order test also passes.
+Image matisse-ui-diagnostic-230d.img7065600B SHA256
+cbe88a85d866e5fd3422a930419e29051e888e1f58c2d2f84bc6c9e6b2109b45.
+Stock v4 ramdisk/signature and gzip Image/payload length/content verified.
+Prepared, NOT BOOTED yet. Root unchanged; touch/keys/USB remain disabled;
+next trial samples SpringBoard/backboardd/logd/launchd/notifyd every60s.
+
+Next: boot0x230d under existing authorization, observe UI and collect logd
+samples on FASTBOOT/Recovery return. Original boot_a is currently restored;
+Recovery online. Native activation and UI/input are still unverified.
+No new CI run; full local CLT build and2 targeted tests passed.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 

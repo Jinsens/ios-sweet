@@ -1,0 +1,105 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -39,6 +39,7 @@
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ 
+ #if defined(SWEET)
++#include <arm64/sweet_matisse_dsi.h>
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -238,6 +239,7 @@
+ 					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
+ 				}
+ 			}
++			sweet_display_refresh(1);
+ 		}
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+@@ -404,6 +406,10 @@
+ 		}
+ 		s->release();
+ 	}
++	/* Command-mode panels need a transfer after the CPU copy. The vsync
++	 * timer already limits presentation to sweetfb_hz; console refreshes
++	 * stop at the first swap and cannot carry GUI frames to the panel. */
++	sweet_display_refresh(1);
+ }
+ 
+ bool
+--- a/osfmk/arm64/sweet_matisse_dsi.h
++++ b/osfmk/arm64/sweet_matisse_dsi.h
+@@ -18,6 +18,10 @@
+ 
+ #include <stdint.h>
+ #include <pexpert/arm64/board_config.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
+ 
+ #if defined(SWEET)
+ /* fb_phys/width/height/stride describe the Boot_Video surface the console
+@@ -58,4 +62,8 @@
+ }
+ #endif
+ 
++#ifdef __cplusplus
++}
++#endif
++
+ #endif /* _ARM64_SWEET_MATISSE_DSI_H_ */
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -594,7 +594,7 @@
+ #define SWEET_MARK_MAX  160
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x230cu
++#define SWEET_BUILD_ID 0x230du
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -16,6 +16,7 @@
+ #include <sys/systm.h>
+ #include <sys/proc.h>
+ #include <sys/proc_internal.h>
++#include <kern/clock.h>
+ #include <kern/task.h>
+ #include <kern/thread.h>
+ #include <pexpert/pexpert.h>
+@@ -64,17 +65,29 @@
+ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+ 	static int chan;
++	unsigned int first = 90, interval = 120;
++	PE_parse_boot_argn("sweetsamplefirst", &first, sizeof(first));
++	PE_parse_boot_argn("sweetsamplesecs", &interval, sizeof(interval));
++	if (first < 10 || first > 3600) {
++		first = 90;
++	}
++	if (interval < 10 || interval > 3600) {
++		interval = 120;
++	}
+ 	if (!PE_parse_boot_argn("sweetsample", sweet_sample_names, sizeof(sweet_sample_names))) {
+ 		strlcpy(sweet_sample_names, "SpringBoard,backboardd", sizeof(sweet_sample_names));
+ 	}
+ 	if (sweet_sample_names[0] == '-') {
+ 		return;
+ 	}
+-	(void)tsleep(&chan, PZERO, "sweetsmp", 90 * hz);
++	(void)tsleep(&chan, PZERO, "sweetsmp", (int)first * hz);
+ 	for (int i = 0; i < 40; i++) {
+-		printf("SMP --- sample %d\n", i);
++		uint64_t uptime;
++		clock_get_uptime(&uptime);
++		absolutetime_to_nanoseconds(uptime, &uptime);
++		printf("SMP --- sample %d uptime %llu ms\n", i, uptime / 1000000);
+ 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
+-		(void)tsleep(&chan, PZERO, "sweetsmp", 120 * hz);
++		(void)tsleep(&chan, PZERO, "sweetsmp", (int)interval * hz);
+ 	}
+ }
+ 
