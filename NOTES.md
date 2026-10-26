@@ -1,5 +1,43 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-27 (userland): rebuilding 20H392 root from the local IPSW <<<
+
+User request: bring the online device through real iOS userland into UI.
+User explicitly authorized partition/flashing operations in this session
+("你可以进行分区表操作，还有刷入操作") and waived userdata backup
+("不需要备份 user data"). Plan uses existing userdata without GPT changes;
+keep bootloaders, recovery, modem/persist and existing backups intact.
+This authorization covers this userland installation and its boot trials.
+
+Observed preflight: root ADB Recovery, matisse, slot _a; userdata
+114319917056 B. Full boot_a hash matches backup:
+2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1.
+Existing userdata is the 64 MiB HFS test root, not the old sweet UI image.
+Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw contains
+20H392/16.7.16, D22AP/D221AP; all three disk images and D22AP DT extracted
+with ZIP CRC verification under research/matisse/20261027-userland/ipsw/.
+OS SHA256 80f426d5b8fca8552f95be427434f1911dbb4c2c6d28aad94f2426ddd0c92483;
+SystemOS 9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849;
+AppOS 391f2df322c3172b021b2874f6da5c3e78b70b3df8f502e1a4af2b1d715c4608.
+The known-good matisse-dual ADT lacked /product: added real unflagged D22AP
+properties in local matisse-userland.adt; hardware geometry unchanged.
+
+In progress: native macOS root repack via tools/mkiosroot-macos.py,
+16 GiB raw journaled case-sensitive HFSX, preserving numeric IDs as root.
+macOS administrator authentication succeeded; no password was shared.
+Root build log: research/matisse/20261027-userland/build-root.log.
+No device writes for this session yet; no UI claim. First trial will use
+verified kernel 0x230b, ufsrw=1/rootrw=1 and real launchd/dyld boot args,
+serial=3/ufslogsecs=1, input/USB disabled initially. mkpayload now has an
+explicit --allow-matisse-root-write opt-in; read-only remains its default.
+Seven board-profile tests passed (including write opt-in checks).
+User's existing shim/build.sh, shim/shim.c, tools/sweet-marks.py and untracked
+0093 patch are retained separately. Frozen tracked shim excludes --kick edits.
+No new CI run; using the previously hardware-tested 0x230b kernel.
+
+Next: finish/verify root image, write and readback-check userdata, boot
+userland trial, recover full console/marks and restore boot_a when possible.
+
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
 **Read this before the older entries below: the old PMIC voltage / VTP-LP

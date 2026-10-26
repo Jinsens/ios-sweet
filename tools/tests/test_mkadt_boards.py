@@ -98,7 +98,7 @@ class BoardProfileTests(unittest.TestCase):
         for keys in ('sweetkeys=0', 'sweetkeys=1', 'sweetkeys=2'):
             self.assertIn(keys, mkpayload.platform_cmdline(blob, keys).split())
         for unsafe in ('cpus=9', 'cpus=0', 'cpus=bad', 'sweetkeys=3',
-                       'sweetkeys=-1', 'sweetusb=3', 'sweetusb=-1', 'ufsrw=1'):
+                       'sweetkeys=-1', 'sweetusb=4', 'sweetusb=-1', 'ufsrw=1'):
             with self.assertRaises(ValueError):
                 mkpayload.platform_cmdline(blob, unsafe)
         with self.assertRaises(ValueError):
@@ -106,6 +106,22 @@ class BoardProfileTests(unittest.TestCase):
         self.assertEqual(mkpayload.platform_cmdline(adt.serialize(self.build()),
                                                    'cpus=8 sweetusb=1'),
                          'cpus=8 sweetusb=1')
+
+    def test_matisse_root_write_requires_explicit_opt_in(self):
+        blob = adt.serialize(self.build(board='matisse'))
+        with self.assertRaises(ValueError):
+            mkpayload.platform_cmdline(blob, 'rd=ufsroot0 ufsrw=1 rootrw=1')
+        args = mkpayload.platform_cmdline(
+            blob, 'rd=ufsroot0 ufsrw=1 rootrw=1', allow_matisse_root_write=True)
+        self.assertIn('ufsrw=1', args.split())
+        self.assertNotIn('ufsrw=0', args.split())
+        self.assertIn('sweetbattery=0', args.split())
+        default = mkpayload.platform_cmdline(blob, '', allow_matisse_root_write=True)
+        self.assertIn('ufsrw=0', default.split())
+        for value in ('2', '-1', 'bad'):
+            with self.assertRaises(ValueError):
+                mkpayload.platform_cmdline(blob, 'ufsrw=' + value,
+                                           allow_matisse_root_write=True)
 
     def test_sweet_defaults_unchanged(self):
         root = self.build()

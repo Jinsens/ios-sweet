@@ -140,7 +140,7 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
-def platform_cmdline(adt_blob, cmdline):
+def platform_cmdline(adt_blob, cmdline, *, allow_matisse_root_write=False):
     """Do not let an MT6983 payload accidentally probe Qualcomm hardware.
 
     Keep the existing sweet/QEMU behavior unchanged. The matisse ADT
@@ -151,11 +151,17 @@ def platform_cmdline(adt_blob, cmdline):
         return cmdline
     cpu_count = len(next(c for c in root.children if c.name == 'cpus').children)
     required = {'sweetbattery': 0, 'ufsrw': 0}
+    if allow_matisse_root_write:
+        del required['ufsrw']
     # sweetusb: 0 off, 1 report MTU3 state only, 2 (default) run the device,
     #           3 run with the EP0/link diagnostic marks
     # sweetkeys: 0 off, 1 report TOPSTATUS/keypad only, 2 (default) feed HID
     # Matisse touch is opt-in until SPI6 clock/power state is verified.
     ranges = {'sweettouch': (0, 1, 0), 'sweetusb': (0, 3, 2), 'sweetkeys': (0, 2, 2)}
+    if allow_matisse_root_write:
+        # Keep read-only as the default even with the opt-in: the caller must
+        # also request ufsrw=1 in the actual kernel command line.
+        ranges['ufsrw'] = (0, 1, 0)
     # sweetusbhold: seconds PID 1 sleeps after soft-connect so the host can
     # enumerate before the missing-launchd panic; absent means no hold.
     bounded = {'sweetusbhold': (0, 120)}
@@ -209,7 +215,7 @@ def platform_cmdline(adt_blob, cmdline):
     return result
 
 
-def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
+def build(kernel_path, adt_path, cmdline, ramdisk_path=None, *, allow_matisse_root_write=False):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -223,7 +229,8 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     kernel_end = (kernel_end + PAGE - 1) & ~(PAGE - 1)
 
     adt_blob = open(adt_path, 'rb').read()
-    cmdline = platform_cmdline(adt_blob, cmdline)
+    cmdline = platform_cmdline(adt_blob, cmdline,
+                              allow_matisse_root_write=allow_matisse_root_write)
     # The ADT decides where the kernel's RAM is (mkadt.py --highmem).
     PHYS_BASE, MEM_SIZE = adt_dram(adt_blob)
     pieces = [(s['vmaddr'], s['vmsize'], buf[s['fileoff']:s['fileoff'] + s['filesize']]) for s in segs]
@@ -269,8 +276,11 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--allow-matisse-root-write', action='store_true',
+                    help='allow explicit ufsrw=1 for an installed iOS root on matisse')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
+    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk,
+                       allow_matisse_root_write=a.allow_matisse_root_write)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':
