@@ -1,0 +1,156 @@
+--- a/bsd/dev/sweet_matisse_touch.c
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -5,11 +5,10 @@
+  * 0x36:0x40, reads eight-byte events with command 0x87, and uses a dummy byte
+  * before returned data. This port polls the event FIFO over SPI6 and reports
+  * contacts through the existing SweetHID service. It does not reset the IC,
+- * change firmware or calibration, or enable PMIC rails.
++ * change firmware or calibration, or enable PMIC rails. It selects the
++ * board's SPI6 pins and clock tree from the live MT6983 device tree.
+  *
+  * This port does not change PMIC rails, touch reset, firmware, or calibration.
+- * SPI6 clock and pin-mux handoff still need hardware validation before
+- * sweettouch=1 is enabled in a normal payload.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -28,6 +27,25 @@
+ extern void sweet_mark(uint32_t code, uint64_t a, uint64_t b);
+ 
+ #define MTK_SPI6_PA             0x11016000u
++#define MTK_TOPCKGEN_PA         0x10000000u
++#define MTK_PERICFG_AO_PA       0x11036000u
++#define MTK_PIO_PA              0x10005000u
++#define MTK_IOCFG_BM_PA         0x11d30000u
++#define MTK_TOP_CLK_UPDATE_0    0x004u
++#define MTK_TOP_CLK_CFG_7       0x080u
++#define MTK_TOP_CLK_CFG_7_SET   0x084u
++#define MTK_TOP_CLK_CFG_7_CLR   0x088u
++#define MTK_PERI_AO_CG          0x03cu
++#define MTK_SPI6_CLK_UPDATE     (1u << 30)
++#define MTK_SPI6_CLK_PARENT     (1u << 16) /* univpll_d6_d2, 208 MHz */
++#define MTK_SPI6_CLK_PARENT_MASK (7u << 16)
++#define MTK_SPI6_CLK_PDN        (1u << 23)
++#define MTK_SPI6_BCLK_GATE      (1u << 23)
++#define MTK_SPI6_HCLK_GATE      (1u << 31)
++#define MTK_SPI6_PIO_MODE_MWR   0x44cu
++#define MTK_SPI6_PIO_MODE_2     0xaaaaaaaau
++#define MTK_SPI6_DRV_SET        0x004u
++#define MTK_SPI6_DRV_FIELDS     0x00000fc0u
+ #define MTK_SPI_CFG1            0x004u
+ #define MTK_SPI_TX_DATA         0x010u
+ #define MTK_SPI_RX_DATA         0x014u
+@@ -77,11 +95,20 @@
+ 
+ struct sweet_matisse_touch_state {
+ 	vm_offset_t spi;
++	vm_offset_t topckgen;
++	vm_offset_t pericfg;
++	vm_offset_t pio;
++	vm_offset_t iocfg_bm;
+ 	bool started;
+ 	bool trace;
++	bool platform_ready;
+ 	unsigned start_calls;
+ 	unsigned start_status;
+ 	volatile unsigned stage;
++	uint32_t clock_cfg;
++	uint32_t peri_gate;
++	uint32_t pin_mode;
++	uint32_t pin_drive;
+ 	bool active[FTS_MAX_FINGERS];
+ 	int x[FTS_MAX_FINGERS];
+ 	int y[FTS_MAX_FINGERS];
+@@ -91,6 +118,71 @@
+ static int mt_sleep_chan;
+ 
+ static uint32_t
++mt_mmio_rd(vm_offset_t base, uint32_t off)
++{
++	__asm__ volatile("dmb oshld" ::: "memory");
++	uint32_t value = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return value;
++}
++
++static void
++mt_mmio_wr(vm_offset_t base, uint32_t off, uint32_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = value;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++/* Match the pin and clock selections observed on the live Recovery DT. */
++static int
++mt_matisse_platform_init(void)
++{
++	if (!mt.topckgen) mt.topckgen = ml_io_map(MTK_TOPCKGEN_PA, 0x100u);
++	if (!mt.pericfg) mt.pericfg = ml_io_map(MTK_PERICFG_AO_PA, 0x100u);
++	if (!mt.pio) mt.pio = ml_io_map(MTK_PIO_PA, 0x500u);
++	if (!mt.iocfg_bm) mt.iocfg_bm = ml_io_map(MTK_IOCFG_BM_PA, 0x100u);
++	if (!mt.topckgen || !mt.pericfg || !mt.pio || !mt.iocfg_bm) {
++		return ENOMEM;
++	}
++
++	/* SPI_SEL uses parent 1 (UNIVPLL_D6_D2) at 208 MHz on this board. */
++	mt_mmio_wr(mt.topckgen, MTK_TOP_CLK_CFG_7_SET, MTK_SPI6_CLK_PDN);
++	mt_mmio_wr(mt.topckgen, MTK_TOP_CLK_CFG_7_CLR, MTK_SPI6_CLK_PARENT_MASK);
++	mt_mmio_wr(mt.topckgen, MTK_TOP_CLK_CFG_7_SET, MTK_SPI6_CLK_PARENT);
++	mt_mmio_wr(mt.topckgen, MTK_TOP_CLK_UPDATE_0, MTK_SPI6_CLK_UPDATE);
++	mt_mmio_wr(mt.topckgen, MTK_TOP_CLK_CFG_7_CLR, MTK_SPI6_CLK_PDN);
++
++	/* Enable SPI6's bus clock and its companion register-interface clock. */
++	uint32_t gate = mt_mmio_rd(mt.pericfg, MTK_PERI_AO_CG);
++	gate &= ~(MTK_SPI6_BCLK_GATE | MTK_SPI6_HCLK_GATE);
++	mt_mmio_wr(mt.pericfg, MTK_PERI_AO_CG, gate);
++
++	/* GPIO164..167: SPI6_B MI/CSB/MO/CLK, mux function 2. */
++	mt_mmio_wr(mt.pio, MTK_SPI6_PIO_MODE_MWR, MTK_SPI6_PIO_MODE_2);
++	/* MT6983 pinctrl encodes drive-strength=<7> as raw value 7. */
++	mt_mmio_wr(mt.iocfg_bm, MTK_SPI6_DRV_SET, MTK_SPI6_DRV_FIELDS);
++
++	mt.clock_cfg = mt_mmio_rd(mt.topckgen, MTK_TOP_CLK_CFG_7);
++	mt.peri_gate = mt_mmio_rd(mt.pericfg, MTK_PERI_AO_CG);
++	mt.pin_mode = mt_mmio_rd(mt.pio, 0x440u);
++	mt.pin_drive = mt_mmio_rd(mt.iocfg_bm, 0x000u);
++	mt.platform_ready = true;
++	printf("SWEET MT TOUCH: platform clk=%#x gate=%#x pin=%#x drv=%#x\n",
++	    mt.clock_cfg, mt.peri_gate, mt.pin_mode, mt.pin_drive);
++	return 0;
++}
++
++static void
++mt_mark_platform(void)
++{
++	if (mt.trace && mt.platform_ready) {
++		sweet_mark(100, ((uint64_t)mt.clock_cfg << 32) | mt.peri_gate,
++		    ((uint64_t)mt.pin_mode << 32) | mt.pin_drive);
++	}
++}
++
++static uint32_t
+ mt_spi_rd(uint32_t off)
+ {
+ 	__asm__ volatile("dmb oshld" ::: "memory");
+@@ -353,6 +445,7 @@
+ 	}
+ 	if (mt.started) {
+ 		if (invocation != 0 && (enabled || trace || mt.trace)) {
++			mt_mark_platform();
+ 			sweet_mark(89, ((uint64_t)(uint32_t)enabled << 32) | (uint32_t)trace,
+ 			    ((uint64_t)mt.start_status << 48) |
+ 			    ((uint64_t)(invocation & 0xffffu) << 32) | mt.stage);
+@@ -374,6 +467,12 @@
+ 		printf("SWEET MT TOUCH: SPI6 mapping failed\n");
+ 		return 1;
+ 	}
++	if (mt_matisse_platform_init() != 0) {
++		mt.started = true;
++		mt.start_status = 5; /* MT6983 pin/clock register mapping failed */
++		printf("SWEET MT TOUCH: platform register mapping failed\n");
++		return 1;
++	}
+ 	thread_t thread;
+ 	mt.stage = 1; /* creation accepted; worker may still be queued */
+ 	kern_return_t kr = kernel_thread_start(mt_touch_thread, NULL, &thread);

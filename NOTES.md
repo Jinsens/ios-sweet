@@ -1,82 +1,272 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-26 (matisse touch): local Xcode build and diagnostic image ready <<<
+## >>> ACTIVE 2026-10-26 (USB): device tree read, diagnostic hold built - NOT FLASHED <<<
 
-**Device:** the user confirmed it is online in OrangeFox Recovery and available
-for debugging. Read-only preflight on 2026-10-26 sees `recovery`, product
-`matisse`, slot `_a`, and `boot_a` SHA256
-`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
-No partitions or userdata mark records were written during this turn.
+**Request (user): "/Users/xiaohuasheng/Documents/twrp 有设备树 现在再继续帮我移植 USB 功能".**
+The TWRP device tree (`Documents/twrp/device_xiaomi_matisse-TWRP`) and the live
+recovery were used as the reference the earlier USB runs lacked.
 
-**Measured touch path:** Recovery exposes input device `fts` at
-`/devices/platform/11016000.spi6/spi_master/spi6/spi6.0`, with module
-`fts_touch_spi`. Its log says screen-off turns touch sensing/IRQ off; firmware
-`st_fts_L11.ftb` is absent in Recovery, but the driver subsequently reports
-sense-on. Do not run firmware/reset/calibration writes from XNU.
+**What the device tree settles (measured, not inferred).** `prebuilt/dtb` is an
+MTK `dt_table` (magic `0xd7b7ab1e`) holding one FDT at offset 64; the live
+recovery DTB (`research/matisse/20261025-touch/recovery-live-20261026.dtb`,
+410,299 B) is the same board with overlays applied. USB0 is `usb0@11201000`
+(`mediatek,mt6983-mtu3`; MAC `0x11201000+0x2e00`, IPPC `0x11203e00+0x100`,
+IRQ 160), `dr_mode="otg"`, `maximum-speed="high-speed"`,
+`mediatek,force-vbus`, `usb-role-switch`; PHY `usb-phy0@11e40000` with efuse
+calibration cells. There is **no MUIC node and no MUIC driver**: kallsyms has
+no `muic` symbol, `mtk_chg_type_det.ko` only listens to the MT6375 TCPC
+notifier, and the only I2C "USB" chip is `xmusb350@35` on `i2c@11e00000`,
+which is a QC2/QC3/HVDCP charger-type IC (`XMCHG_XMUSB350` strings,
+`ops_xmusb350_*`), not a data-path switch. `typec_mux_switch` and
+`usb_dp_selector@10005600` are DP-alt-mode orientation only. The earlier
+"MT6363 MUIC is the prime suspect" note is **not supported**: the D+/D- path
+has no software switch on this board.
 
-**Patch 0099:** add a read-only MT6983 SPI6 PIO poller, ST FTS chip-ID/FIFO
-reader, contact-to-SweetHID mapping, and start it before root selection so the
-RAM-disk path can receive touch too. `sweettouch` and `sweettouchmark` remain
-off by default; a diagnostic image can pass `sweettouch=1 sweettouchdelay=10
-sweettouchmark=1`. The last option records the probe and each down/up through
-the existing last-block boot-mark channel. It does not alter normal touch runs.
-The SPI register setup was corrected against the upstream MediaTek driver:
-enhanced SCK timing belongs in CFG2 and completion is STATUS0 FINISH/PAUSE,
-not STATUS1. The driver leaves chip reset, firmware, calibration and PMIC
-rails untouched; SPI6 clock/pin-mux handoff remains unverified.
+**Known-good register reference (live recovery, adb up).** Read through
+`/sys/kernel/debug/usb/11201000.usb0/regs/*` while adb worked: IPPC
+`PW_CTRL0 0x10411020`, `PW_CTRL1 1`, `PW_CTRL2 0`, `PW_CTRL3 1`,
+`OTG_STS 0x16c016c0`, `U3_CTRL_0P 0x88`, `U2_CTRL_0P 0x48`,
+`HW_ID 0x20180724`; CSR `DEVICE_CONF 0x04000003`,
+`POWER_MANAGEMENT 0x64f1`, `DEVICE_CONTROL 0x99`, `USB20_OPSTATE 0x12`,
+`LINK_STATE_MACHINE 0x00ff0101`, `MISC_CTRL 0x80000003`, `LV1IER 0x37`,
+`EPIER 0x00010001`, `QIER0 0x00020002`, `QIER1 0x00160006`. XNU's takeover
+reproduces these within the LK handoff, so the written values are not the
+obvious fault.
 
-**Validation:** `tools/xnu-cc.py` using the 39158169212 CI compile log and
-`xnu/out/local` passed all 3 changed C files (0 failed). Patch 0099 replays
-exactly against the captured pre-touch sources for all 4 XNU files. The full
-local build succeeded with Xcode 16.4 (16F6):
-`DEVELOPER_DIR="$HOME/Downloads/Xcode.app/Contents/Developer" tools/build-xnu-local.sh xnu/out/local kernel`.
-Kernel is 16,705,944 bytes, SHA256
-`24d6f2c658a2d001fdd23c5f88cc3b283ff7bdbd4df52aa8c43bed131ce81d26`; the
-linked symbol table contains `sweet_matisse_touch_start` and
-`mt_touch_thread`. Xcode emitted optional-header/`strip --minimize` warnings,
-but the build ended `done building xnu` with status 0.
+**New hypothesis (fits every previous observation).** The MTU3 poll thread is
+created in `sweet_usb_probe()` before mountroot, but the kernel panics on the
+missing `/sbin/launchd` almost at once; the touch worker showed exactly this
+"created but never ran" pattern until `sweettouchhold`. A D+ pull-up that
+appears and disappears inside the host's port-debounce window leaves no device
+in `ioreg` - which is what every USB run reported. macOS `log show` at default
+level also hides the xHCI port messages.
 
-**Diagnostic image:**
-`research/matisse/20261025-touch/matisse-xnu-touch-diagnostic.img`, 7,057,408
-bytes, SHA256
-`2690c88eb247e56ba88c8f736f45285e8314479b67a097c14e3e99c2d0d980de`.
-Payload SHA256 is
-`46de96c7285f87caca9417e5bc366fc44f28cc9080857599dcea6e6ef7076815`.
-The v4 image embeds that exact payload, retains the stock Recovery ramdisk
-and signature, and uses `sweettouch=1 sweettouchdelay=10 sweettouchmark=1`.
-The shim was rebuilt from `git archive HEAD` in an ignored staging directory,
-so the pre-existing local edits in `shim/` were not included. The dedicated
-`run-touch-test.py` has a read-only default; its preflight passed on the
-connected Recovery device and confirmed the full `boot_a` backup hash.
+**Change 0107 (built, verified, not flashed).**
+`xnu/patches/0107-matisse-usb-diagnostic-hold.patch`: `sweetusbhold=N`
+(0..120 s, absent = off) sleeps PID 1 in timed waits before
+`load_init_program`, exactly like `sweettouchhold`, then
+`sweet_mtu3_snapshot()` records the controller state. New marks: 43 poll
+thread entered, 44 first poll (`a`=EP0CSR, `b`=COMMON_USB_INTR), 45 1000 polls
+(`a`=setups<<32|resets), 46 polls/setups/resets, 47 EP0CSR +
+COMMON/LINK interrupt status, 48 DEVICE_CONF + POWER_MANAGEMENT/speed, 49
+LINK_STATE_MACHINE + USB20_OPSTATE/configured, 105/106 hold start/end.
+`tools/mkpayload.py` now accepts `sweetusb=0..3` and validates
+`sweetusbhold=0..120`; `tools/sweet-marks.py` decodes the new codes.
 
-**First hardware trial (2026-10-26):** the user explicitly authorized flashing
-and testing. The diagnostic image was written to `boot_a`; full partition
-readback matched expected image-plus-backup-tail SHA256
-`3f800eb357fa84f2cb12545232f7b7a043ca2964135acec69f61aa9fc2dcba47`. The
-runner did not see a changed Recovery boot ID within 180 s. It restored the
-full backup through ADB and verified
-`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`; current
-read-only check is Recovery, `matisse`, slot `_a`, same hash.
+**Artifacts.** kernel 16,723,368 B `766b292c...`; payload 16,719,200 B
+`cfac72a0...`; boot image
+`research/matisse/20261026-usb/matisse-xnu-0107-usbhold.img`, 7,065,600 B,
+SHA256 `9d3f874dbd2f8c2e3cfe7703bf2392b01a87de5591f5ec2828994145cd70530b`,
+header v4, stock ramdisk and boot signature verified, payload embedded
+byte-for-byte (checked by `verify-usbhold-image.py`). The frozen shim was
+rebuilt with `shim/build.sh` (Xcode 16.4 + NDK 28.2 clang/ld.lld), so the
+embedded-length constant is compiled instead of patched at two MOVZ sites.
 
-The mark block grew from 63 to 69 records and reached root-mounted/init lookup
-and the known missing-init panic path, so the new XNU image ran. No touch probe
-or contact marks 96/97/98 were present, and the userdata console area had no
-`SWEETLOG` header. This does **not** distinguish a start/boot-arg/thread issue
-from an SPI access issue. The image carried `sweettouch=1`,
-`sweettouchdelay=10`, and `sweettouchmark=1`; the user tapped during the
-diagnostic window. Do not call this a touch-controller failure yet.
+**Next (needs explicit approval for one `boot_a` write).**
+`research/matisse/20261025-usb/run-usb-boot.py usbhold107 <img> <sha> --window=240`.
+It now records every new host USB device (not only VID 0x1209), pulls and
+decodes the mark block, greps the macOS USB log for the run window, and falls
+back to `restore-boot-a.py` over fastboot when recovery does not return.
+Reading the result: mark 43 absent = the poller never ran; 44-45 present with
+no host device = controller/PHY; 46-49 with `setups>0` but `configured=0` =
+EP0; `configured=1` = enumeration worked and the ECM side is next.
 
-No CI build. Next add a persisted stage marker for profile/argument parsing,
-thread creation/wakeup and SPI probe, then run another single-boot diagnostic
-with the same verified restore path. After a confirmed chip ID and input
-events, decide whether to enable Matisse touch by default.
+## >>> ACTIVE 2026-10-26 (matisse touch): Recovery inspection and platform trial <<<
 
-**Next:** get that explicit confirmation, run the one-boot image, inspect the
-touch probe/contact marks and persistent console log, and restore/hash-verify
-`boot_a`. After hardware results, decide whether to enable Matisse touch by
-default. Keep unrelated worktree edits unstaged, including `shim/build.sh`,
-`shim/shim.c`, the untracked `xnu/patches/0093-sweet-log-readonly.patch`,
-`.DS_Store` and `.workbuddy/`.
+**Device / safety:** the user authorized temporary `boot_a` flash tests and
+reported the phone in Recovery. Current state is OrangeFox Recovery, product
+`matisse`, slot `_a`. The full backup at
+`backup/recovery-20261021/boot_a-live-20261021.img` is 67,108,864 bytes and
+has SHA256 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+The latest trial restored the entire backup and verified this exact hash.
+No GPT, recovery, bootloader, modem or persist partition was written. The test
+kernel did update the existing last-block boot-mark channel in `userdata`; no
+userdata filesystem content was changed. Diagnostic copies remain in the
+ignored research directory.
+
+**Recovery inspection (2026-10-26):** saved live DTB at
+`research/matisse/20261025-touch/recovery-live-20261026.dtb`, SHA256
+`ba9acc0a3c0b9741d6a530f5328519628848068adc4fe376a57ece853e9d1ad6`.
+Recovery binds `fts` (`st,spi`) under SPI6 at `0x11016000`; SPI6_B uses
+GPIO164–167, function 2, 7 mA. Reset is GPIO3, IRQ GPIO8. Supplies VRF18_AIF
+(1.8 V) and VTP (3.3 V) are on. `pinctrl-handles` reports `pmx_ts_spi_mode`.
+An idle `clk_summary` showed the SPI clock disabled at that sample; this alone
+is not evidence of a fault because runtime PM can autosuspend it. No firmware,
+reset, calibration, regulator or storage writes were performed.
+
+**Patch 0102 and local build:** the read-only FTS poller now has an MT6983
+platform handoff that selects the live board's SPI6 parent and gates, GPIO164–167
+function 2, and drive strength 7. It does not touch touch reset or PMIC rails.
+`tools/sweet-marks.py` now decodes mark 100. Single-file clang check passed and
+the full XNU build succeeded with Xcode 16.4 (16F6): kernel 16,705,944 bytes,
+SHA256 `e576f0f2a7f00e80c7c975a3434acef74c57f3ac17dd5b9f9714953b406b5d6a`
+(build ID `0x2308`). Optional-header and `strip --minimize` warnings were
+nonfatal. There is no CI build for this trial.
+
+**Image and hardware result:**
+`research/matisse/20261025-touch/matisse-xnu-touch-platform.img` is 7,057,408
+bytes, SHA256 `a267abb2b3ff07192842417bc95cd80ee1ccb300c009dbbbb2da8df323f67ac2`.
+The v4 header, stock Recovery ramdisk, and signature matched the original.
+Read-only preflight passed. Temporary `boot_a` readback SHA256 was
+`9746d9626fc76b16f87e1740eaacfd3ee7349828582a8cd9b8ebd0f18e957c67`; the
+runner detected Fastboot instead of a Recovery return and automatically
+restored the full backup, then verified the original hash above.
+
+The persisted mark block has 71 records for build `0x2308`. Mark 100 reads back
+`CLK_CFG_7=0x81010001`, peripheral gate `0x7f7e3f0e`, SPI6 pin mode
+`0x22222222`, drive fields `0x00000fc0`, matching the intended clock/pin
+configuration writes. Mark 89 says `sweettouch=1`, tracing enabled, thread
+creation returned success (`status=4`), but worker stage remains 1. There are no
+worker-wakeup mark 88, SPI ID result 96, or contact marks 97/98. The userdata
+console region has no SWEETLOG header. Thus the platform MMIO readbacks are
+confirmed, but SPI communication and touch events are **not** confirmed. The
+user was asked to tap during the boot window; actual taps are unconfirmed.
+
+**Follow-up diagnostic hold (patch 0103):** the prior trial showed the worker
+thread was created but had not run before the incomplete test root reached the
+missing-init panic. Added `sweettouchhold=N`, capped at 120 seconds and disabled
+unless explicitly set, to sleep PID 1 in timed waits before `load_init_program`.
+The test image uses `sweettouchhold=45` and `sweettouchdelay=1` so scheduled
+threads can probe and poll before the expected panic. Full XNU build succeeded;
+kernel is 16,705,992 bytes, SHA256
+`44d39d3fe746a6c0dfb4e505ea625aefadb132f35a87ae5dc2f10ce5951e6ae8`.
+
+The hold payload is 16,701,872 bytes, SHA256
+`4545346834e3284903262db057489c4673657e8144f880466f0374fe7f81ba29`.
+The frozen shim's embedded-length check was updated at its two verified
+AArch64 MOVZ sites from `0xfed980` to `0xfed9b0`; package validation confirms
+exact payload match, boot v4, original Recovery ramdisk and signature. The new
+boot image is 7,061,504 bytes, SHA256
+`3409f4708f59fac680507a1d927e2a4fb5e57f0fda08b135cf4e62bea6590b00`.
+Read-only device preflight passed on Recovery and verified the original
+`boot_a` backup hash. Patch 0104 was then flashed temporarily, and the runner
+restored the full backup after the device entered Fastboot. It verified the
+original `boot_a` hash and returned the device to Recovery.
+
+**Patch 0104 hardware result (2026-10-26):** the kernel is 16,705,992 bytes,
+SHA256 `593b6a8fb27924aafdd9d792463d9435820e13f9946de391d68d6bcde4402f10`.
+The v4 test image is 7,061,504 bytes, SHA256
+`ab563d6639b0d9e88809fa2661da2d8906355715ac104e17d6d8585d2315d01d`; payload
+SHA256 `d4cd887d6add97d6c5d0be4c41d6d462f2b94c30c468e554363e7937f754276b`.
+Image preflight confirmed the original Recovery ramdisk and signature. Marks
+show the worker ran, SPI transfer returned `err=0`, CFG0 read back as
+`0x012b001d`, CFG3 was `0`, CMD was `0x83010`, and STATUS0 was `0`; the FTS ID
+remained `00:00`, with no touch down/up marks. Hold start/end marks were both
+present. The runner detected Fastboot and restored the exact original backup
+hash `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+The user was asked to tap in the test window, but actual taps are unconfirmed.
+Thus matching the Recovery controller's enhanced CS timing did not establish
+SPI communication; the earlier CS-timing root-cause guess is disproven.
+
+**Patch 0105 hardware result (2026-10-26):** local Xcode 16.4 build succeeded;
+kernel SHA256 `958ea6ccae259e79708956049736d5f0c02fcceaa08cd94b8c5224ea0557bdbd`,
+16,705,992 bytes. Payload SHA256
+`66610274374b292bc399c25a339ed4de8bd89ead1cad18a1202c9ae362671adf`; v4 image
+SHA256 `8be7b3d8084b7a25b6a052032b67b8cf0896b12fae6f4dac743c03ce30d2e562`,
+7,057,408 bytes. Original ramdisk and signature validated. The written image
+readback hash was `a4c8ebc562d1a4f2aaf2cfc8f46b6a91c12c781511e40f15ad0f7c78a233ca7d`.
+The device entered Fastboot; the runner restored `boot_a` and verified the
+original full-backup hash, then rebooted Recovery. The latest mark block has
+76 records for build `0x2308`; chip-ID mark 96 remains `00:00`, there are no
+97/98 touch events, and hold marks 101/102 are present. Mark 104 is absent
+because the reset helper runs before the UFS mark channel is available (inference
+from the boot call order); the subsequent init snapshot reports worker status 4,
+which means the helper's GPIO mode/output readback passed before the worker was
+created. GPIO3 reset release alone did not restore SPI responses.
+
+**Patch 0106 hardware result (2026-10-26):** a comparison sweep replaced the
+single chip-ID read. Kernel 16,706,112 bytes, SHA256
+`b65ad033a4a45ee984f306a1edb5b831a2d5fabdbca4911d5918e881a06e416f`; payload
+16,701,984 bytes, SHA256
+`95b9f4613f3df64107338baed0acdf0ea243161a4787830b7a1bd9c7c50e766f`; v4 image
+7,061,504 bytes, SHA256
+`41110a912d727c4dac04e727022756477f30b31477b7fab863be6c2c19467624`.
+Artifacts: `research/matisse/20261025-touch/matisse-xnu-touch-spi-sweep.{img,json,payload}`,
+runner `run-touch-spi-sweep.py`, repacker `repack-touch-spi-sweep.py` (rewrites
+the two 32-bit MOVZ/MOVK `EMBEDDED_XNU_BYTES` sites at image offsets 0x53e4 and
+0x5470 because the payload length changed). The sweep runs only with
+`sweettouchsweep=1`; the production path is unchanged.
+
+Marks (86 records, build `0x2308`) give the first unambiguous split:
+- 110: `CFG3=0`, `PAD_SEL=0` before the first transfer. The boot firmware leaves
+  the pad selector at SPI6_A; only the DT value 1 selects SPI6_B, and the write
+  sticks (`mark 118` reads back 1). Nothing was lost by the old `CFG3=0` write.
+- 111 internal loopback (`SPI_CMD_SPIM_LOOP`) returned the transmitted pattern
+  exactly: `rx=a5 5a 3c c3 0f f0 96 69`, `match=1`, `err=0`, 3,514 ns for 8 bytes.
+  The controller, its bus clock, the TX/RX FIFO and the shifter therefore work;
+  the 3.5 us duration rules out a stale FINISH bit.
+- 112..116 all returned eight zero bytes: 4-byte address with `CFG3=0` (3,919 ns),
+  4-byte address with `CFG3` preserved, 3-byte address with `CFG3` preserved,
+  `PAD_SEL=0`, and `SAMPLE_SEL=1`. Chip ID stayed `00:00` and no 97/98 events.
+- 117/118: `STATUS1=1` after every attempt, i.e. the transfer completed normally
+  in all five variants.
+So the earlier CS-timing, CFG3 and address-framing hypotheses are all disproven,
+and the fault is downstream of the SPI controller: the chip never drives MISO in
+any configuration. Remaining candidates are the pad-level output path (the
+speculative `IOCFG_BM+0x004` drive write is unverified and may have zeroed pad
+fields) or the chip's power/reset state during an XNU boot.
+
+Device safety: the test ran to the expected missing-init panic and the phone was
+in Fastboot afterwards; `tools/fbraw.py flash boot_a` restored the full 64 MiB
+backup and `sha256sum` on-device confirms
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`. No other
+partition was touched.
+
+**Patches 0107-0111 (2026-10-26, pad-level sweep):** five temporary boots
+narrowed the fault from "controller" to "the chip never answers". Source of the
+last build is snapshotted at
+`research/matisse/20261025-touch/sweet_matisse_touch-0111.c`; run artifacts are
+`matisse-xnu-touch-{pad-observation,bitbang,gpiomode,ies,irqcheck}.{img,json,payload}`
+with matching `*-after-marks.{bin,txt}`. Every trial ended in the expected
+missing-init panic, `boot_a` was restored from the full backup each time, and
+`sha256sum` on device returned `2931647a56...86b1` after every restore.
+- The PIO layout is 0x10 bytes per 32 pins (data +0x0, set +0x4, clear +0x8),
+  so DIN for pins 160..191 is at `0x10005250`, not `0x214`. The earlier "all
+  pads low" reading was a wrong register.
+- The mode write used by patch 0102 (`0x1000544c`) is a **no-op**: readback of
+  `0x440` never changes. Writing the data register `0x10005440` directly works
+  (`0x22221111` -> `0x00001111`), which is what made a real bit-bang possible.
+- With the corrected DIN, CSB (GPIO165) is driven low during a transfer and
+  released afterwards, so the SPI6 controller does reach the pads. Loopback
+  still returns the exact TX pattern in 3.9 us, so the shifter and bus clock run.
+- GPIO-mode bit-bang (verified mux switch, MI as input, CS/CLK/MOSI driven by
+  hand at ~500 kHz) returns eight zero bytes for both 4-byte and 3-byte address
+  framings: the chip does not answer even without the SPI controller.
+- MT6983 register tables were recovered from the vendor source
+  (`MiCode/Xiaomi_Kernel_OpenSource`, branch `rubens-s-oss`,
+  `drivers/pinctrl/mediatek/pinctrl-mt6983.c`). IOCFG base 5 = `0x11d30000`
+  is the block for GPIO160..167; IES word `+0x0050` bits 15/14/16/13, PU
+  `+0x00A0`, PD `+0x0070`, drive `+0x0110`. IES read back all ones, so input
+  enable was never the missing piece.
+- The PU/PD words read from XNU (`0xfb7a5beb` / `0x00048410`) match Recovery's
+  `pinconf-pins` exactly (165 pull-up, 164/166/167 pull-down), which proves the
+  whole pad configuration survives the reboot and that every DIN reading above
+  is trustworthy.
+- Touch IRQ (GPIO8, IOCFG base 11 = `0x11f10000`, IES `+0x0060` bit 16) had its
+  input enable **clear**; setting it did not change the level: 64 samples read
+  0 before and after a 200 ms reset pulse, while Recovery reports the same line
+  as `in hi`. A long reset plus a repeat chip-ID read still returned `00:00`.
+Conclusion: mux, IES, bias, reset drive and the SPI controller are all correct
+and identical to Recovery; the touch controller itself never drives MISO or INT
+during an XNU boot, i.e. it is not running. The remaining explanation is its
+supply: Recovery shows `mt6373_vrf18_aif` (1.8 V) and `mt6373_vtp` (3.3 V)
+enabled with `spi6.0-vdd` / `spi6.0-avdd` as the only consumers, and XNU never
+enables either rail.
+
+**Next:** read the MT6373 LDO enable state from XNU before anything else. The
+SPMI helper (`bsd/dev/sweet_spmi.c`) only supports SID 0 reads through the
+MT6363 channel and has no write path, so first locate the MT6373 SID and the two
+LDO enable registers (DT `regulator.55` = `mt6373_vrf18_aif`, `regulator.64` =
+`mt6373_vtp`), add a read-only probe and record it in a mark. Only after a
+confirmed "disabled" reading should `sweet_spmi` grow a write so the two rails
+can be enabled exactly as the FTS probe does (vdd then avdd, no voltage change),
+followed by the same temporary boot and full `boot_a` restore. Do not enable
+Matisse touch by default until chip ID `36:40` and down/up events 97/98 are
+observed.
+
+**Unrelated worktree state:** keep pre-existing edits out of commits:
+`shim/build.sh`, `shim/shim.c`, `.DS_Store`, `.workbuddy/`, and the untracked
+`xnu/patches/0093-sweet-log-readonly.patch`.
 
 ## >>> ACTIVE 2026-10-25 (display): readable text with 0098; source fix validated <<<
 
@@ -5260,3 +5450,192 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## Touch supply probe, 2026-10-26 (patches 0112-0120)
+
+The chip is silent for a reason on the PMIC side, but the PMIC access layer is
+only half-trusted yet. Facts, in order of confidence:
+
+**SPMI now works from XNU, but only just.** The old observer path in
+`bsd/dev/sweet_spmi.c` (core `0x0c440000`, observer `0x0e600000`, 0x80 per APID)
+is for another SoC: its arbiter version reads 2 on matisse, so it never
+initialised. Added a PMIF backend at `0x1c015000` using the mt8195 register
+table (`PMIF_INIT_DONE 0x0`, `INF_EN 0x24`, `ARB_EN 0x150`,
+`CMDISSUE_EN 0x3b8`, SWINF channel 2 at `0x880`/`0x884`/`0x894`/`0x8a4`/`0x8a8`)
+and the upstream command encoding
+`(1 << 30) | (sid << 24) | ((len-1) << 16) | addr`, write adds `BIT(29)`.
+Reads work: `init_done=1`, `INF_EN=0x1fbfff`, `ARB_EN=0x1ebfff`,
+`CMDISSUE_EN=1`, first SWINF state `0x8441` (IDLE) then `0x2844d`
+(WFVLDCLR, no error bit).
+
+**Bug still open:** the channel does not return to IDLE after a few reads.
+`VLD_CLR` is written at `0x8a4`, yet `SWINF_STA` still shows WFVLDCLR
+(`0x2844d`), and later reads time out and return -1. Confirmed in the
+`addrcheck` boot: reads at marks 162/165 succeed, the batch at marks 168/169
+fails. Any conclusion drawn from a read must be checked against the error
+byte; a value of `0xff` with err `0xff` is a failed read, not data.
+
+**MT6373 rails (SID 5), while reads still worked:**
+- `0x1bbf` (VRF18_AIF enable) = `0x00` before any write, on every boot. The
+  bootloader leaves the touch 1.8 V rail off, which is consistent with the chip
+  never answering.
+- `0x1d23` (VTP enable) = `0x03` (EN + LP).
+- `0x1e8d` (VRF18 vosel) = `0x07`, `0x1e35` (VTP vosel) = `0x75`. These do not
+  match Recovery's 1.8 V / 3.3 V for the documented tables, so the address or
+  field mapping is not yet proven. Treat the enable bits as probable and the
+  vosel bytes as unverified.
+
+**Writing the enable bit: only the base register is safe.** Writing 1 to the
+buck-style `SET` alias `0x1bc0` crashed or wedged two consecutive boots
+(`power`, `power2`: marks stop at 101/88, no panic record). The vendor LDO path
+uses `regmap_update_bits` on the base register, so writing `0x01` to `0x1bbf`
+is the correct form; that write returns 0, reads back `0x01`, and the system
+survives. `sweet_spmi_write` is restricted to `0x1bbf` and `0x1d23` only.
+
+**Chip still does not answer with the rail on.** Three boots with
+`sweettouchpower=1` ran: rails enabled (`0x00 -> 0x01`), reset pulsed low 20 ms
+then high (`dir=1, din=1`, i.e. released), and a 120 ms settle. Chip ID stayed
+`00:00` (`mark 96`, `a=0`). Adding the driver's first real command, a one-byte
+system reset `0x81` followed by 20 ms, also left the ID at `00:00`
+(`mark 167`), and the SPI-level bit-bang still reads eight zero bytes.
+
+**Recovery dmesg (`[ FTS ]`) shows what a working init looks like:** openChannel
+(SPI mode 0, 12 MHz, CS0) -> `System resetting...` -> 23 ms -> `System reset
+DONE!` -> `FW VER 0020`, `SVN REV 6160`, `Protocol 06`, screen 3199x1439. It
+also logs `fts_enable_reg: Failed to enable vadd`, so even there the avdd
+enable call reports an error while the rail is on, i.e. that rail is already
+powered by someone else.
+
+**Next:** fix the PMIF VLD_CLR handshake first (either the clear offset for
+channel 2 or a required read of RDATA before the clear), because without a
+reliable read the rail question cannot be closed. Then re-run the SID 0
+control read (`0x4804` must be `0x0d`, `0x4808` bit0 set) as the addressing
+proof before trusting `0x1bbf`. If addressing is confirmed and VRF18 is really
+on, the remaining candidates are the display-side rail the panel needs or a
+chip held in download mode, and the next probe should sample `PIO DIN` for
+SCK/CS during a long transfer instead of guessing at commands.
+
+Artifacts: `matisse-xnu-touch-{supply,pmifread,power,power2,ldoen,idonly,idreset,sysrst,addrcheck}.{img,json,payload}`
+in `research/matisse/20261025-touch/`, with `*-after-marks.{bin,txt}` for each.
+Every trial restored the full `boot_a` backup; on-device `sha256sum` was
+`2931647a56...86b1` after every restore.
+
+### Follow-up, same day (patches 0121-0126)
+
+**PMIF reads are now reliable.** The failure mode was self-inflicted: a command
+that returned an error left the channel in WFVLDCLR because the error path never
+wrote VLD_CLR, and every later transfer timed out on the IDLE wait. `sp_pmif_read`
+now retries the whole sequence three times, clears the flag on every path, and
+polls for IDLE after the clear. `sweet_spmi_sta3()` reports the state before,
+after and post-clear so a stuck channel shows up in the marks.
+
+**SID 0 does not exist on matisse.** The device tree puts the primary PMIC at
+`pmic@4`; `second_pmic@5` is the MT6373. Reads to SID 0 fail with the error bit
+set, which is expected. The control read was moved to SID 4:
+`0x4804` returns `0x00` with err 0 (no charger attached, so 0x0d is not
+expected here) and the channel returns to `0x8441` (IDLE) afterwards, so the
+16-bit PMIF address does reach the intended byte. MT6373 (SID 5) reads:
+`0x1bbf = 0x00`, `0x1d23 = 0x03`, `0x1e8d = 0x07`, `0x1e35 = 0x74`.
+
+**Drive strength and pad watch.** `SWEET_MARK_MAX` was raised from 96 to 160
+(the block is still one 4 KiB UFS block). A 64-byte transfer now samples the
+PIO DIN word back to back instead of once per microsecond (`mark 175`). Result:
+CLK (pin 167) toggles, MOSI (pin 166) toggles, CSB (pin 165) stays asserted for
+the whole transfer, and MI (pin 164) never leaves 0. So the controller drives
+all three outputs onto the pads correctly and the chip never drives MISO. The
+64-byte frame also exceeds the 32-entry FIFO, so that transfer stalls with CS
+low; later transfers reset cleanly.
+
+**Two PMIC writes are now characterised by their blast radius.**
+- `0x1bbf <- 0x01` (VRF18_AIF enable, base register): returns 0, reads back
+  `0x01`, system healthy. This is the only rail write that is safe so far.
+- `0x1d23 <- 0x01` (VTP, clearing the bit the vendor header calls LP): returns
+  0 but the boot dies immediately afterwards (`vtpnlp`: last mark 163, no panic
+  record). Either bit 1 is not LP on this board or switching that rail out of
+  LP mode collapses something else. **Do not write 0x1d23 again** without a
+  schematic.
+- Earlier, `0x1bc0 <- 1` (the buck-style SET alias) also wedged two boots.
+
+**Still no chip response with VRF18 on.** Boots `idonly`, `idreset`, `sysrst`,
+`fwver`, `padwatch` all had VRF18 enabled, reset asserted before power and
+released 15 ms after, a 120 ms settle, and (in the later ones) the driver's
+first command 0x81 plus 20 ms. Chip ID stayed `00:00` and the FW VER read at
+`0x20000004` (Recovery reports `0x0020` there) returned eight zero bytes.
+Touch INT (GPIO8) reads 0 in all 64 samples while Recovery reports the same pin
+as `in hi`; base 11 for its IES is `0x11f10000` + 0x60 bit 16 and that bit was
+already set, so the reading is real.
+
+**Where this leaves it:** controller, mux, IES, bias, CS/CLK/MOSI signalling and
+the 1.8 V enable bit are all verified, and the chip still behaves as if it has no
+power. The unexplained part is whether `0x1bbf` actually closes the LDO switch
+on this board, and which rail the controller's core runs from. The next step
+needs board-level information (schematic or a rail measurement), or a read-only
+look at the MT6373 LDO status/OCP registers to see whether VRF18 reports a
+normal output after the enable write. Do not write `0x1d23`.
+
+## Golden PMIC state from Recovery, 2026-10-26 (patches 0127-0131)
+
+The TWRP device tree at `/Users/xiaohuasheng/Documents/twrp` and a leftover
+`ramoops.txt` gave two facts that closed the "is it powered" question:
+
+1. `mt6373-regulator.ko` logs `mt6373_vtp: Bringing 1800000uV into
+   3300000-3300000uV` at module load: the hardware VTP selector is **1.8 V** at
+   boot and the Recovery kernel raises it to **3.3 V** because the device tree
+   pins it (`regulator-min/max-microvolt = 3300000`). Nothing in XNU ever did
+   that. Same for VRF18_AIF, pinned at 1.8 V (`ldo_volt_table3[12]`).
+2. `/sys/kernel/debug/regmap/0-05/registers` is readable on this kernel, so the
+   **full MT6373 register file can be dumped from Recovery**. The working state
+   (touch alive, `input2 = fts`) is:
+
+   | register | meaning | working value |
+   |---|---|---|
+   | `0x1bbf` | VRF18_AIF enable | `0x01` |
+   | `0x1e8d` | VRF18_AIF VOSEL | `0x0c` = 1.8 V |
+   | `0x1d23` | VTP enable / LP | `0x01` (EN=1, LP=0) |
+   | `0x1e35` | VTP VOSEL | `0x0d` = 3.3 V |
+
+   Saved as `research/matisse/20261025-touch/recovery-mt6373-regs.txt`
+   (65536 lines, addresses `0000..ffff`). XNU at boot has `0x00`/`0x07` and
+   `0x03`/`0x74`, i.e. both rails off-or-low and VTP in LP mode.
+
+**Every write that actually changes a rail kills the SoC.** Measured, with marks
+written straight after each write:
+
+| write | result |
+|---|---|
+| `0x1bbf <- 0x01` (VRF18 enable) | safe, reads back `0x01`, boot completes |
+| `0x1e8d <- 0x7c` (VOSEL keep high nibble) | safe, but chip still silent |
+| `0x1e8d <- 0x0c` (real 1.8 V selector) | **boot dies** right after the write |
+| `0x1e35 <- 0x0d` (real 3.3 V selector) | **boot dies** |
+| `0x1d23 <- 0x01` (clear LP, VTP stays on) | **boot dies** |
+| `0x1d23 <- 0x00` (disable VTP) | **boot dies** |
+
+The high nibble of the VOSEL registers reads back as `0x7`, so writes that
+preserve it (0x7c/0x7d) are survivable but evidently do not move the rail; the
+values Recovery reports (0x0c/0x0d) do move it and take the SoC down within a
+few milliseconds. That means VTP — and probably VRF18_AIF — also feeds something
+the XNU boot needs, and the change has to happen in the same quiet window the
+vendor kernel uses (module init at ~1.2 s, before storage and display are up),
+not from a worker thread two seconds in.
+
+**Next:** move the rail setup out of the touch worker into the earliest board
+hook available (the UFS init path in `bsd/dev/sweet_ufs.c` runs before the root
+mount), gated by its own boot argument, so the selectors are programmed and the
+rails sequenced before any driver is using those supplies. Keep the order
+`vdd (VRF18) -> avdd (VTP)`, keep LP cleared, and re-read `0x1bbf`/`0x1d23`/
+`0x1e8d`/`0x1e35` afterwards to compare against the golden table above. If that
+still panics, the remaining explanation is that these two LDOs also supply a
+SoC subsystem and the change belongs in the bootloader.
+
+## Session closed, 2026-10-26 08:40
+
+Full write-up of the touch bring-up effort (patches 0101-0137) is in
+`docs/matisse-touch-report.md`. Short version: the SPI6 controller, its pads,
+pinmux/IES/bias, the reset line and the SPMI/PMIF write path are all verified
+correct; both MT6373 rails can now be raised to the device-tree voltages with a
+100 mV/5 ms stepped ramp without upsetting the SoC; the controller still never
+drives MISO or INT. The only remaining known difference from the working
+Recovery state is VTP's LP bit (0x03 here, 0x01 there), and every attempt to
+change 0x1d23 kills the SoC - in the worker, in the pre-mount window, at 1.8 V
+and after the 3.3 V ramp. Do not write 0x1d23. Do not step a VOSEL in one go.
+Device left in Recovery with boot_a restored to 2931647a56...86b1.

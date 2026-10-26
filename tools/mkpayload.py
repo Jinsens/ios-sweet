@@ -151,10 +151,14 @@ def platform_cmdline(adt_blob, cmdline):
         return cmdline
     cpu_count = len(next(c for c in root.children if c.name == 'cpus').children)
     required = {'sweetbattery': 0, 'ufsrw': 0}
-    # sweetusb: 0 off, 1 report MTU3 state only, 2 (default) run the device
+    # sweetusb: 0 off, 1 report MTU3 state only, 2 (default) run the device,
+    #           3 run with the EP0/link diagnostic marks
     # sweetkeys: 0 off, 1 report TOPSTATUS/keypad only, 2 (default) feed HID
     # Matisse touch is opt-in until SPI6 clock/power state is verified.
-    ranges = {'sweettouch': (0, 1, 0), 'sweetusb': (0, 2, 2), 'sweetkeys': (0, 2, 2)}
+    ranges = {'sweettouch': (0, 1, 0), 'sweetusb': (0, 3, 2), 'sweetkeys': (0, 2, 2)}
+    # sweetusbhold: seconds PID 1 sleeps after soft-connect so the host can
+    # enumerate before the missing-launchd panic; absent means no hold.
+    bounded = {'sweetusbhold': (0, 120)}
     tokens = cmdline.split()
     present = set()
     for token in tokens:
@@ -169,6 +173,15 @@ def platform_cmdline(adt_blob, cmdline):
             present.add(key)
         elif key in ranges:
             lo, hi, _ = ranges[key]
+            try:
+                safe = sep and lo <= int(value, 0) <= hi
+            except ValueError:
+                safe = False
+            if not safe:
+                raise ValueError(f'matisse requires {key}={lo}..{hi}')
+            present.add(key)
+        elif key in bounded:
+            lo, hi = bounded[key]
             try:
                 safe = sep and lo <= int(value, 0) <= hi
             except ValueError:

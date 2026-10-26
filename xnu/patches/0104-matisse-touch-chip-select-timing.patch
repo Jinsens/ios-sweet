@@ -1,0 +1,43 @@
+--- a/bsd/dev/sweet_matisse_touch.c
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -46,6 +46,7 @@
+ #define MTK_SPI6_PIO_MODE_2     0xaaaaaaaau
+ #define MTK_SPI6_DRV_SET        0x004u
+ #define MTK_SPI6_DRV_FIELDS     0x00000fc0u
++#define MTK_SPI_CFG0            0x000u
+ #define MTK_SPI_CFG1            0x004u
+ #define MTK_SPI_TX_DATA         0x010u
+ #define MTK_SPI_RX_DATA         0x014u
+@@ -228,8 +229,10 @@
+ 	/* STATUS0 has read-to-clear FINISH/PAUSE bits. */
+ 	(void)mt_spi_rd(MTK_SPI_STATUS0);
+ 	mt_spi_wr(MTK_SPI_PAD_SEL, 1u); /* SPI6_B, from the live device tree */
+-	/* MT6983 enhanced timing: 9 parent-clock cycles per SCK half-period. */
++	/* Match the Recovery FTS SPI setup at 12 MHz: 9 cycles per SCK half. */
+ 	mt_spi_wr(MTK_SPI_CFG2, 8u | (8u << 16));
++	/* Recovery's st_spi_ctrdata requests 300 setup and 30 hold cycles. */
++	mt_spi_wr(MTK_SPI_CFG0, ((300u - 1u) << 16) | (30u - 1u));
+ 	uint32_t cfg1 = mt_spi_rd(MTK_SPI_CFG1);
+ 	cfg1 &= ~(0xffff0000u | 0x0000ff00u | 0x000000ffu);
+ 	cfg1 |= ((len - 1u) << 16) | 17u;
+@@ -376,14 +379,18 @@
+ 	mt.stage = 3; /* chip-ID transfer returned */
+ 	uint32_t cfg1 = mt_spi_rd(MTK_SPI_CFG1);
+ 	uint32_t cfg2 = mt_spi_rd(MTK_SPI_CFG2);
++	uint32_t cfg0 = mt_spi_rd(MTK_SPI_CFG0);
++	uint32_t cfg3 = mt_spi_rd(MTK_SPI_CFG3);
+ 	uint32_t cmd = mt_spi_rd(MTK_SPI_CMD);
+ 	uint32_t status = mt_spi_rd(MTK_SPI_STATUS0);
+ 	mt.stage = 4; /* diagnostic register reads returned */
+-	printf("SWEET MT TOUCH: SPI6 probe err=%d id=%02x:%02x cfg1=%#x cfg2=%#x cmd=%#x status0=%#x\n",
+-	    err, id[0], id[1], cfg1, cfg2, cmd, status);
++	printf("SWEET MT TOUCH: SPI6 probe err=%d id=%02x:%02x cfg0=%#x cfg1=%#x cfg2=%#x cfg3=%#x cmd=%#x status0=%#x\n",
++	    err, id[0], id[1], cfg0, cfg1, cfg2, cfg3, cmd, status);
+ 	if (mt.trace) {
+ 		sweet_mark(96, ((uint64_t)(uint32_t)err << 32) | ((uint64_t)id[0] << 8) | id[1],
+ 		    ((uint64_t)cfg1 << 32) | cfg2);
++		sweet_mark(103, ((uint64_t)cfg0 << 32) | cfg3,
++		    ((uint64_t)cmd << 32) | status);
+ 	}
+ 	if (err || id[0] != FTS_CHIP_ID_0 || id[1] != FTS_CHIP_ID_1) {
+ 		printf("SWEET MT TOUCH: expected ST FTS ID 36:40; polling stopped\n");

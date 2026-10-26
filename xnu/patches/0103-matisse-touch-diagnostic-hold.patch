@@ -1,0 +1,31 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1128,6 +1128,28 @@
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
+ 	sweet_mark(60, 0, 0);
++	/*
++	 * Diagnostic only: keep PID 1 asleep long enough to inspect kernel input
++	 * threads before the incomplete test root fails to load launchd. The
++	 * argument is absent in normal payloads and capped to two minutes.
++	 */
++	unsigned touch_hold_s = 0;
++	(void)PE_parse_boot_argn("sweettouchhold", &touch_hold_s, sizeof(touch_hold_s));
++	if (touch_hold_s > 120) {
++		touch_hold_s = 120;
++	}
++	if (touch_hold_s != 0) {
++		static int touch_hold_chan;
++		sweet_mark(101, touch_hold_s, 0);
++		printf("SWEET MT TOUCH: diagnostic scheduler hold %u seconds\n", touch_hold_s);
++		for (unsigned second = 0; second < touch_hold_s; ++second) {
++			uint64_t deadline;
++			clock_interval_to_deadline(1000, NSEC_PER_MSEC, &deadline);
++			(void)assert_wait_deadline(&touch_hold_chan, THREAD_UNINT, deadline);
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++		sweet_mark(102, touch_hold_s, 0);
++	}
+ 	load_init_program(p);
+ 	sweet_mark(61, 0, 0);
+ 	lock_trace = 1;

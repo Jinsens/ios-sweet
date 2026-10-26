@@ -1,0 +1,104 @@
+--- a/bsd/dev/sweet_mtu3.c
++++ b/bsd/dev/sweet_mtu3.c
+@@ -142,6 +142,8 @@
+ #define MAC_USB2_EPCTL_LPM      0x0828
+ #define MAC_DEV_LINK_INTR       0x0854
+ #define MAC_EPCTL_LPM_FC_CHK    0x0860
++#define MAC_LINK_STATE_MACHINE  0x1534
++#define MAC_USB20_OPSTATE       0x2460
+ #define MAC_CAP_EP0FFSZ         0x0c04
+ #define MAC_CAP_EPNTXFFSZ       0x0c08
+ #define MAC_CAP_EPNRXFFSZ       0x0c0c
+@@ -335,6 +337,7 @@
+ 	uint32_t    events;
+ 	uint32_t    errors;
+ 	uint32_t    resets;
++	uint64_t    polls;
+ 	uint64_t    rx_frames;
+ 	uint64_t    tx_frames;
+ 	int         sleep_chan;
+@@ -1448,13 +1451,47 @@
+ {
+ 	uint32_t ticks = 0;
+ 
++	/*
++	 * Marks 43-45 separate "the poller never ran" from "the poller ran and
++	 * still saw no traffic". The earlier USB trials only proved that the
++	 * probe path completed; they could not tell whether this thread had
++	 * been scheduled before the missing-launchd panic.
++	 */
++	sweet_mark(43, 0, 0);
+ 	for (;;) {
+ 		mt_poll();
+-		if ((++ticks % 30000) == 0) {
++		mt.polls++;
++		if (ticks == 0) {
++			sweet_mark(44, mt_rd(MAC_EP0CSR), mt_rd(MAC_COMMON_USB_INTR));
++		}
++		if (++ticks == 1000) {
++			sweet_mark(45, ((uint64_t)mt.setups << 32) | mt.resets,
++			    mt_rd(MAC_EP0CSR));
++		}
++		if ((ticks % 30000) == 0) {
+ 			mt_status();
+ 		}
+ 		mt_sleep_ms(1);
+ 	}
++}
++
++/*
++ * Post-mortem snapshot, called from bsd_init just before launchd so the
++ * values describe the state after the diagnostic hold, not the probe.
++ */
++void
++sweet_mtu3_snapshot(void)
++{
++	if (mt.mac == 0) {
++		return;
++	}
++	sweet_mark(46, mt.polls, ((uint64_t)mt.setups << 32) | mt.resets);
++	sweet_mark(47, mt_rd(MAC_EP0CSR),
++	    ((uint64_t)mt_rd(MAC_COMMON_USB_INTR) << 32) | mt_rd(MAC_DEV_LINK_INTR));
++	sweet_mark(48, mt_rd(MAC_DEVICE_CONF),
++	    ((uint64_t)mt_rd(MAC_POWER_MANAGEMENT) << 32) | (uint64_t)mt_speed());
++	sweet_mark(49, mt_rd(MAC_LINK_STATE_MACHINE),
++	    ((uint64_t)mt_rd(MAC_USB20_OPSTATE) << 32) | (mt.configured ? 1u : 0u));
+ }
+ 
+ /* ---- UDP live log to 192.168.7.1:5140 ---- */
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1150,6 +1150,33 @@
+ 		}
+ 		sweet_mark(102, touch_hold_s, 0);
+ 	}
++	/*
++	 * Diagnostic only: keep the kernel alive after the USB soft-connect so
++	 * the host has time to enumerate. The MTU3 poll thread is created in
++	 * sweet_usb_probe(), well before this point, but without the hold the
++	 * missing-launchd panic stops it within a fraction of a second - the
++	 * same reason the touch worker needed sweettouchhold. The snapshot
++	 * after the hold records what the controller and EP0 did meanwhile.
++	 */
++	unsigned usb_hold_s = 0;
++	(void)PE_parse_boot_argn("sweetusbhold", &usb_hold_s, sizeof(usb_hold_s));
++	if (usb_hold_s > 120) {
++		usb_hold_s = 120;
++	}
++	if (usb_hold_s != 0) {
++		extern void sweet_mtu3_snapshot(void);
++		static int usb_hold_chan;
++		sweet_mark(105, usb_hold_s, 0);
++		printf("SWEET MTU3: USB diagnostic hold %u seconds\n", usb_hold_s);
++		for (unsigned second = 0; second < usb_hold_s; ++second) {
++			uint64_t deadline;
++			clock_interval_to_deadline(1000, NSEC_PER_MSEC, &deadline);
++			(void)assert_wait_deadline(&usb_hold_chan, THREAD_UNINT, deadline);
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++		sweet_mtu3_snapshot();
++		sweet_mark(106, usb_hold_s, 0);
++	}
+ 	load_init_program(p);
+ 	sweet_mark(61, 0, 0);
+ 	lock_trace = 1;

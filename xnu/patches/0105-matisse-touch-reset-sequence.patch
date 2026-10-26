@@ -1,0 +1,76 @@
+--- a/bsd/dev/sweet_matisse_touch.c
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -44,6 +44,15 @@
+ #define MTK_SPI6_HCLK_GATE      (1u << 31)
+ #define MTK_SPI6_PIO_MODE_MWR   0x44cu
+ #define MTK_SPI6_PIO_MODE_2     0xaaaaaaaau
++#define MTK_GPIO_MODE0          0x300u
++#define MTK_GPIO_MODE0_MWR      0x30cu
++#define MTK_GPIO_DIR0           0x000u
++#define MTK_GPIO_DIR0_SET       0x004u
++#define MTK_GPIO_DOUT0          0x100u
++#define MTK_GPIO_DOUT0_SET      0x104u
++#define MTK_GPIO_DOUT0_CLR      0x108u
++#define MTK_TOUCH_RESET_GPIO    3u
++#define MTK_TOUCH_RESET_MASK    (1u << MTK_TOUCH_RESET_GPIO)
+ #define MTK_SPI6_DRV_SET        0x004u
+ #define MTK_SPI6_DRV_FIELDS     0x00000fc0u
+ #define MTK_SPI_CFG0            0x000u
+@@ -174,6 +183,44 @@
+ 	return 0;
+ }
+ 
++/* Release the active-low touch reset exactly as the Recovery FTS driver does. */
++static int
++mt_touch_reset_init(void)
++{
++	uint32_t mode = mt_mmio_rd(mt.pio, MTK_GPIO_MODE0);
++	uint32_t dir = mt_mmio_rd(mt.pio, MTK_GPIO_DIR0);
++	uint32_t dout = mt_mmio_rd(mt.pio, MTK_GPIO_DOUT0);
++	uint64_t before = ((uint64_t)((mode >> (MTK_TOUCH_RESET_GPIO * 4u)) & 0xfu) << 32) |
++	    ((uint64_t)((dir & MTK_TOUCH_RESET_MASK) != 0) << 1) |
++	    ((dout & MTK_TOUCH_RESET_MASK) != 0);
++
++	/* GPIO3 function 0 via MT6983's mode write-mask register. */
++	mt_mmio_wr(mt.pio, MTK_GPIO_MODE0_MWR,
++	    0x8u << (MTK_TOUCH_RESET_GPIO * 4u));
++	/* Drive reset low before enabling the output driver. */
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_CLR, MTK_TOUCH_RESET_MASK);
++	mt_mmio_wr(mt.pio, MTK_GPIO_DIR0_SET, MTK_TOUCH_RESET_MASK);
++	delay(10000); /* Recovery FTS holds reset low before releasing it. */
++
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_SET, MTK_TOUCH_RESET_MASK);
++	delay(100000); /* Allow the controller to leave reset and start its clock. */
++
++	mode = mt_mmio_rd(mt.pio, MTK_GPIO_MODE0);
++	dir = mt_mmio_rd(mt.pio, MTK_GPIO_DIR0);
++	dout = mt_mmio_rd(mt.pio, MTK_GPIO_DOUT0);
++	uint64_t after = ((uint64_t)((mode >> (MTK_TOUCH_RESET_GPIO * 4u)) & 0xfu) << 32) |
++	    ((uint64_t)((dir & MTK_TOUCH_RESET_MASK) != 0) << 1) |
++	    ((dout & MTK_TOUCH_RESET_MASK) != 0);
++	printf("SWEET MT TOUCH: reset GPIO3 before=%#llx after=%#llx\n",
++	    (unsigned long long)before, (unsigned long long)after);
++	if (mt.trace) {
++		sweet_mark(104, before, after);
++	}
++	return (((mode >> (MTK_TOUCH_RESET_GPIO * 4u)) & 0xfu) == 0 &&
++	    (dir & MTK_TOUCH_RESET_MASK) != 0 &&
++	    (dout & MTK_TOUCH_RESET_MASK) != 0) ? 0 : EIO;
++}
++
+ static void
+ mt_mark_platform(void)
+ {
+@@ -480,6 +527,12 @@
+ 		printf("SWEET MT TOUCH: platform register mapping failed\n");
+ 		return 1;
+ 	}
++	if (mt_touch_reset_init() != 0) {
++		mt.started = true;
++		mt.start_status = 6; /* touch reset GPIO did not reach released state */
++		printf("SWEET MT TOUCH: reset GPIO setup failed\n");
++		return 1;
++	}
+ 	thread_t thread;
+ 	mt.stage = 1; /* creation accepted; worker may still be queued */
+ 	kern_return_t kr = kernel_thread_start(mt_touch_thread, NULL, &thread);
