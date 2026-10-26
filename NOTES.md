@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-27 (userland): rebuilding 20H392 root from the local IPSW <<<
+## >>> ACTIVE 2026-10-27 (userland): 20H392 installed and verified; 0x230c boot under observation <<<
 
 User request: bring the online device through real iOS userland into UI.
 User explicitly authorized partition/flashing operations in this session
@@ -22,12 +22,12 @@ AppOS 391f2df322c3172b021b2874f6da5c3e78b70b3df8f502e1a4af2b1d715c4608.
 The known-good matisse-dual ADT lacked /product: added real unflagged D22AP
 properties in local matisse-userland.adt; hardware geometry unchanged.
 
-In progress: native macOS root repack via tools/mkiosroot-macos.py,
+Native macOS root repack via tools/mkiosroot-macos.py completed:
 16 GiB raw journaled case-sensitive HFSX, preserving numeric IDs as root.
 macOS administrator authentication succeeded; no password was shared.
 Root build log: research/matisse/20261027-userland/build-root.log.
-No device writes for this session yet; no UI claim. First trial will use
-verified kernel 0x230b, ufsrw=1/rootrw=1 and real launchd/dyld boot args,
+Device writes are recorded below; no UI claim. First trial uses
+0x230c (built on the verified0x230b source), ufsrw=1/rootrw=1 and real launchd/dyld boot args,
 serial=3/ufslogsecs=1, input/USB disabled initially. mkpayload now has an
 explicit --allow-matisse-root-write opt-in; read-only remains its default.
 Seven board-profile tests passed (including write opt-in checks).
@@ -66,8 +66,14 @@ No GPT changes or userdata backup. Existing diagnostic tail is preserved.
 stock ramdisk/signature and gzip/Image/payload length/content verified.
 Boot cmdline: research/matisse/20261027-userland/userland-cmdline.txt.
 Boot trial and stock restoration are prepared in run-userland.py.
-Next: finish readback, boot 0x230c userland trial, recover full console/marks
-and restore boot_a when possible. No new CI run; full local build passed.
+0x230c boot trial started (boot_requested_unix1793039733.3685188): the
+written full boot_a readback matches7984c03b9df34978311870d2fb744094f630537a048643e07c8c781aa473268c.
+Progress/result: boot-userland-progress.log / boot-userland-result.json.
+At60s no host USB surface; screen observation requested from user. This is
+not proof of UI or of a stable kernel. Recovery/FASTBOOT return triggers
+full stock boot_a restoration and console/mark pull automatically.
+Next: observe boot, recover full console/marks, address the actual userland
+blocker, and restore boot_a when possible. No new CI run; full local build passed.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
