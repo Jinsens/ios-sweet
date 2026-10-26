@@ -164,6 +164,18 @@ Current device still Recovery; original boot_a restored/verified as above.
 User also points to Documents/{lk,vcp,dtbo}.img for readonly display audit.
 Next: verified230e image trial, actual MMU/UFS evidence, restore boot_a.
 
+0x230e BOOT STARTED (Unix1793044393.947674); diagnostics commit9230192.
+Image matisse-ui-perf-230e.img7069696B SHA256f3598b81dd61fcfb1b173bac8e30f76226640a810b1a7d2d11185969804b9c87.
+Stock ramdisk/signature, gzip/Image size, aligned SWEETAPP payload length and
+content all verified. Full boot_a written hashbf5a7a9362a697e118ee630fc9ec2b3b50b7709b3879c4503c18487e143ff935.
+boot-ui-230e-result.json has boot_a_restore_pending=true. Runner session14609
+watches1200s and restores original via fbraw on FASTBOOT/Recovery return.
+Do NOT import run-ui-230e.py (top-level flashes). If host USB stays absent,
+request screen observation and user return to FASTBOOT, then restore/pull.
+0x230e samples logd_helper too; sweetperf=1; touch/keys/USB still off.
+No new userdata installation or partition-table changes. Runtime evidence
+and original boot_a restoration are still pending; no UI success claim.
+
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
 **Read this before the older entries below: the old PMIC voltage / VTP-LP
