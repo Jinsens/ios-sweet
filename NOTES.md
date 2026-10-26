@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-27 (userland): 20H392 userland runs; 0x230c boot_a restored; UI blocked <<<
+## >>> ACTIVE 2026-10-27 (userland): 0x230d recovered; boot_a restored; MMU/UFS performance audit <<<
 
 User request: bring the online device through real iOS userland into UI.
 User explicitly authorized partition/flashing operations in this session
@@ -124,9 +124,27 @@ ui230d-* logs (never import top-level run-ui-230d.py).
 Root unchanged; touch/keys/USB remain disabled; trial samples
 SpringBoard/backboardd/logd/launchd/notifyd every60s.
 
-Next: observe0x230d UI and collect logd samples on FASTBOOT/Recovery
-return. Current boot_a contains0x230d experiment: RESTORATION PENDING. Native activation and UI/input are still unverified.
-No new CI run; full local CLT build and2 targeted tests passed.
+0x230d returned FASTBOOT after772.46s; runner restored the complete64MiB
+original boot_a and verified2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1.
+boot-ui-230d-result.json has boot_a_restore_pending=false. Recovery is online.
+Recovered ui230d-console.txt:45848B, flush120,41 marks/build0x230d, launchd
+exec success. No GUI open/swap trace. User last saw boot text updating.
+Return bootreason=Watchdog; whether forced by user is not established.
+Symbolicated74 cache addresses with actual slide0x49004000 in
+ui230d-symbols.txt. logd main AND harvest queue await synchronous replies
+from logd_helper (logd+0x9b78, migration op6 for directory3, and UUID
+harvest op1). backboardd samples4/5 await firehose registration. SpringBoard
+continues through pre-main dyld/ObjC. launchd has threads in sync()/write().
+The reason logd_helper is slow/blocked remains open; previous samples did
+not include it. No new filesystem writes or reflash in this recovery.
+
+User now requests a concrete audit of shim MAIR/PTE attributes, XNU
+arm_vm_init/user mappings and per-read UFS delays. Inspect actual0x230d
+local build tree/frozen shim, then instrument actual attributes and I/O
+phase timings as needed before choosing an optimization. Keep hardware
+observations separate from source-only findings. Native activation and
+UI/input are still unverified. No new CI run; full local CLT build and2
+targeted tests passed for0x230d.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
