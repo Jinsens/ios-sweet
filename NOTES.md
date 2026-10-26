@@ -69,11 +69,28 @@ Boot trial and stock restoration are prepared in run-userland.py.
 0x230c boot trial started (boot_requested_unix1793039733.3685188): the
 written full boot_a readback matches7984c03b9df34978311870d2fb744094f630537a048643e07c8c781aa473268c.
 Progress/result: boot-userland-progress.log / boot-userland-result.json.
-At60s no host USB surface; screen observation requested from user. This is
-not proof of UI or of a stable kernel. Recovery/FASTBOOT return triggers
+At308.0s no host USB surface; screen observation requested
+from user and still pending. This is not proof of UI or of a stable kernel.
+Current boot_a still contains the0x230c experiment; restore is PENDING
+until Recovery/FASTBOOT is reachable. The original full64MiB backup is
+intact and verified. Do not treat this as a completed UI milestone. Recovery/FASTBOOT return triggers
 full stock boot_a restoration and console/mark pull automatically.
-Next: observe boot, recover full console/marks, address the actual userland
-blocker, and restore boot_a when possible. No new CI run; full local build passed.
+Prepared but NOT BOOTED: matisse-ui-touch-230c.img7065600B, SHA256
+11dff09b884af56054cdee93ebe2fbe64f2dff367aaa450df729d6577c99c261.
+Same0x230c kernel, touch=1/init=1/rails=1/mark=1/delay3, no diagnostic hold;
+stock ramdisk/signature and embedded payload checks pass. This is for the
+next UI/input trial only after the baseline boot result is understood.
+Detached root fsck was explicitly rerun with returncode0: fsck-final.log.
+Commits:057f331 native root tooling;8f98ccc canvas/HID+fsck fix;
+400abc8 verified root installation;30c142c first boot handoff.
+
+Next: obtain the user's screen observation. If stuck, user must hold
+Power+VolumeDown to reach FASTBOOT so the armed runner can restore boot_a
+and pull the persistent console/marks. run-userland.py watches for600s,
+then records running-without-host-usb; use its restore()/pull() path after
+that if the phone returns later. Do not reflash userdata just to retrieve
+logs. Address the actual userland blocker; UI/launchd success is UNVERIFIED.
+No new CI run; full local build and ASan/UBSan host canvas checks passed.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
