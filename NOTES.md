@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-27 (userland): 0x230d recovered; boot_a restored; MMU/UFS performance audit <<<
+## >>> ACTIVE 2026-10-27 (userland): 0x230e early failure; boot_a restored; 0x230f preparation <<<
 
 User request: bring the online device through real iOS userland into UI.
 User explicitly authorized partition/flashing operations in this session
@@ -175,6 +175,30 @@ request screen observation and user return to FASTBOOT, then restore/pull.
 0x230e samples logd_helper too; sweetperf=1; touch/keys/USB still off.
 No new userdata installation or partition-table changes. Runtime evidence
 and original boot_a restoration are still pending; no UI success claim.
+
+0x230e trial finished after247.41s when the user returned FASTBOOT because
+screen showed Apple/frozen/black (the combined choice; exact image unknown).
+Full original64MiB boot_a restored and SHA2562931647a...86b1 verified;
+boot-ui-230e-result.json restore_pending=false. Recovery online. Marks and
+console are byte-identical to230d (build230d,41 marks); NO230e runtime
+performance evidence was produced. Do not relabel these stale logs as230e.
+No new build mark means failure before the mark channel becomes live;
+exact PC/panic cause unknown. Source review found added IOLog in CPU init
+runs at splsched/IRQs disabled, while _IOLogv asserts interrupts enabled
+when CPUs are running (IOLib.cpp1590). This is a concrete context violation,
+but there is no captured230e panic proving it was the sole cause.
+0114/build230f replaces it with existing-safe kprintf and defers all optional
+PTE/AT/memcpy/DME probes to the first background performance snapshot after
+persistent logging is active. Bounce benchmark holds sweet_ufs_lock; prints
+happen outside it. No link mode/gear changes. Patch dry-apply and resident
+sampler ASan/UBSan test PASS; final CLT build in progress. User's display
+references readonly audit: DTBO and live DT both l11_38_0a_0a_dsc_cmd,lcm;
+LK contains matching driver and display addresses agree. VCP identified as
+tinysys-vcp-RV55_A; no new display dependency proven. Raw evidence saved in
+display-reference-audit.json and {lk,vcp}-display-strings.txt (ignored).
+
+0x230f full CLT build exit0; kernel16723880B SHA2563ccc1849d8e421e0f01d79a99e17461de6d985c94fc4288090529c948e4b02f3.
+No new CI run. 0114 applies cleanly; sampler sanitizer test passes.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 

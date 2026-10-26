@@ -90,3 +90,33 @@ lock release. No new GitHub Actions run. Runtime trial is pending.
 User additionally identified `Documents/lk.img`, `vcp.img` and `dtbo.img`
 as display references. Inspect these read-only and compare with existing
 panel/refresh evidence; their presence does not prove UI has rendered.
+
+## 0x230e trial and diagnostic correction
+
+The user returned FASTBOOT after 247.41 seconds after reporting the combined
+Apple/frozen/black-screen choice. Original boot_a was fully restored and its
+64 MiB SHA256 verified as
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+Both recovered marks and console are byte-identical to 0x230d. There is no
+valid 0x230e MMU or performance result; failure occurred before new marks
+were committed, and the exact failing instruction is unknown.
+
+Source review found a concrete diagnostic context error: `SweetCPU::initCPU`
+runs at splsched with interrupts disabled, while `_IOLogv()` in
+`iokit/Kernel/IOLib.cpp` asserts interrupts enabled when CPUs are running.
+This is a plausible early failure cause, not a captured panic diagnosis.
+Patch 0114 / build 0x230f uses `kprintf`, as the adjacent existing CPU log
+does, and moves optional PTE/AT/memcpy/DME checks into the first background
+snapshot after persistent logging is active. It acquires the UFS mutex for
+the bounce-buffer benchmark and releases it before printing.
+
+Read-only display comparison confirms the supplied DTBO and actual live DT
+select `l11_38_0a_0a_dsc_cmd,lcm`. LK contains the matching driver name, and
+LK's embedded DT / live DT agree on DSI0 `0x14017000`, DSC0 `0x14015000`
+and the two mutex windows `0x14001000` / `0x14401000`. These agree with the
+current XNU display window. VCP identifies itself as `tinysys-vcp-RV55_A`;
+this static inspection establishes no new display dependency. Raw JSON and
+string evidence is retained in the ignored userland research directory.
+
+0x230f validation: full CLT build exit 0, 16,723,880 bytes, SHA256
+`3ccc1849d8e421e0f01d79a99e17461de6d985c94fc4288090529c948e4b02f3`. Patch 0114 applies cleanly and the resident-sampler ASan/UBSan test passes.

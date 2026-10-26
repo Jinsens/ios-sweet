@@ -1,0 +1,144 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -169,6 +169,7 @@
+ 	p->sleeps += sleeps; p->errors += failed;
+ }
+ 
++static void sweet_ufs_perf_probe(void);
+ void sweet_ufs_perf_snapshot(void);
+ void
+ sweet_ufs_perf_snapshot(void)
+@@ -189,6 +190,11 @@
+ 		printf("UFSP %c n %llu bytes %llu prep_us %llu hw_us %llu post_us %llu max_us %llu polls %llu sleeps %llu errors %llu\n",
+ 		    "RWS"[i], p->calls, p->bytes, sweet_perf_us(p->prep), sweet_perf_us(p->hw),
+ 		    sweet_perf_us(p->post), sweet_perf_us(p->max), p->polls, p->sleeps, p->errors);
++	}
++	static bool probed;
++	if (!probed) {
++		probed = true;
++		sweet_ufs_perf_probe();
+ 	}
+ }
+ 
+@@ -657,7 +663,7 @@
+ #define SWEET_MARK_MAX  160
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x230eu
++#define SWEET_BUILD_ID 0x230fu
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;
+@@ -1095,27 +1101,7 @@
+ 	}
+ 	su.dma_pa = ptoa_64(pn);
+ 	su.secsize = DEV_BSIZE;
+-	if (sweet_perf) {
+-		extern uint64_t sweet_pmap_sample(pmap_t, vm_map_address_t, void *, size_t);
+-		printf("MMU kernel_text_pte 0x%llx dma_pte 0x%llx\n",
+-		    sweet_pmap_sample(kernel_pmap, (vm_map_address_t)&sweet_ufs_init, NULL, 0),
+-		    sweet_pmap_sample(kernel_pmap, su.dma + DMA_BOUNCE, NULL, 0));
+-		uint64_t par, sctlr, mair;
+-		__asm__ volatile("mrs %0, mair_el1; mrs %1, sctlr_el1; at s1e1r, %3; isb; mrs %2, par_el1"
+-		    : "=&r"(mair), "=&r"(sctlr), "=&r"(par) : "r"(su.dma + DMA_BOUNCE) : "memory");
+-		printf("MMU dma_par 0x%llx mair 0x%llx sctlr 0x%llx\n", par, mair, sctlr);
+-		/* Dedicated bounce RAM only; no storage write or extra allocation. */
+-		void *src = (void *)(su.dma + DMA_BOUNCE);
+-		void *dst = (char *)src + BOUNCE_SIZE / 2;
+-		memset(src, 0xa5, BOUNCE_SIZE / 2);
+-		uint64_t begin = mach_absolute_time();
+-		for (int i = 0; i < 64; i++) {
+-			memcpy(dst, src, BOUNCE_SIZE / 2);
+-			__asm__ volatile("" ::: "memory");
+-		}
+-		printf("MMU memcpy bytes %u time_us %llu probe 0x%x\n", 32u << 20,
+-		    sweet_perf_us(mach_absolute_time() - begin), *(volatile uint32_t *)dst);
+-	}
++
+ 
+ 
+ 	lck_mtx_lock(&sweet_ufs_lock);
+@@ -1163,20 +1149,7 @@
+ 	/* Only now, with the partition bounds known, can writes be allowed. */
+ 	su.writable = (rw != 0);
+ 	su.ready = true;
+-	if (sweet_perf) {
+-		/* Read negotiated link state; do not change gears, lanes or power. */
+-		static const uint16_t attrs[] = { 0x1568, 0x1583, 0x1560, 0x1580, 0x1571, 0x156a };
+-		uint32_t values[6], errors[6];
+-		lck_mtx_lock(&sweet_ufs_lock);
+-		for (unsigned int i = 0; i < 6; i++) {
+-			values[i] = 0;
+-			errors[i] = ufs_uic(0x01, (uint32_t)attrs[i] << 16, 0, 0, &values[i]);
+-		}
+-		lck_mtx_unlock(&sweet_ufs_lock);
+-		for (unsigned int i = 0; i < 6; i++) {
+-			printf("UFSP DME attr 0x%x value 0x%x error 0x%x\n", attrs[i], values[i], errors[i]);
+-		}
+-	}
++
+ 	/* Partition geometry is known: the mark channel works from here on. */
+ 	sweet_mark(10, su.first_block, su.nblocks);
+ 	/* Identifies the kernel image that produced this record: without it an
+@@ -1210,6 +1183,50 @@
+ 	return 0;
+ }
+ 
++/* Called once by the sampler after the persistent log thread is running.
++ * Keep all optional MMU/DME probes out of the root-device initialization. */
++static void
++sweet_ufs_perf_probe(void)
++{
++	printf("MMU background probe begin\n");
++	extern uint64_t sweet_pmap_sample(pmap_t, vm_map_address_t, void *, size_t);
++	printf("MMU kernel_text_pte 0x%llx dma_pte 0x%llx\n",
++	    sweet_pmap_sample(kernel_pmap, (vm_map_address_t)&sweet_ufs_init, NULL, 0),
++	    sweet_pmap_sample(kernel_pmap, su.dma + DMA_BOUNCE, NULL, 0));
++	uint64_t par, sctlr, mair;
++	__asm__ volatile("mrs %0, mair_el1; mrs %1, sctlr_el1; at s1e1r, %3; isb; mrs %2, par_el1"
++	    : "=&r"(mair), "=&r"(sctlr), "=&r"(par) : "r"(su.dma + DMA_BOUNCE) : "memory");
++	printf("MMU dma_par 0x%llx mair 0x%llx sctlr 0x%llx\n", par, mair, sctlr);
++	/* Own the shared bounce buffer; never race a filesystem/DMA command. */
++	lck_mtx_lock(&sweet_ufs_lock);
++	void *src = (void *)(su.dma + DMA_BOUNCE);
++	void *dst = (char *)src + BOUNCE_SIZE / 2;
++	memset(src, 0xa5, BOUNCE_SIZE / 2);
++	uint64_t begin = mach_absolute_time();
++	for (int i = 0; i < 64; i++) {
++		memcpy(dst, src, BOUNCE_SIZE / 2);
++		__asm__ volatile("" ::: "memory");
++	}
++	uint64_t elapsed = mach_absolute_time() - begin;
++	uint32_t probe = *(volatile uint32_t *)dst;
++	lck_mtx_unlock(&sweet_ufs_lock);
++	printf("MMU memcpy bytes %u time_us %llu probe 0x%x\n", 32u << 20,
++	    sweet_perf_us(elapsed), probe);
++	/* Read negotiated link state; do not change gears, lanes or power. */
++	static const uint16_t attrs[] = { 0x1568, 0x1583, 0x1560, 0x1580, 0x1571, 0x156a };
++	uint32_t values[6], errors[6];
++	lck_mtx_lock(&sweet_ufs_lock);
++	for (unsigned int i = 0; i < 6; i++) {
++		values[i] = 0;
++		errors[i] = ufs_uic(0x01, (uint32_t)attrs[i] << 16, 0, 0, &values[i]);
++	}
++	lck_mtx_unlock(&sweet_ufs_lock);
++	for (unsigned int i = 0; i < 6; i++) {
++		printf("UFSP DME attr 0x%x value 0x%x error 0x%x\n", attrs[i], values[i], errors[i]);
++	}
++	printf("MMU background probe end\n");
++}
++
+ /*
+  * Persistent console log ("sweetlog"). Filming the phone screen is the only
+  * other way to see the console, so every character that reaches the
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -206,7 +206,7 @@
+ 	unsigned int perf = 0;
+ 	PE_parse_boot_argn("sweetperf", &perf, sizeof(perf));
+ 	if (perf) {
+-		IOLog("MMU cpu%u mair 0x%llx sctlr 0x%llx tcr 0x%llx\n", getCPUNumber(),
++		kprintf("MMU cpu%u mair 0x%llx sctlr 0x%llx tcr 0x%llx\n", getCPUNumber(),
+ 		    __builtin_arm_rsr64("MAIR_EL1"), __builtin_arm_rsr64("SCTLR_EL1"),
+ 		    __builtin_arm_rsr64("TCR_EL1"));
+ 	}
