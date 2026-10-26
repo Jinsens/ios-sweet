@@ -1,0 +1,1363 @@
+--- a/bsd/dev/sweet_matisse_touch.c
++++ b/bsd/dev/sweet_matisse_touch.c
+@@ -25,12 +25,14 @@
+ extern kern_return_t thread_terminate(thread_t);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ extern void sweet_mark(uint32_t code, uint64_t a, uint64_t b);
++#include "sweet_spmi.h"
+ 
+ #define MTK_SPI6_PA             0x11016000u
+ #define MTK_TOPCKGEN_PA         0x10000000u
+ #define MTK_PERICFG_AO_PA       0x11036000u
+ #define MTK_PIO_PA              0x10005000u
+ #define MTK_IOCFG_BM_PA         0x11d30000u
++#define MTK_IOCFG_BM2_PA        0x11f10000u /* GPIO8 (touch IRQ) pad block */
+ #define MTK_TOP_CLK_UPDATE_0    0x004u
+ #define MTK_TOP_CLK_CFG_7       0x080u
+ #define MTK_TOP_CLK_CFG_7_SET   0x084u
+@@ -43,7 +45,8 @@
+ #define MTK_SPI6_BCLK_GATE      (1u << 23)
+ #define MTK_SPI6_HCLK_GATE      (1u << 31)
+ #define MTK_SPI6_PIO_MODE_MWR   0x44cu
+-#define MTK_SPI6_PIO_MODE_2     0xaaaaaaaau
++#define MTK_SPI6_PIO_MODE_2     0x22220000u /* pins 164..167 only */
++#define MTK_GPIO_DIN0           0x200u
+ #define MTK_GPIO_MODE0          0x300u
+ #define MTK_GPIO_MODE0_MWR      0x30cu
+ #define MTK_GPIO_DIR0           0x000u
+@@ -53,6 +56,8 @@
+ #define MTK_GPIO_DOUT0_CLR      0x108u
+ #define MTK_TOUCH_RESET_GPIO    3u
+ #define MTK_TOUCH_RESET_MASK    (1u << MTK_TOUCH_RESET_GPIO)
++#define MTK_IOCFG_IES_WORD      0x0050u
++#define MTK_IOCFG_DRV_WORD      0x0110u
+ #define MTK_SPI6_DRV_SET        0x004u
+ #define MTK_SPI6_DRV_FIELDS     0x00000fc0u
+ #define MTK_SPI_CFG0            0x000u
+@@ -61,9 +66,11 @@
+ #define MTK_SPI_RX_DATA         0x014u
+ #define MTK_SPI_CMD             0x018u
+ #define MTK_SPI_STATUS0         0x01cu
++#define MTK_SPI_STATUS1         0x020u
+ #define MTK_SPI_PAD_SEL         0x024u
+ #define MTK_SPI_CFG2            0x028u
+ #define MTK_SPI_CFG3            0x040u
++#define MTK_SPI_CFG3_HALF_DUPLEX (1u << 3)
+ #define MTK_SPI_FIFO_SIZE       32u
+ #define MTK_SPI_FINISH_INT_STATUS 0x1u
+ #define MTK_SPI_PAUSE_INT_STATUS  0x2u
+@@ -109,9 +116,11 @@
+ 	vm_offset_t pericfg;
+ 	vm_offset_t pio;
+ 	vm_offset_t iocfg_bm;
++	vm_offset_t iocfg_bm2;
+ 	bool started;
+ 	bool trace;
+ 	bool platform_ready;
++	bool rails_done;
+ 	unsigned start_calls;
+ 	unsigned start_status;
+ 	volatile unsigned stage;
+@@ -119,6 +128,8 @@
+ 	uint32_t peri_gate;
+ 	uint32_t pin_mode;
+ 	uint32_t pin_drive;
++	uint32_t pin_mode_before;
++	uint32_t pin_drive_before;
+ 	bool active[FTS_MAX_FINGERS];
+ 	int x[FTS_MAX_FINGERS];
+ 	int y[FTS_MAX_FINGERS];
+@@ -144,6 +155,77 @@
+ 	__asm__ volatile("dsb osh" ::: "memory");
+ }
+ 
++/*
++ * MTK PIO blocks cover 32 pins per 0x10 window: data at +0x0, set at +0x4,
++ * clear at +0x8. Mode windows cover 8 pins per 0x10 with the write alias at
++ * +0xC, which is why pins 160..167 use 0x440 / 0x44c.
++ */
++#define MTK_PIO_BLOCK(base, pin) ((base) + ((pin) / 32u) * 0x10u)
++#define MTK_PIO_MODE_WIN(pin)    (0x300u + ((pin) / 8u) * 0x10u)
++#define MTK_PIO_MODE_MWR(pin)    (MTK_PIO_MODE_WIN(pin) + 0xcu)
++
++static uint32_t
++mt_gpio_din(unsigned pin)
++{
++	return (mt_mmio_rd(mt.pio, MTK_PIO_BLOCK(MTK_GPIO_DIN0, pin)) >>
++	    (pin % 32u)) & 1u;
++}
++
++static void
++mt_gpio_data(unsigned pin, bool high)
++{
++	mt_mmio_wr(mt.pio, MTK_PIO_BLOCK(MTK_GPIO_DOUT0, pin) + (high ? 4u : 8u),
++	    1u << (pin % 32u));
++}
++
++/*
++ * Set the four mode nibbles of a pin group. The +0xC alias used earlier is a
++ * no-op on this silicon, so try the data register first and fall back to the
++ * +0x4 window only when the readback did not change.
++ */
++static uint32_t
++mt_pio_mode_set(unsigned pin, uint32_t value)
++{
++	mt_mmio_wr(mt.pio, MTK_PIO_MODE_WIN(pin), value);
++	uint32_t after = mt_mmio_rd(mt.pio, MTK_PIO_MODE_WIN(pin));
++	if (after != value) {
++		mt_mmio_wr(mt.pio, MTK_PIO_MODE_WIN(pin) + 0x4u, value);
++		after = mt_mmio_rd(mt.pio, MTK_PIO_MODE_WIN(pin));
++	}
++	return after;
++}
++
++/*
++ * MT6983 IES (input enable) bits of GPIO164..167 live in the IOCFG_BM word at
++ * +0x0050: pin164 bit15, pin165 bit14, pin166 bit16, pin167 bit13. Without
++ * them the MISO pad never reaches the controller and every read returns 0.
++ */
++static const unsigned mt_spi_ies_bit[4] = { 15, 14, 16, 13 };
++
++static uint32_t
++mt_spi_ies_enable(uint32_t *before)
++{
++	if (!mt.iocfg_bm) {
++		return 0;
++	}
++	uint32_t word = mt_mmio_rd(mt.iocfg_bm, MTK_IOCFG_IES_WORD);
++	if (before) {
++		*before = word;
++	}
++	for (unsigned i = 0; i < 4; ++i) {
++		word |= 1u << mt_spi_ies_bit[i];
++	}
++	mt_mmio_wr(mt.iocfg_bm, MTK_IOCFG_IES_WORD, word);
++	return mt_mmio_rd(mt.iocfg_bm, MTK_IOCFG_IES_WORD);
++}
++
++static void
++mt_gpio_dir(unsigned pin, bool output)
++{
++	mt_mmio_wr(mt.pio, MTK_PIO_BLOCK(MTK_GPIO_DIR0, pin) + (output ? 4u : 8u),
++	    1u << (pin % 32u));
++}
++
+ /* Match the pin and clock selections observed on the live Recovery DT. */
+ static int
+ mt_matisse_platform_init(void)
+@@ -151,7 +233,7 @@
+ 	if (!mt.topckgen) mt.topckgen = ml_io_map(MTK_TOPCKGEN_PA, 0x100u);
+ 	if (!mt.pericfg) mt.pericfg = ml_io_map(MTK_PERICFG_AO_PA, 0x100u);
+ 	if (!mt.pio) mt.pio = ml_io_map(MTK_PIO_PA, 0x500u);
+-	if (!mt.iocfg_bm) mt.iocfg_bm = ml_io_map(MTK_IOCFG_BM_PA, 0x100u);
++	if (!mt.iocfg_bm) mt.iocfg_bm = ml_io_map(MTK_IOCFG_BM_PA, 0x1000u);
+ 	if (!mt.topckgen || !mt.pericfg || !mt.pio || !mt.iocfg_bm) {
+ 		return ENOMEM;
+ 	}
+@@ -168,10 +250,20 @@
+ 	gate &= ~(MTK_SPI6_BCLK_GATE | MTK_SPI6_HCLK_GATE);
+ 	mt_mmio_wr(mt.pericfg, MTK_PERI_AO_CG, gate);
+ 
+-	/* GPIO164..167: SPI6_B MI/CSB/MO/CLK, mux function 2. */
+-	mt_mmio_wr(mt.pio, MTK_SPI6_PIO_MODE_MWR, MTK_SPI6_PIO_MODE_2);
+-	/* MT6983 pinctrl encodes drive-strength=<7> as raw value 7. */
+-	mt_mmio_wr(mt.iocfg_bm, MTK_SPI6_DRV_SET, MTK_SPI6_DRV_FIELDS);
++	/* Record what the boot firmware left before touching any pad register. */
++	mt.pin_mode_before = mt_mmio_rd(mt.pio, 0x440u);
++	mt.pin_drive_before = mt_mmio_rd(mt.iocfg_bm, 0x000u);
++	/*
++	 * GPIO164..167: SPI6_B MI/CSB/MO/CLK, mux function 2. Only the upper
++	 * four nibbles are this group; 160..163 keep their existing value.
++	 */
++	mt_mmio_wr(mt.pio, MTK_SPI6_PIO_MODE_MWR,
++	    (mt.pin_mode_before & 0xffffu) | MTK_SPI6_PIO_MODE_2);
++	/*
++	 * No drive-strength write: the earlier IOCFG offset was a guess and a
++	 * plain write there could zero neighbouring pad fields. The boot
++	 * firmware already leaves these pins at 7 mA (Recovery pinconf-pins).
++	 */
+ 
+ 	mt.clock_cfg = mt_mmio_rd(mt.topckgen, MTK_TOP_CLK_CFG_7);
+ 	mt.peri_gate = mt_mmio_rd(mt.pericfg, MTK_PERI_AO_CG);
+@@ -227,6 +319,8 @@
+ 	if (mt.trace && mt.platform_ready) {
+ 		sweet_mark(100, ((uint64_t)mt.clock_cfg << 32) | mt.peri_gate,
+ 		    ((uint64_t)mt.pin_mode << 32) | mt.pin_drive);
++		sweet_mark(120, ((uint64_t)mt.pin_mode_before << 32) | mt.pin_mode,
++		    ((uint64_t)mt.pin_drive_before << 32) | mt.pin_drive);
+ 	}
+ }
+ 
+@@ -264,9 +358,33 @@
+ 	mt_spi_wr(MTK_SPI_CMD, cmd & ~MTK_SPI_CMD_RST);
+ }
+ 
++/* Per-transfer overrides; the production path keeps every field at zero. */
++struct mt_spi_opts {
++	uint32_t pad_sel;
++	bool keep_cfg3;
++	bool sample_sel;
++	bool loop;
++};
++
++/* What one transfer observed on the pads; only the sweep asks for this. */
++struct mt_spi_obs {
++	uint32_t status1;
++	uint32_t din_idle; /* pins 164..167 sampled just before ACT */
++	uint32_t din_seen; /* 2 bits per pin: bit0 seen low, bit1 seen high */
++	uint64_t elapsed_ns;
++};
++
++static uint32_t
++mt_din_pins_164(void)
++{
++	/* pins 160..191 sit in the fifth 0x10 window of the DIN block */
++	return (mt_mmio_rd(mt.pio, MTK_PIO_BLOCK(MTK_GPIO_DIN0, 160)) >> 4) & 0xfu;
++}
++
+ /* One MT6983 FIFO transfer, mode 0, full duplex, at or below 12 MHz. */
+ static int
+-mt_spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned len)
++mt_spi_xfer_opts(const uint8_t *tx, uint8_t *rx, unsigned len,
++    const struct mt_spi_opts *opts, struct mt_spi_obs *obs)
+ {
+ 	if (!mt.spi || !tx || !rx || len == 0 || len > MTK_SPI_FIFO_SIZE) {
+ 		return EINVAL;
+@@ -275,7 +393,8 @@
+ 	mt_spi_reset();
+ 	/* STATUS0 has read-to-clear FINISH/PAUSE bits. */
+ 	(void)mt_spi_rd(MTK_SPI_STATUS0);
+-	mt_spi_wr(MTK_SPI_PAD_SEL, 1u); /* SPI6_B, from the live device tree */
++	/* SPI6_B, from the live device tree (mediatek,pad-select = <1>). */
++	mt_spi_wr(MTK_SPI_PAD_SEL, opts ? opts->pad_sel : 1u);
+ 	/* Match the Recovery FTS SPI setup at 12 MHz: 9 cycles per SCK half. */
+ 	mt_spi_wr(MTK_SPI_CFG2, 8u | (8u << 16));
+ 	/* Recovery's st_spi_ctrdata requests 300 setup and 30 hold cycles. */
+@@ -284,7 +403,12 @@
+ 	cfg1 &= ~(0xffff0000u | 0x0000ff00u | 0x000000ffu);
+ 	cfg1 |= ((len - 1u) << 16) | 17u;
+ 	mt_spi_wr(MTK_SPI_CFG1, cfg1);
+-	mt_spi_wr(MTK_SPI_CFG3, 0); /* IPM full-duplex transfer. */
++	/*
++	 * The Recovery driver never writes CFG3 from scratch: it clears
++	 * HALF_DUPLEX_EN and keeps the pin-mode field the boot firmware left.
++	 */
++	uint32_t cfg3 = (opts && opts->keep_cfg3) ? mt_spi_rd(MTK_SPI_CFG3) : 0u;
++	mt_spi_wr(MTK_SPI_CFG3, cfg3 & ~MTK_SPI_CFG3_HALF_DUPLEX);
+ 
+ 	uint32_t cmd = MTK_SPI_CMD_NONIDLE | MTK_SPI_CMD_TXMSBF | MTK_SPI_CMD_RXMSBF;
+ 	/* Match the Linux MT6983 driver: mode 0, CPU FIFO, one packet, no IRQ/DMA. */
+@@ -293,6 +417,12 @@
+ 	    MTK_SPI_CMD_TX_ENDIAN | MTK_SPI_CMD_FINISH_IE | MTK_SPI_CMD_PAUSE_IE |
+ 	    MTK_SPI_CMD_SPIM_LOOP | MTK_SPI_CMD_DEASSERT | MTK_SPI_CMD_PAUSE_EN |
+ 	    MTK_SPI_CMD_ACT | MTK_SPI_CMD_RESUME);
++	if (opts && opts->sample_sel) {
++		cmd |= MTK_SPI_CMD_SAMPLE_SEL;
++	}
++	if (opts && opts->loop) {
++		cmd |= MTK_SPI_CMD_SPIM_LOOP;
++	}
+ 	mt_spi_wr(MTK_SPI_CMD, cmd);
+ 
+ 	for (unsigned i = 0; i < len; i += 4) {
+@@ -303,9 +433,15 @@
+ 		mt_spi_wr(MTK_SPI_TX_DATA, word);
+ 	}
+ 
++	uint32_t din_idle = obs ? mt_din_pins_164() : 0u;
+ 	mt_spi_wr(MTK_SPI_CMD, cmd | MTK_SPI_CMD_ACT);
++	uint64_t start = mach_absolute_time();
+ 	bool done = false;
++	uint32_t seen_low = 0, seen_high = 0;
+ 	for (unsigned i = 0; i < 5000; ++i) {
++		uint32_t din = mt_din_pins_164();
++		seen_low |= (~din) & 0xfu;
++		seen_high |= din;
+ 		if (mt_spi_rd(MTK_SPI_STATUS0) &
+ 		    (MTK_SPI_FINISH_INT_STATUS | MTK_SPI_PAUSE_INT_STATUS)) {
+ 			done = true;
+@@ -313,6 +449,19 @@
+ 		}
+ 		delay(1);
+ 	}
++	if (obs) {
++		uint32_t packed = 0;
++		for (unsigned i = 0; i < 4; ++i) {
++			packed |= ((seen_low >> i) & 1u) << (2u * i);
++			packed |= ((seen_high >> i) & 1u) << (2u * i + 1u);
++		}
++		uint64_t ns = 0;
++		absolutetime_to_nanoseconds(mach_absolute_time() - start, &ns);
++		obs->din_idle = din_idle;
++		obs->din_seen = packed;
++		obs->elapsed_ns = ns;
++		obs->status1 = mt_spi_rd(MTK_SPI_STATUS1);
++	}
+ 	if (!done) {
+ 		mt_spi_reset();
+ 		return ETIMEDOUT;
+@@ -327,6 +476,610 @@
+ 	}
+ 	mt_spi_wr(MTK_SPI_CMD, cmd | MTK_SPI_CMD_PAUSE_EN);
+ 	return 0;
++}
++
++static int
++mt_spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned len)
++{
++	return mt_spi_xfer_opts(tx, rx, len, NULL, NULL);
++}
++
++static uint32_t
++mt_pack4(const uint8_t *p)
++{
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++	    ((uint32_t)p[2] << 8) | (uint32_t)p[3];
++}
++
++/* Drive the touch reset pad and read it back through PIO DIN. */
++static void
++mt_reset_pad_check(void)
++{
++	uint32_t dout = mt_mmio_rd(mt.pio, MTK_GPIO_DOUT0);
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_CLR, MTK_TOUCH_RESET_MASK);
++	uint32_t low = (mt_mmio_rd(mt.pio, MTK_GPIO_DIN0) >>
++	    MTK_TOUCH_RESET_GPIO) & 1u;
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_SET, MTK_TOUCH_RESET_MASK);
++	uint32_t high = (mt_mmio_rd(mt.pio, MTK_GPIO_DIN0) >>
++	    MTK_TOUCH_RESET_GPIO) & 1u;
++	sweet_mark(122, (low << 1) | high,
++	    (dout >> MTK_TOUCH_RESET_GPIO) & 1u);
++	printf("SWEET MT TOUCH: reset pad din low=%u high=%u\n", low, high);
++}
++
++/*
++ * Clock the FTS header out by hand on MI/CSB/MO/CLK as plain GPIO. This
++ * bypasses the SPI6 controller, PAD_SEL and every mux question: an answer here
++ * proves the pads and the chip work and puts the fault in the controller path.
++ */
++static void
++mt_spi_bitbang(const uint8_t *tx, uint8_t *rx, unsigned len, uint32_t mark_id)
++{
++	uint32_t mode = mt_mmio_rd(mt.pio, MTK_PIO_MODE_WIN(164));
++	uint32_t gpio = mt_pio_mode_set(164, mode & 0xffffu);
++	sweet_mark(133, ((uint64_t)mode << 32) | gpio,
++	    mt_mmio_rd(mt.pio, MTK_PIO_BLOCK(MTK_GPIO_DIR0, 164)));
++	printf("SWEET MT TOUCH: mode gpio before=%#x after=%#x\n", mode, gpio);
++	mt_gpio_dir(164, false);
++	mt_gpio_dir(165, true);
++	mt_gpio_dir(166, true);
++	mt_gpio_dir(167, true);
++	mt_gpio_data(166, false);
++	mt_gpio_data(167, false);
++	mt_gpio_data(165, true);
++	delay(50);
++
++	uint32_t idle = mt_gpio_din(164) | (mt_gpio_din(165) << 1) |
++	    (mt_gpio_din(166) << 2) | (mt_gpio_din(167) << 3);
++	if (mark_id == 130) {
++		sweet_mark(132, ((uint64_t)idle << 32) | (mode & 0xffffffffu),
++		    mt_mmio_rd(mt.pio, 0x440u));
++		printf("SWEET MT TOUCH: bitbang idle din=%#x mode=%#x\n", idle, mode);
++	}
++
++	mt_gpio_data(165, false);
++	delay(2);
++	memset(rx, 0, len);
++	for (unsigned i = 0; i < len * 8; ++i) {
++		mt_gpio_data(166, ((tx[i / 8] >> (7u - (i % 8))) & 1u) != 0);
++		delay(1);
++		mt_gpio_data(167, true);
++		delay(1);
++		unsigned bit = mt_gpio_din(164);
++		rx[i / 8] = (uint8_t)((rx[i / 8] << 1) | bit);
++		mt_gpio_data(167, false);
++		delay(1);
++	}
++	mt_gpio_data(165, true);
++	delay(2);
++	mt_pio_mode_set(164, mode);
++	sweet_mark(mark_id, mt_pack4(rx), mt_pack4(rx + 4));
++	printf("SWEET MT TOUCH: bitbang %u rx=%02x%02x%02x%02x%02x%02x%02x%02x\n",
++	    mark_id, rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7]);
++}
++
++/*
++ * Read-only probe of the two MT6373 rails that supply the panel controller.
++ * The live device tree names them as the fts node's vdd-supply (VRF18_AIF)
++ * and avdd-supply (VTP); Recovery reports both enabled at 1.8 V and 3.3 V.
++ */
++static void
++mt_supply_probe(uint32_t mark_id)
++{
++	uint8_t vrf_en = 0xff, vtp_en = 0xff, vrf_v = 0xff, vtp_v = 0xff;
++	int e0 = -1, e1 = -1, e2 = -1, e3 = -1;
++	int init = sweet_spmi_init();
++
++	if (init == 0) {
++		e0 = sweet_spmi_read(5, 0x1bbf, &vrf_en); /* VRF18_AIF enable */
++		e1 = sweet_spmi_read(5, 0x1d23, &vtp_en); /* VTP enable */
++		e2 = sweet_spmi_read(5, 0x1e8d, &vrf_v);  /* VRF18_AIF vosel */
++		e3 = sweet_spmi_read(5, 0x1e35, &vtp_v);  /* VTP vosel */
++	}
++	sweet_mark(mark_id, ((uint64_t)vrf_en << 32) | ((uint32_t)e0 & 0xffu),
++	    ((uint64_t)vtp_en << 32) | ((uint32_t)e1 & 0xffu));
++	sweet_mark(mark_id + 1, ((uint64_t)vrf_v << 32) | ((uint32_t)e2 & 0xffu),
++	    ((uint64_t)vtp_v << 32) | ((uint32_t)e3 & 0xffu));
++	printf("SWEET MT TOUCH: mt6373 vrf18 en=%#x/%d vtp en=%#x/%d "
++	    "vosel=%#x/%d %#x/%d\n", vrf_en, e0, vtp_en, e1, vrf_v, e2, vtp_v, e3);
++
++	if (mark_id != 141) {
++		return;
++	}
++	/* Attribution only on the first pass: PMIF state, lanes, battery block. */
++	uint32_t pmif_init = 0, inf = 0, arb_en = 0, cmdissue = 0, sta = 0;
++	sweet_spmi_pmif(&pmif_init, &inf, &arb_en, &cmdissue, &sta);
++	sweet_mark(151, ((uint64_t)pmif_init << 32) | inf,
++	    ((uint64_t)arb_en << 32) | cmdissue);
++	sweet_mark(153, sta, sweet_spmi_last_sta());
++
++	uint32_t arb = 0, map0 = 0, map1 = 0;
++	unsigned count = 0, ap0 = 0, ow0 = 0, ap1 = 0, ow1 = 0;
++	sweet_spmi_info(&arb, &count);
++	int l0 = sweet_spmi_lane(5, 0x1b, &map0, &ap0, &ow0);
++	int l1 = sweet_spmi_lane(5, 0x1d, &map1, &ap1, &ow1);
++	sweet_mark(147, ((uint64_t)count << 32) | ((uint32_t)pmif_init & 0xffu),
++	    arb);
++	sweet_mark(148, ((uint64_t)(l0 & 0xff) << 40) | ((uint64_t)ap0 << 20) |
++	    ((uint64_t)ow0 << 16), map0);
++	sweet_mark(149, ((uint64_t)(l1 & 0xff) << 40) | ((uint64_t)ap1 << 20) |
++	    ((uint64_t)ow1 << 16), map1);
++	uint8_t ctl = 0;
++	int ce = sweet_spmi_read(0, 0x1000, &ctl);
++	sweet_mark(150, ((uint64_t)ctl << 32) | ((uint32_t)ce & 0xffu), 0);
++	printf("SWEET MT TOUCH: spmi pmif=%#x/%#x/%#x sta=%#x ctl=%#x/%d\n",
++	    pmif_init, inf, arb_en, cmdissue, sta, ctl, ce);
++}
++
++/*
++ * LDO soft-start helper: one selector step at a time, keeping the upper
++ * nibble of the register and giving the rail 5 ms to settle between steps.
++ * Jumping VTP from 1.8 V straight to 3.3 V browns the SoC out every time;
++ * a stepped ramp is what a regulator framework would do through
++ * set_voltage() when the constraint changes by more than one range.
++ */
++static int
++mt_rail_ramp(unsigned reg, uint8_t before, unsigned target, uint32_t mark_id)
++{
++	unsigned cur = before & 0xfu;
++	uint8_t high = (uint8_t)(before & 0xf0u);
++
++	if (cur > 15u) {
++		return -1;
++	}
++	sweet_mark(mark_id, ((uint64_t)reg << 32) | cur, 0x524d5030); /* "RMP0" */
++	while (cur != target) {
++		cur = (cur < target) ? cur + 1u : cur - 1u;
++		int err = sweet_spmi_write(5, reg, (uint8_t)(high | cur));
++		if (err != 0) {
++			return err;
++		}
++		delay(5000);
++	}
++	sweet_mark(mark_id + 1, ((uint64_t)reg << 32) | cur, 0x524d5031);
++	return 0;
++}
++
++/*
++ * Bring the two MT6373 rails up the way the Recovery FTS probe does. Only
++ * reachable with sweettouchpower=1 and only through the MT6373 LDO control
++ * registers, so no other regulator can be touched. The SID 0 battery block is
++ * read first: 0x4804 must return 0x0d, which proves the 16-bit PMIF address
++ * reaches the right byte before any rail conclusion is drawn.
++ */
++static void
++mt_supply_power_on(void)
++{
++	uint8_t vrf = 0, vtp = 0;
++	int e0, e1, w = -1, w2 = -1;
++	uint32_t pre = 0, post = 0, clr = 0;
++
++	sweet_mark(160, 0x504f57, 0); /* "POW": entered */
++	int irc = sweet_spmi_init();
++	uint32_t init_done = 0, sta0 = 0;
++	sweet_spmi_pmif(&init_done, NULL, NULL, NULL, &sta0);
++	sweet_mark(161, ((uint64_t)(uint32_t)irc << 32) | (init_done & 0xffffffffu),
++	    sta0);
++	if (irc != 0) {
++		printf("SWEET MT TOUCH: power on skipped, SPMI unavailable\n");
++		return;
++	}
++
++	uint32_t grp = 0, req = 0;
++	sweet_spmi_mst(&grp, &req);
++	sweet_mark(171, ((uint64_t)grp << 32) | req, 0);
++
++	/*
++	 * Discriminator: write each control register back with the value it
++	 * already holds. Nothing changes electrically, so a fatal outcome here
++	 * means the PMIF write path is what kills the SoC, not the rail.
++	 */
++	int noop = 0;
++	(void)PE_parse_boot_argn("sweetnoop", &noop, sizeof(noop));
++	if (noop) {
++		uint8_t c1 = 0, c2 = 0, c3 = 0, c4 = 0;
++		(void)sweet_spmi_read(5, 0x1e35, &c1);
++		int n1 = sweet_spmi_write(5, 0x1e35, c1);
++		sweet_mark(186, ((uint64_t)(uint32_t)n1 << 32) | c1, 0x4e4f4f50);
++		(void)sweet_spmi_read(5, 0x1e8d, &c2);
++		int n2 = sweet_spmi_write(5, 0x1e8d, c2);
++		sweet_mark(187, ((uint64_t)(uint32_t)n2 << 32) | c2, 0x4e4f4f50);
++		(void)sweet_spmi_read(5, 0x1d23, &c3);
++		int n3 = sweet_spmi_write(5, 0x1d23, c3);
++		sweet_mark(188, ((uint64_t)(uint32_t)n3 << 32) | c3, 0x4e4f4f50);
++		(void)sweet_spmi_read(5, 0x1bbf, &c4);
++		int n4 = sweet_spmi_write(5, 0x1bbf, c4);
++		sweet_mark(189, ((uint64_t)(uint32_t)n4 << 32) | c4, 0x4e4f4f50);
++		printf("SWEET MT TOUCH: noop writes %d/%d/%d/%d\n", n1, n2, n3, n4);
++		return;
++	}
++
++	/* Addressing proof first, on a fresh channel. */
++	uint8_t c0 = 0, c1 = 0;
++	int q0 = sweet_spmi_read(4, 0x4804, &c0);
++	uint32_t q0p = pre, q0c = clr, q0s = post;
++	sweet_spmi_sta3(&q0p, &q0s, &q0c);
++	int q1 = sweet_spmi_read(4, 0x4808, &c1);
++	uint32_t q1p = pre, q1s = post, q1c = clr;
++	sweet_spmi_sta3(&q1p, &q1s, &q1c);
++	sweet_mark(168, ((uint64_t)c0 << 32) | ((uint32_t)q0 & 0xffu),
++	    ((uint64_t)q0p << 32) | q0c);
++	sweet_mark(169, ((uint64_t)c1 << 32) | ((uint32_t)q1 & 0xffu),
++	    ((uint64_t)q1p << 32) | q1c);
++
++	e0 = sweet_spmi_read(5, 0x1bbf, &vrf);
++	e1 = sweet_spmi_read(5, 0x1d23, &vtp);
++	sweet_spmi_sta3(&pre, &post, &clr);
++	sweet_mark(162, ((uint64_t)vrf << 32) | ((uint32_t)e0 & 0xffu),
++	    ((uint64_t)vtp << 32) | ((uint32_t)e1 & 0xffu));
++	sweet_mark(170, ((uint64_t)post << 32) | clr, pre);
++	if (e0 != 0 || e1 != 0) {
++		printf("SWEET MT TOUCH: power on skipped, read failed %d/%d\n",
++		    e0, e1);
++		return;
++	}
++
++	/*
++	 * VTP's LP bit is the last known difference from the working Recovery
++	 * state (0x01 there, 0x03 here). Clearing it after the 3.3 V ramp kills
++	 * the SoC, so this variant does it first, at 1.8 V, before anything is
++	 * using the rail.
++	 */
++	int vtplp = 0;
++	(void)PE_parse_boot_argn("sweetvtplp", &vtplp, sizeof(vtplp));
++	if (vtplp) {
++		sweet_mark(179, ((uint64_t)vtp << 32) | 0x01u, 0x5654);
++		w = sweet_spmi_write(5, 0x1d23, 1u);
++		delay(20000);
++		sweet_mark(163, ((uint64_t)(uint32_t)w << 32) | 0x5654u, vtp);
++	}
++
++	/*
++	 * fts_power_cycle asserts reset before power comes up, so hold the line
++	 * low for the whole rail sequence.
++	 */
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_CLR, MTK_TOUCH_RESET_MASK);
++	delay(2000);
++
++	/*
++	 * Power sequencing, in the order a regulator framework would do it:
++	 * hold both rails off, program the selectors, then bring vdd up first
++	 * and avdd second. Writing a selector while the LDO is enabled and
++	 * driving a load glitched the PMIC hard enough to take the SoC with it
++	 * on the last three boots, so every selector moves with the rail off.
++	 */
++	/*
++	 * Isolation order: the VTP selector first (VTP is already enabled at
++	 * 1.8 V), then VRF18_AIF's selector while that rail is still off, then
++	 * avdd's enable/LP byte. Marks sit between each so a fatal write is
++	 * attributable instead of taking the whole sequence with it. Disabling
++	 * VTP first is deliberately absent: it killed the SoC twice, in the
++	 * worker and here before the root mount.
++	 */
++	/*
++	 * The bootloader leaves VRF18_AIF at selector 7 (ldo_volt_table3[7] =
++	 * 1.3 V) and VTP at selector 4 (ldo_volt_table1[4] = 1.8 V), while the
++	 * device tree pins them at 1.8 V and 3.3 V. The Recovery kernel
++	 * corrects VTP during regulator registration ("mt6373_vtp: Bringing
++	 * 1800000uV into 3300000-3300000uV"); XNU never did.
++	 */
++	uint8_t vrf_v = 0, vtp_v = 0;
++	int v0 = sweet_spmi_read(5, 0x1e8d, &vrf_v);
++	int v1 = sweet_spmi_read(5, 0x1e35, &vtp_v);
++	sweet_mark(176, ((uint64_t)vrf_v << 32) | ((uint32_t)v0 & 0xffu),
++	    ((uint64_t)vtp_v << 32) | ((uint32_t)v1 & 0xffu));
++
++	int w3 = -1, w4 = -1;
++	if (v0 == 0 && (vrf_v & 0xfu) != 12u) { /* 1.3 V -> 1.8 V in 100 mV steps */
++		w3 = mt_rail_ramp(0x1e8d, vrf_v, 12u, 190);
++	}
++	if (v1 == 0 && vtp_v != 0 && (vtp_v & 0xfu) != 13u) { /* 1.8 V -> 3.3 V */
++		w4 = mt_rail_ramp(0x1e35, vtp_v, 13u, 192);
++	}
++	uint8_t vrf_v2 = 0, vtp_v2 = 0;
++	int v2 = sweet_spmi_read(5, 0x1e8d, &vrf_v2);
++	int v3 = sweet_spmi_read(5, 0x1e35, &vtp_v2);
++	sweet_mark(177, ((uint64_t)vrf_v2 << 32) | ((uint32_t)v2 & 0xffu),
++	    ((uint64_t)vtp_v2 << 32) | ((uint32_t)v3 & 0xffu));
++	printf("SWEET MT TOUCH: vosel vrf=%#x->%#x/%d vtp=%#x->%#x/%d "
++	    "ramp=%d/%d\n", vrf_v, vrf_v2, v2, vtp_v, vtp_v2, v3, w3, w4);
++
++	/* vdd first (fts_enable_reg order), then avdd with LP cleared. */
++	if ((vrf & 1u) == 0) {
++		w2 = sweet_spmi_write(5, 0x1bbf, 1u);
++	}
++	sweet_mark(164, ((uint64_t)(uint32_t)w2 << 32) | 0x5652u, vrf);
++	delay(20000);
++
++
++
++	uint8_t s1 = 0, s2 = 0;
++	int s1e = sweet_spmi_read(5, 0x1bbf, &s1);
++	int s2e = sweet_spmi_read(5, 0x1d23, &s2);
++	sweet_mark(180, ((uint64_t)s1 << 32) | ((uint32_t)s1e & 0xffu),
++	    ((uint64_t)s2 << 32) | ((uint32_t)s2e & 0xffu));
++	uint8_t t1 = 0, t2 = 0;
++	int t1e = sweet_spmi_read(5, 0x1e8d, &t1);
++	int t2e = sweet_spmi_read(5, 0x1e35, &t2);
++	sweet_mark(181, ((uint64_t)t1 << 32) | ((uint32_t)t1e & 0xffu),
++	    ((uint64_t)t2 << 32) | ((uint32_t)t2e & 0xffu));
++
++	delay(20000);
++	uint8_t a0 = 0, a1 = 0;
++	int r0 = sweet_spmi_read(5, 0x1bbf, &a0);
++	uint32_t r0c = clr;
++	sweet_spmi_sta3(NULL, NULL, &r0c);
++	int r1 = sweet_spmi_read(5, 0x1d23, &a1);
++	uint32_t r1c = clr;
++	sweet_spmi_sta3(NULL, NULL, &r1c);
++	sweet_mark(165, ((uint64_t)a0 << 32) | ((uint32_t)r0 & 0xffu),
++	    ((uint64_t)a1 << 32) | ((uint32_t)r1 & 0xffu));
++	printf("SWEET MT TOUCH: rails before=%#x/%#x write=%d/%d after=%#x/%#x\n",
++	    vrf, vtp, w, w2, a0, a1);
++
++	/* 15 ms after both rails, release reset and let the chip boot. */
++	delay(15000);
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_SET, MTK_TOUCH_RESET_MASK);
++	delay(120000);
++	uint32_t mode = mt_mmio_rd(mt.pio, 0x440u);
++	uint32_t dir = mt_mmio_rd(mt.pio, MTK_GPIO_DIR0);
++	sweet_mark(166, ((uint64_t)((dir >> MTK_TOUCH_RESET_GPIO) & 1u) << 32) |
++	    mt_gpio_din(MTK_TOUCH_RESET_GPIO), mode);
++
++	/*
++	 * The Recovery driver's first transaction after opening the channel is a
++	 * one-byte system reset (0x81) followed by a ~20 ms wait; only then does
++	 * it read any register.
++	 */
++	uint8_t cmd = 0x81, rst = 0;
++	int rerr = mt_spi_xfer(&cmd, &rst, 1);
++	delay(20000);
++	uint8_t probe = 0;
++	(void)mt_spi_xfer(&cmd, &probe, 1);
++	sweet_mark(167, ((uint64_t)(uint32_t)rerr << 32) | rst, probe);
++
++	/*
++	 * FW VER lives at 0x20000004 and the Recovery driver reports 0x0020
++	 * there, so a non-zero reply proves the chip runs even if the chip-ID
++	 * address is wrong.
++	 */
++	static const uint8_t fw_tx[8] = {
++		0xfb, 0x20, 0x00, 0x00, 0x04, 0xff, 0xff, 0xff,
++	};
++	uint8_t fw_rx[8];
++	memset(fw_rx, 0xee, sizeof(fw_rx));
++	int ferr = mt_spi_xfer(fw_tx, fw_rx, sizeof(fw_rx));
++	sweet_mark(172, mt_pack4(fw_rx), mt_pack4(fw_rx + 4));
++	printf("SWEET MT TOUCH: fw ver err=%d rx=%02x%02x%02x%02x%02x%02x%02x%02x\n",
++	    ferr, fw_rx[0], fw_rx[1], fw_rx[2], fw_rx[3], fw_rx[4], fw_rx[5],
++	    fw_rx[6], fw_rx[7]);
++
++	/* Chip ID at 0x20000000, the same frame the production path sends. */
++	static const uint8_t id_tx[8] = {
++		0xfb, 0x20, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
++	};
++	uint8_t id_rx[8];
++	memset(id_rx, 0xee, sizeof(id_rx));
++	int ierr = mt_spi_xfer(id_tx, id_rx, sizeof(id_rx));
++	sweet_mark(178, ((uint64_t)mt_pack4(id_rx) << 32) | ((uint32_t)ierr & 0xffu),
++	    mt_pack4(id_rx + 4));
++	printf("SWEET MT TOUCH: id err=%d rx=%02x%02x%02x%02x%02x%02x%02x%02x\n",
++	    ierr, id_rx[0], id_rx[1], id_rx[2], id_rx[3], id_rx[4], id_rx[5],
++	    id_rx[6], id_rx[7]);
++
++	printf("SWEET MT TOUCH: addr type=%#x/%d present=%#x/%d "
++	    "vrf=%#x/%d vtp=%#x/%d sysrst=%d\n",
++	    c0, q0, c1, q1, a0, r0, a1, r1, rerr);
++}
++
++/*
++ * Watch the four SPI6_B pads during a long transfer. Every earlier MISO
++ * reading was taken with a 1 us gap between samples, which cannot resolve a
++ * 12 MHz clock; this samples the DIN word back to back instead, so a pad that
++ * never changes proves the controller is not driving it.
++ */
++static void
++mt_spi_pad_watch(void)
++{
++	static uint8_t tx[64];
++	static uint8_t rx[64];
++	for (unsigned i = 0; i < sizeof(tx); ++i) {
++		tx[i] = (uint8_t)(i * 7u + 3u);
++	}
++	memset(rx, 0, sizeof(rx));
++
++	uint32_t low = 0, high = 0, samples = 0;
++	mt_spi_reset();
++	(void)mt_spi_rd(MTK_SPI_STATUS0);
++	mt_spi_wr(MTK_SPI_PAD_SEL, 1u);
++	mt_spi_wr(MTK_SPI_CFG2, 8u | (8u << 16));
++	mt_spi_wr(MTK_SPI_CFG0, ((300u - 1u) << 16) | (30u - 1u));
++	uint32_t cfg1 = mt_spi_rd(MTK_SPI_CFG1);
++	cfg1 &= ~(0xffff0000u | 0x0000ff00u | 0x000000ffu);
++	cfg1 |= ((uint32_t)(sizeof(tx) - 1u) << 16) | 17u;
++	mt_spi_wr(MTK_SPI_CFG1, cfg1);
++	mt_spi_wr(MTK_SPI_CFG3, 0);
++
++	uint32_t cmd = MTK_SPI_CMD_NONIDLE | MTK_SPI_CMD_TXMSBF | MTK_SPI_CMD_RXMSBF;
++	cmd &= ~(MTK_SPI_CMD_SAMPLE_SEL | MTK_SPI_CMD_CPHA | MTK_SPI_CMD_CPOL |
++	    MTK_SPI_CMD_RX_DMA | MTK_SPI_CMD_TX_DMA | MTK_SPI_CMD_RX_ENDIAN |
++	    MTK_SPI_CMD_TX_ENDIAN | MTK_SPI_CMD_FINISH_IE | MTK_SPI_CMD_PAUSE_IE |
++	    MTK_SPI_CMD_SPIM_LOOP | MTK_SPI_CMD_DEASSERT | MTK_SPI_CMD_PAUSE_EN |
++	    MTK_SPI_CMD_ACT | MTK_SPI_CMD_RESUME);
++	mt_spi_wr(MTK_SPI_CMD, cmd);
++
++	for (unsigned i = 0; i < sizeof(tx); i += 4) {
++		uint32_t word = 0;
++		for (unsigned b = 0; b < 4; ++b) {
++			word |= (uint32_t)tx[i + b] << (8u * b);
++		}
++		mt_spi_wr(MTK_SPI_TX_DATA, word);
++	}
++
++	mt_spi_wr(MTK_SPI_CMD, cmd | MTK_SPI_CMD_ACT);
++	for (unsigned i = 0; i < 200000; ++i) {
++		uint32_t din = mt_din_pins_164();
++		low |= (~din) & 0xfu;
++		high |= din;
++		samples++;
++		if (mt_spi_rd(MTK_SPI_STATUS0) &
++		    (MTK_SPI_FINISH_INT_STATUS | MTK_SPI_PAUSE_INT_STATUS)) {
++			break;
++		}
++	}
++	uint32_t packed = 0;
++	for (unsigned i = 0; i < 4; ++i) {
++		packed |= ((low >> i) & 1u) << (2u * i);
++		packed |= ((high >> i) & 1u) << (2u * i + 1u);
++	}
++	mt_spi_wr(MTK_SPI_CMD, cmd | MTK_SPI_CMD_PAUSE_EN);
++	(void)mt_spi_rd(MTK_SPI_STATUS0);
++	sweet_mark(175, ((uint64_t)packed << 32) | samples, mt_spi_rd(MTK_SPI_STATUS1));
++	printf("SWEET MT TOUCH: pads low=%#x high=%#x samples=%u\n",
++	    low, high, samples);
++}
++
++/* Per-transfer overrides; the production path keeps every field at zero. */
++/*
++ * Comparison sweep, enabled only by sweettouchsweep=1.
++ *
++ * 110 CFG3 / PAD_SEL as the boot firmware left them, then STATUS0
++ * 111 internal loopback (SPIM_LOOP): controller, clock and FIFO path
++ * 112 baseline (4 address bytes, CFG3 written to zero, PAD_SEL 1)
++ * 113 4 address bytes, CFG3 kept with only HALF_DUPLEX_EN cleared
++ * 114 3 address bytes, CFG3 kept
++ * 115 PAD_SEL 0, CFG3 kept
++ * 116 SAMPLE_SEL 1, CFG3 kept
++ * 117 STATUS1 of 112..115, 118 of 116 plus final CFG3/PAD_SEL
++ * 119 transfer time (ns)
++ * 120 pad mode before/after the mux write (also emitted by the init snapshot)
++ * 122 touch reset pad loopback: a=DIN low<<1|high, b=DOUT
++ * 123 baseline pad observation, 124 loopback pad observation
++ */
++static void
++mt_spi_sweep(void)
++{
++	static const uint8_t loop_tx[8] = {
++		0xa5, 0x5a, 0x3c, 0xc3, 0x0f, 0xf0, 0x96, 0x69,
++	};
++	/* 0xFB HW_REG_R at DCHIP_ID 0x20000000, then dummy bytes. */
++	static const uint8_t id_tx4[8] = {
++		0xfb, 0x20, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
++	};
++	static const uint8_t id_tx3[8] = {
++		0xfb, 0x20, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
++	};
++	uint8_t rx[8], brx[8];
++	struct mt_spi_opts o;
++	struct mt_spi_obs obs;
++	uint64_t loop_ns = 0, base_ns = 0;
++	int err;
++
++	mt_spi_pad_watch();
++	sweet_mark(110, ((uint64_t)mt_spi_rd(MTK_SPI_CFG3) << 32) |
++	    mt_spi_rd(MTK_SPI_PAD_SEL), mt_spi_rd(MTK_SPI_STATUS0));
++
++	/* Rails first: this is the last untested dependency of the chip. */
++	mt_supply_probe(141);
++
++	uint32_t ies_before = 0;
++	uint32_t ies_after = mt_spi_ies_enable(&ies_before);
++	sweet_mark(135, ((uint64_t)ies_before << 32) | ies_after,
++	    mt_mmio_rd(mt.iocfg_bm, MTK_IOCFG_DRV_WORD));
++	printf("SWEET MT TOUCH: ies before=%#x after=%#x drv=%#x\n",
++	    ies_before, ies_after, mt_mmio_rd(mt.iocfg_bm, MTK_IOCFG_DRV_WORD));
++	mt_reset_pad_check();
++
++	memset(&o, 0, sizeof(o));
++	o.pad_sel = 1;
++	o.loop = true;
++	memset(&obs, 0, sizeof(obs));
++	memset(rx, 0xee, sizeof(rx));
++	err = mt_spi_xfer_opts(loop_tx, rx, sizeof(rx), &o, &obs);
++	loop_ns = obs.elapsed_ns;
++	sweet_mark(111, ((uint64_t)mt_pack4(rx) << 32) | (uint32_t)err,
++	    ((uint64_t)mt_pack4(rx + 4) << 32) |
++	    (uint32_t)(memcmp(rx, loop_tx, sizeof(loop_tx)) == 0));
++	sweet_mark(124, ((uint64_t)obs.din_idle << 32) | obs.din_seen,
++	    ((uint64_t)obs.status1 << 32) | (uint32_t)obs.elapsed_ns);
++	printf("SWEET MT TOUCH: loopback err=%d rx=%02x%02x%02x%02x%02x%02x%02x%02x din=%#x seen=%#x\n",
++	    err, rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7],
++	    obs.din_idle, obs.din_seen);
++
++	memset(&o, 0, sizeof(o));
++	o.pad_sel = 1;
++	memset(&obs, 0, sizeof(obs));
++	memset(rx, 0xee, sizeof(rx));
++	err = mt_spi_xfer_opts(id_tx4, rx, sizeof(rx), &o, &obs);
++	base_ns = obs.elapsed_ns;
++	sweet_mark(112, mt_pack4(rx), mt_pack4(rx + 4));
++	sweet_mark(123, ((uint64_t)obs.din_idle << 32) | obs.din_seen,
++	    ((uint64_t)obs.status1 << 32) | (uint32_t)obs.elapsed_ns);
++	sweet_mark(117, obs.status1, 0);
++	printf("SWEET MT TOUCH: sweep err=%d rx=%02x%02x%02x%02x%02x%02x%02x%02x din=%#x seen=%#x\n",
++	    err, rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7],
++	    obs.din_idle, obs.din_seen);
++
++	uint32_t irq_low = 0, irq_high = 0;
++	for (unsigned i = 0; i < 32; ++i) {
++		unsigned v = mt_gpio_din(8);
++		irq_low |= (uint32_t)(v == 0);
++		irq_high |= (uint32_t)(v == 1);
++		delay(1);
++	}
++	sweet_mark(134, ((uint64_t)irq_high << 32) | irq_low, mt_mmio_rd(mt.pio, 0x440u));
++	printf("SWEET MT TOUCH: irq8 low=%u high=%u\n", irq_low, irq_high);
++
++	mt_spi_bitbang(id_tx4, brx, sizeof(brx), 130);
++	mt_spi_bitbang(id_tx3, brx, sizeof(brx), 131);
++
++	/* PU/PD words must match Recovery's pinconf (165 pull-up, rest pull-down) */
++	sweet_mark(136, mt_mmio_rd(mt.iocfg_bm, 0x0070u),
++	    mt_mmio_rd(mt.iocfg_bm, 0x00a0u));
++
++	/* Touch IRQ pad: enable its input, then watch the chip's INT level. */
++	if (!mt.iocfg_bm2) mt.iocfg_bm2 = ml_io_map(MTK_IOCFG_BM2_PA, 0x1000u);
++	uint32_t irq_ies_before = mt_mmio_rd(mt.iocfg_bm2, 0x0060u);
++	mt_mmio_wr(mt.iocfg_bm2, 0x0060u, irq_ies_before | (1u << 16));
++	uint32_t irq_ies_after = mt_mmio_rd(mt.iocfg_bm2, 0x0060u);
++	sweet_mark(137, ((uint64_t)irq_ies_before << 32) | irq_ies_after, 0);
++	uint32_t irq_low2 = 0, irq_high2 = 0;
++	for (unsigned i = 0; i < 64; ++i) {
++		unsigned v = mt_gpio_din(8);
++		irq_low2 |= (uint32_t)(v == 0);
++		irq_high2 |= (uint32_t)(v == 1);
++		delay(1);
++	}
++	sweet_mark(138, ((uint64_t)irq_high2 << 32) | irq_low2, 0);
++	printf("SWEET MT TOUCH: irq8 ies=%#x before->after low=%u high=%u\n",
++	    irq_ies_before, irq_low2, irq_high2);
++
++	/* Long reset pulse, then one more chip-ID read and an INT sample. */
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_CLR, MTK_TOUCH_RESET_MASK);
++	delay(200000);
++	mt_mmio_wr(mt.pio, MTK_GPIO_DOUT0_SET, MTK_TOUCH_RESET_MASK);
++	delay(200000);
++	memset(rx, 0xee, sizeof(rx));
++	err = mt_spi_xfer(id_tx4, rx, sizeof(rx));
++	sweet_mark(139, mt_pack4(rx), mt_pack4(rx + 4));
++	irq_low2 = irq_high2 = 0;
++	for (unsigned i = 0; i < 64; ++i) {
++		unsigned v = mt_gpio_din(8);
++		irq_low2 |= (uint32_t)(v == 0);
++		irq_high2 |= (uint32_t)(v == 1);
++		delay(1);
++	}
++	sweet_mark(140, ((uint64_t)irq_high2 << 32) | irq_low2, (uint32_t)err);
++	printf("SWEET MT TOUCH: after long reset err=%d rx=%02x%02x%02x%02x%02x%02x%02x%02x irq low=%u high=%u\n",
++	    err, rx[0], rx[1], rx[2], rx[3], rx[4], rx[5], rx[6], rx[7],
++	    irq_low2, irq_high2);
++
++	sweet_mark(118, mt_spi_rd(MTK_SPI_STATUS1),
++	    ((uint64_t)mt_spi_rd(MTK_SPI_CFG3) << 32) | mt_spi_rd(MTK_SPI_PAD_SEL));
++	/* Re-read after the long reset: a rail that collapses shows up here. */
++	mt_supply_probe(145);
++	/* 8 bytes at 12 MHz take ~5.3 us; near-zero means the shifter never ran. */
++	sweet_mark(119, loop_ns, base_ns);
+ }
+ 
+ static int
+@@ -407,6 +1160,29 @@
+ 	}
+ }
+ 
++/*
++ * Rail setup in the pre-mount window. sweet_ufs_rootdev() calls this once UFS
++ * DMA is live but before the root filesystem is mounted: the same quiet point
++ * the vendor kernel uses at module load (~1.2 s), where its regulator core
++ * moves VTP from 1.8 V to 3.3 V without upsetting anything. Doing the same
++ * writes from the touch worker two seconds later browns the SoC out, so this
++ * runs as early as marks still work.
++ */
++void
++sweet_touch_rails_early(void)
++{
++	int power = 0;
++	(void)PE_parse_boot_argn("sweettouchpower", &power, sizeof(power));
++	if (!power || mt.rails_done || !mt.platform_ready) {
++		return;
++	}
++	mt.rails_done = true;
++	sweet_mark(183, 0x4541524c, (uint64_t)mt.spi); /* "EARL" */
++	printf("SWEET MT TOUCH: early rail sequence start\n");
++	mt_supply_power_on();
++	printf("SWEET MT TOUCH: early rail sequence done\n");
++}
++
+ static void
+ mt_touch_thread(void *arg, wait_result_t result)
+ {
+@@ -419,6 +1195,17 @@
+ 	mt.stage = 2; /* delay expired; the worker reached SPI setup */
+ 	if (mt.trace) {
+ 		sweet_mark(88, delay_s, (uint64_t)mt.spi);
++	}
++
++	int sweep = 0;
++	(void)PE_parse_boot_argn("sweettouchsweep", &sweep, sizeof(sweep));
++	int power = 0;
++	(void)PE_parse_boot_argn("sweettouchpower", &power, sizeof(power));
++	if (power && mt.trace && !mt.rails_done) {
++		mt_supply_power_on();
++	}
++	if (sweep && mt.trace) {
++		mt_spi_sweep();
+ 	}
+ 
+ 	uint8_t id[2] = {0};
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -19,13 +19,47 @@
+ #define SP_CFG_PA  0x0c40a000u
+ #define SP_NO_APID 0xffffu
+ 
++/*
++ * MT6983 SPMI is a PMIF block at 0x1c015000 (0x900 bytes) plus the SPMI
++ * master block at 0x1c801000. Register offsets and the SWINF channel model
++ * follow the mt8195 table: SWINF n starts at 0x800 + 0x40*n and the AP uses
++ * channel 2, so ACC/WDATA/RDATA/VLD_CLR/STA are 0x880..0x8a8.
++ */
++#define SP_PMIF_PA         0x1c015000u
++#define SP_MST_PA          0x1c801000u /* SPMI master block, 0x100 bytes */
++#define SPMI_GRP_ID_EN     0x0004u
++#define SPMI_MST_REQ_EN    0x0010u
++#define PMIF_INIT_DONE     0x0000u
++#define PMIF_INF_EN        0x0024u
++#define PMIF_ARB_EN        0x0150u
++#define PMIF_CMDISSUE_EN   0x03b8u
++#define PMIF_SWINF_ACC     0x0880u
++#define PMIF_SWINF_WDATA   0x0884u
++#define PMIF_SWINF_RDATA   0x0894u
++#define PMIF_SWINF_VLD_CLR 0x08a4u
++#define PMIF_SWINF_STA     0x08a8u
++#define PMIF_CMD_REG       1u
++#define SWINF_IDLE         0u
++#define SWINF_WFVLDCLR     6u
++
+ static vm_offset_t sp_core, sp_obs, sp_cfg;
++static vm_offset_t sp_pmif, sp_mst;
++static bool sp_pmif_ok, sp_old_ok;
++static uint32_t sp_last_sta, sp_sta_pre, sp_sta_post, sp_sta_clear;
+ static IOLock *sp_lock;
+ static unsigned sp_count;
+ static bool sp_attempted, sp_ready;
+ /* A timed-out command may complete late: never reuse that lane this boot. */
+ static bool sp_poisoned[512];
+ 
++static void
++sp_wr(vm_offset_t base, unsigned off, uint32_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = value;
++	__asm__ volatile("dmb oshst" ::: "memory");
++}
++
+ static uint32_t
+ sp_rd(vm_offset_t base, unsigned off)
+ {
+@@ -35,7 +69,7 @@
+ }
+ 
+ static uint16_t
+-sp_find_apid(unsigned ppid)
++sp_find_apid(unsigned ppid, bool ap_only)
+ {
+ 	uint16_t found = SP_NO_APID;
+ 	for (unsigned i = 0; i < sp_count; ++i) {
+@@ -44,11 +78,28 @@
+ 			continue;
+ 		}
+ 		unsigned owner = sp_rd(sp_cfg, 0x700u + 4u * i) & 7u;
++		if (ap_only && owner != 0) {
++			continue;
++		}
+ 		if (found == SP_NO_APID || owner == 0) {
+ 			found = (uint16_t)i;
+ 		}
+ 	}
+ 	return found;
++}
++
++/*
++ * The MT6373 second PMIC (SPMI SID 5) is the only supply of the touch
++ * controller: vdd = VRF18_AIF, avdd = VTP, per the live matisse device tree.
++ * These four registers are the enable bits and the voltage selectors, so a
++ * probe can report the rail state without any write and without touching a
++ * lane another execution environment owns.
++ */
++static bool
++sp_touch_supply_reg(unsigned sid, unsigned addr)
++{
++	return sid == 5 && (addr == 0x1bbfu || addr == 0x1d23u ||
++	    addr == 0x1e8du || addr == 0x1e35u);
+ }
+ 
+ int
+@@ -62,6 +113,24 @@
+ 	if (!sp_lock) {
+ 		return -1;
+ 	}
++
++	/* MT6983 path first: the PMIF block the vendor kernel actually uses. */
++	sp_pmif = ml_io_map(SP_PMIF_PA, 0x1000);
++	sp_mst = ml_io_map(SP_MST_PA, 0x100);
++	if (sp_pmif) {
++		uint32_t init_done = sp_rd(sp_pmif, PMIF_INIT_DONE);
++		if (init_done) {
++			sp_pmif_ok = true;
++			sp_ready = true;
++			printf("SWEET BATTERY: SPMI PMIF ready (init=%#x inf=%#x "
++			    "arb=%#x)\n", init_done, sp_rd(sp_pmif, PMIF_INF_EN),
++			    sp_rd(sp_pmif, PMIF_ARB_EN));
++			return 0;
++		}
++		printf("SWEET BATTERY: SPMI PMIF not initialised (%#x)\n",
++		    init_done);
++	}
++
+ 	sp_core = ml_io_map(SP_CORE_PA, 0x2000);
+ 	sp_cfg = ml_io_map(SP_CFG_PA, 0x1000);
+ 	sp_obs = ml_io_map(SP_OBS_PA, 0x10000); /* EE 0, 512 * 0x80 */
+@@ -77,24 +146,239 @@
+ 		    arb_version, sp_count);
+ 		return -1;
+ 	}
++	sp_old_ok = true;
+ 	sp_ready = true;
+ 	printf("SWEET BATTERY: SPMI arb=%#x APIDs=%u, observer reads only\n",
+ 	    arb_version, sp_count);
+ 	return 0;
+ }
+ 
++/* Clear the valid flag and wait for the software interface to go idle. */
++static bool
++sp_pmif_clear(void)
++{
++	uint32_t sta = 0;
++	for (unsigned i = 0; i < 3; ++i) {
++		sp_wr(sp_pmif, PMIF_SWINF_VLD_CLR, 1u);
++		for (unsigned j = 0; j < 10; ++j) {
++			sta = sp_rd(sp_pmif, PMIF_SWINF_STA);
++			if (((sta >> 1) & 7u) == SWINF_IDLE) {
++				sp_sta_clear = sta;
++				return true;
++			}
++			delay(1);
++		}
++	}
++	sp_sta_clear = sta;
++	return false;
++}
++
++/*
++ * One register read through the PMIF software interface. A command that
++ * returns an error must still have its valid flag cleared, otherwise the
++ * channel stays in WFVLDCLR and every later transfer fails: retry the whole
++ * sequence a few times and always clear.
++ */
++static int
++sp_pmif_read(unsigned sid, unsigned addr, uint8_t *out)
++{
++	uint32_t sta = 0, data = 0;
++	unsigned i;
++
++	for (unsigned attempt = 0; attempt < 3; ++attempt) {
++		sp_sta_pre = sp_rd(sp_pmif, PMIF_SWINF_STA);
++		for (i = 0; i < 200; ++i) {
++			if (((sp_sta_pre >> 1) & 7u) == SWINF_IDLE) {
++				break;
++			}
++			delay(1);
++			sp_sta_pre = sp_rd(sp_pmif, PMIF_SWINF_STA);
++		}
++		if (((sp_sta_pre >> 1) & 7u) != SWINF_IDLE) {
++			(void)sp_pmif_clear();
++			continue;
++		}
++
++		uint32_t cmd = (PMIF_CMD_REG << 30) | ((sid & 0xfu) << 24) |
++		    (0u << 16) | (addr & 0xffffu);
++		sp_wr(sp_pmif, PMIF_SWINF_ACC, cmd);
++		for (i = 0; i < 500; ++i) {
++			sta = sp_rd(sp_pmif, PMIF_SWINF_STA);
++			if (((sta >> 1) & 7u) == SWINF_WFVLDCLR ||
++			    ((sta >> 18) & 1u)) {
++				break;
++			}
++			delay(1);
++		}
++		sp_sta_post = sta;
++		sp_last_sta = sta;
++		if (i == 500) {
++			(void)sp_pmif_clear();
++			continue;
++		}
++		if ((sta >> 18) & 1u) {
++			(void)sp_pmif_clear();
++			continue;
++		}
++		data = sp_rd(sp_pmif, PMIF_SWINF_RDATA);
++		if (!sp_pmif_clear()) {
++			/* The byte is valid; the flag clear lagged but will retry. */
++		}
++		*out = (uint8_t)data;
++		return 0;
++	}
++	return -1;
++}
++
++/*
++ * Read-only diagnostics: report the arbiter and the APID map entry that owns a
++ * peripheral, so a failed read can be attributed to the lane rather than to
++ * the PMIC. Never writes to the bus.
++ */
++void
++sweet_spmi_info(uint32_t *arb, unsigned *count)
++{
++	if (arb) {
++		*arb = sp_pmif_ok ? sp_rd(sp_pmif, PMIF_INIT_DONE) :
++		    (sp_core ? sp_rd(sp_core, 0) : 0);
++	}
++	if (count) {
++		*count = sp_ready ? (sp_pmif_ok ? 0xffffu : sp_count) : 0;
++	}
++}
++
++void
++sweet_spmi_pmif(uint32_t *init, uint32_t *inf, uint32_t *arb_en,
++    uint32_t *cmdissue, uint32_t *sta)
++{
++	if (!sp_pmif) {
++		return;
++	}
++	if (init) {
++		*init = sp_rd(sp_pmif, PMIF_INIT_DONE);
++	}
++	if (inf) {
++		*inf = sp_rd(sp_pmif, PMIF_INF_EN);
++	}
++	if (arb_en) {
++		*arb_en = sp_rd(sp_pmif, PMIF_ARB_EN);
++	}
++	if (cmdissue) {
++		*cmdissue = sp_rd(sp_pmif, PMIF_CMDISSUE_EN);
++	}
++	if (sta) {
++		*sta = sp_rd(sp_pmif, PMIF_SWINF_STA);
++	}
++}
++
++uint32_t
++sweet_spmi_last_sta(void)
++{
++	return sp_last_sta;
++}
++
++void
++sweet_spmi_mst(uint32_t *grp, uint32_t *req)
++{
++	if (!sp_mst) {
++		return;
++	}
++	if (grp) {
++		*grp = sp_rd(sp_mst, SPMI_GRP_ID_EN);
++	}
++	if (req) {
++		*req = sp_rd(sp_mst, SPMI_MST_REQ_EN);
++	}
++}
++
++void
++sweet_spmi_sta3(uint32_t *pre, uint32_t *post, uint32_t *clear)
++{
++	if (pre) {
++		*pre = sp_sta_pre;
++	}
++	if (post) {
++		*post = sp_sta_post;
++	}
++	if (clear) {
++		*clear = sp_sta_clear;
++	}
++}
++
++int
++sweet_spmi_lane(unsigned sid, unsigned peripheral, uint32_t *map,
++    unsigned *apid, unsigned *owner)
++{
++	if (!sp_ready || !sp_old_ok || !sp_core || !map || !apid || !owner) {
++		return -1;
++	}
++	unsigned ppid = (sid << 8) | peripheral;
++	for (unsigned i = 0; i < sp_count; ++i) {
++		uint32_t m = sp_rd(sp_core, 0x900u + 4u * i);
++		if (!m || ((m >> 8) & 0xfffu) != ppid) {
++			continue;
++		}
++		*map = m;
++		*apid = i;
++		*owner = sp_rd(sp_cfg, 0x700u + 4u * i) & 7u;
++		return 0;
++	}
++	return -1;
++}
++
++/* One register write through the PMIF software interface. */
++static int
++sp_pmif_write(unsigned sid, unsigned addr, uint8_t val)
++{
++	uint32_t sta = 0;
++	unsigned i;
++
++	for (i = 0; i < 2000; ++i) {
++		sta = sp_rd(sp_pmif, PMIF_SWINF_STA);
++		if (((sta >> 1) & 7u) == SWINF_IDLE) {
++			break;
++		}
++		delay(1);
++	}
++	if (i == 2000) {
++		sp_last_sta = sta;
++		return -1;
++	}
++	sp_wr(sp_pmif, PMIF_SWINF_WDATA, val);
++	uint32_t cmd = (PMIF_CMD_REG << 30) | (1u << 29) | ((sid & 0xfu) << 24) |
++	    (0u << 16) | (addr & 0xffffu);
++	sp_wr(sp_pmif, PMIF_SWINF_ACC, cmd);
++	for (i = 0; i < 5000; ++i) {
++		sta = sp_rd(sp_pmif, PMIF_SWINF_STA);
++		if (((sta >> 1) & 7u) == SWINF_IDLE || ((sta >> 18) & 1u)) {
++			break;
++		}
++		delay(1);
++	}
++	sp_last_sta = sta;
++	return ((sta >> 18) & 1u) ? -1 : 0;
++}
++
+ int
+ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ {
+-	/* Restrict access to the battery blocks; keys retain their own lanes. */
++	/* Restrict access to the battery blocks and the touch supply LDOs. */
+ 	unsigned peripheral = addr >> 8;
+-	if (!sp_ready || !out || sid != 0 || addr > 0xffffu ||
+-	    (peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
+-	    peripheral != 0x13 && peripheral != 0x48)) {
++	bool supply = sp_touch_supply_reg(sid, addr);
++	/* The primary PMIC is pmic@4 on this board, so 0 and 4 are both allowed. */
++	if (!sp_ready || !out || addr > 0xffffu ||
++	    (!supply && ((sid != 0 && sid != 4) ||
++	    (peripheral != 0x10 && peripheral != 0x11 &&
++	    peripheral != 0x12 && peripheral != 0x13 && peripheral != 0x48)))) {
+ 		return -1;
+ 	}
+ 	IOLockLock(sp_lock);
+-	uint16_t apid = sp_find_apid((sid << 8) | peripheral);
++	if (sp_pmif_ok) {
++		int err = sp_pmif_read(sid, addr, out);
++		IOLockUnlock(sp_lock);
++		return err;
++	}
++	uint16_t apid = sp_find_apid((sid << 8) | peripheral, supply);
+ 	if (apid == SP_NO_APID || sp_poisoned[apid]) {
+ 		IOLockUnlock(sp_lock);
+ 		return -1;
+@@ -123,4 +407,25 @@
+ 	IOLockUnlock(sp_lock);
+ 	return -1;
+ }
++
++/*
++ * Write one byte. Only four MT6373 LDO registers are reachable: the enable
++ * bits at 0x1bbf (VRF18_AIF) and 0x1d23 (VTP), and their voltage selectors at
++ * 0x1e8d and 0x1e35. The vendor LDO path uses regmap_update_bits on these base
++ * registers, not the buck SET/CLR aliases, and the caller passes the full byte
++ * so every neighbouring field is preserved.
++ */
++int
++sweet_spmi_write(unsigned sid, unsigned addr, uint8_t val)
++{
++	bool ldo = sid == 5 && (addr == 0x1bbfu || addr == 0x1d23u ||
++	    addr == 0x1e8du || addr == 0x1e35u);
++	if (!sp_ready || !sp_pmif_ok || !ldo) {
++		return -1;
++	}
++	IOLockLock(sp_lock);
++	int err = sp_pmif_write(sid, addr, val);
++	IOLockUnlock(sp_lock);
++	return err;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -8,6 +8,19 @@
+ int sweet_spmi_init(void);
+ /* Thread context only; 0 success, -1 failure; *out unchanged on failure. */
+ int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++/* Read-only diagnostics for the arbiter and one APID map entry. */
++void sweet_spmi_info(uint32_t *arb, unsigned *count);
++int sweet_spmi_lane(unsigned sid, unsigned peripheral, uint32_t *map,
++    unsigned *apid, unsigned *owner);
++void sweet_spmi_pmif(uint32_t *init, uint32_t *inf, uint32_t *arb_en,
++    uint32_t *cmdissue, uint32_t *sta);
++uint32_t sweet_spmi_last_sta(void);
++/* SWINF state before the last read, after it, and after clearing VLD. */
++void sweet_spmi_sta3(uint32_t *pre, uint32_t *post, uint32_t *clear);
++/* SPMI master group enable and request enable registers. */
++void sweet_spmi_mst(uint32_t *grp, uint32_t *req);
++/* MT6373 touch-rail LDO enable aliases only; value 0 or 1. */
++int sweet_spmi_write(unsigned sid, unsigned addr, uint8_t val);
+ #ifdef __cplusplus
+ }
+ #endif

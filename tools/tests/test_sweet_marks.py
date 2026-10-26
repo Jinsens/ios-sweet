@@ -37,7 +37,7 @@ class MarksTests(unittest.TestCase):
         self.assertIn('last: translation FAULT', text)
 
     def test_corrupt_or_incompatible_records_are_rejected(self):
-        for offset, value in ((8, 2), (12, 97)):
+        for offset, value in ((8, 2), (12, 161)):
             data = block()
             struct.pack_into('<I', data, offset, value)
             with self.assertRaises(ValueError):

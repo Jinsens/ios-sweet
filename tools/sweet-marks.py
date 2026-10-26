@@ -149,6 +149,10 @@ NAMES = {
     170: 'mt6373 read states: a=STA post<<32|STA after clear b=STA pre',
     171: 'spmi master: a=GRP_ID_EN b=MST_REQ_EN',
     172: 'fw ver 0x20000004: a=rx0-3 b=rx4-7',
+    201: 'PMIF type3 audit: a=pass<<32|errors b=SEL3/SEL8/EN3/EN8/ID',
+    202: 'SALIXP Controller Ready: a=ready b=timeout ms',
+    203: 'SALIXP System Info: a=FW<<32|cfg b=signature<<8|type',
+    204: 'SALIXP Sense On: a=SPI error b=command',
     175: 'pad watch: a=seen<<32|samples b=STATUS1',
     176: 'rail vosel before: a=VRF18<<32|err b=VTP<<32|err',
     177: 'rail vosel after: a=VRF18<<32|err b=VTP<<32|err',
@@ -217,6 +221,15 @@ def decode(data: bytes) -> str:
             name = ('display: a=busy skips b=last INTSTA' if build is not None and build >= 0x2302
                     else 'legacy display: a=TE timeouts b=pushes')
         lines.append(f'{i:3d}  {code:3d}  {name:<40s} a=0x{a:x} b=0x{b:x}')
+        if code == 201:
+            if a == 0xff:
+                lines.append('     SPMI initialization failed; no audit reads issued')
+            else:
+                values = [(b >> (8 * j)) & 0xff for j in range(5)]
+                fields = ('ID', 'VRF18_EN', 'VTP_EN', 'VRF18_SEL', 'VTP_SEL')
+                lines.append(f'     pass={a >> 32}, errors=0x{a & 0xffffffff:x}, ' +
+                             ' '.join(f'{key}=0x{value:02x}'
+                                      for key, value in zip(fields, values)))
         if 112 <= code <= 116:
             rx = struct.pack('>II', a, b)
             lines.append('     rx = ' + ' '.join(f'{c:02x}' for c in rx))

@@ -1,279 +1,183 @@
-# Redmi K50 Pro（matisse / MT6983）触控移植报告
+# Redmi K50 Pro（matisse / MT6983）触控移植诊断
 
-**范围**：XNU 侧 Matisse 触控（ST FTS，SPI6）从"完全无响应"到"供电链路已打通、芯片仍不应答"的全过程。
-**时间**：2026-10-26
-**补丁跨度**：`0101` – `0137`（诊断补丁，尚未回写 `xnu/patches/`）
-**设备状态（收尾时）**：Recovery 在线，触控正常（`input2 = fts`），`boot_a` 已用完整备份写回并校验
-`sha256 = 2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`
+更新：2026-10-27。旧版报告中的供电结论已被本次 PMIF 寻址审计推翻；下文区分实测记录与尚未验证的解释。
 
----
+## 实机 IC 与板级连接
 
-## 1. 一页结论
+Recovery 正常工作的触控驱动为 `fts_touch_spi`，输入设备为 `fts`。
+通过原厂 `/proc/fts/driver_test` 发送硬件寄存器读取，取得：
 
-| 项目 | 结论 |
+| 项目 | 实测 |
 |---|---|
-| SPI6 控制器 | **正常**。内部回环逐字节一致（`a5 5a 3c c3 0f f0 96 69`，≈3.9 µs） |
-| SPI 焊盘通路 | **正常**。长传输中 `CSB(165)` 拉低、`CLK(167)` 与 `MOSI(166)` 翻转 |
-| 引脚复用 / IES / 上下拉 | **与 Recovery 完全一致**（PU/PD 读回 `0xfb7a5beb` / `0x00048410`） |
-| 复位脚 GPIO3 | **正常**。GPIO 模式、输出、复位释放后 `din=1` |
-| SPMI / PMIF 访问 | **正常**。空写（写回原值）四组全部成功且系统完整跑完 |
-| 触控供电电压 | **已能安全改到位**。分步 ramp（100 mV/5 ms）把 VRF18 从 1.3 V 抬到 1.8 V、VTP 从 1.8 V 抬到 3.3 V，不再崩溃 |
-| 触控芯片本体 | **仍然完全不应答**：ID `00:00`、FW VER 全 0、`0x81` 无回执、MISO 恒 0、INT(GPIO8) 恒 0 |
-| 唯一未解的硬差异 | VTP 的 **LP 位**：Recovery 是 `0x01`（LP=0），XNU 是 `0x03`（LP=1）；而在 XNU 里**任何**把 `0x1d23` 从 `0x03` 改成别的值（`0x01` 或 `0x00`）的写操作都会让 SoC 立刻死机 |
+| 数字 chip ID，`0x20000000` | `36 40` |
+| FW，`0x20000004`，小端 | `0x0020` |
+| System Info | 完整 208 字节，头部 `A5 01`，FW `0x0020`，cfg `0x001b` |
+| ICR，`0x2000002d` | `0x42`，SPI4 位已置位 |
+| Linux 输入坐标 | X `0..14399`，Y `0..31999`，10 个 slot |
 
-一句话：**我方链路（主控、焊盘、复用、时钟、SPMI 写入）全部验证正确，电压也已按 Recovery 抬到位，但芯片始终不驱动 MISO/INT；剩下的唯一已知差异是 VTP 的 LP 位，而在 XNU 里动它就是致命的。**
+这与 MiCode `rubens-s-oss` 的 `L11_fts_spi/fts_lib/ftsHardware.h` 中
+**STMicroelectronics FTS / FTM5、SALIXP 分支**完全对应。
+这是已确认的数字 ID 与协议分支；尚未取得芯片封装的商业料号，不能据此声称 ST80Y 或其他具体封装型号。
 
----
+原厂 proc 请求（前导 `05` 是测试接口操作号）：
 
-## 2. 目标硬件
+```text
+05 FB 04 20 00 00 00 00 02 01
+{ 000000003640 }
+```
 
-| 项目 | 值 |
+用户提供的 `Documents/dtbo.img` 含一个 overlay，触控节点与 live Recovery FDT 一致：
+
+| 项目 | 板级值 |
 |---|---|
-| 机型 | Redmi K50 Pro（`matisse`），MT6983 / 天玑 9000 |
-| 触控 | ST 系 FTS，`compatible = "st,spi"`，FW `st_fts_L11.ftb`，屏 1440×3200 |
-| 总线 | `spi6@11016000`，CS0，mode 0，12 MHz，四线 |
-| 复位 | GPIO3（`ts_reset_active` = `output-low`，即低=复位有效，高=释放） |
-| 中断 | GPIO8（`ts_int_active` = `input-enable`） |
-| 供电 | `vdd = mt6373_vrf18_aif`（DT 钉死 1.8 V）、`avdd = mt6373_vtp`（DT 钉死 3.3 V） |
-| PMIC | MT6373（SPMI **SID 5**，`second_pmic@5`）；主 PMIC 为 `pmic@4`（**SID 0 不存在**） |
-| PMIF | `0x1c015000`，SWINF 通道 2 |
-
-DT 中触控节点的 `fts,pwr-reg-name = "avdd"`、`fts,bus-reg-name = "vdd"`，与 `vdd-supply`/`avdd-supply` 的 phandle 指向一致，供电映射无歧义。
-
----
-
-## 3. 关键证据链
-
-### 3.1 SPI 控制器正常（推翻了早期"假完成"的猜测）
-
-- 打开 `SPI_CMD_SPIM_LOOP` 做内部回环，TX `a5 5a 3c c3 0f f0 96 69` 被**逐字节原样读回**，`match=1`、`err=0`、耗时 3,514 ns。
-- 说明总线时钟、TX/RX FIFO、移位器都是真实工作，`FINISH` 不是陈旧标志。
-
-### 3.2 焊盘通路正常（关键的一次观测）
-
-用 64 字节长传输、**紧贴采样** `PIO DIN`（`0x10005250`，pins 160–191），得到 `seen = 0xf5`：
-
-- `CSB(165)` 整个传输窗口保持拉低；
-- `CLK(167)` 翻转、`MOSI(166)` 翻转；
-- `MI(164)` **一次都没有离开 0**。
-
-即：控制器确实把三个输出信号送到了焊盘，芯片从始至终没有驱动过 MISO。
-
-> 同时纠正了两个此前的错误：
-> - PIO 每组 32 脚是 `0x10` 步进，DIN(160–191) 在 `0x10005250`，不是 `0x214`；
-> - `0x1000544c` 那个"模式写入别名"是**空写**，真正生效的是数据寄存器 `0x10005440`。
-
-### 3.3 引脚配置与 Recovery 完全一致
-
-从厂商源码（`MiCode/Xiaomi_Kernel_OpenSource`，分支 `rubens-s-oss`，
-`drivers/pinctrl/mediatek/pinctrl-mt6983.c`）拿到 MT6983 的寄存器表：
-
-- IOCFG base 5 = `0x11d30000` 对应 GPIO160–167；
-- IES 字 `+0x0050`：pin164 bit15、165 bit14、166 bit16、167 bit13；
-- PU `+0x00A0`、PD `+0x0070`、drive `+0x0110`。
-
-实测：IES 读回全 1；PU/PD 读回 `0xfb7a5beb` / `0x00048410`，与 Recovery 的 `pinconf-pins` **逐位一致**（165 上拉，164/166/167 下拉）。这说明整套焊盘配置跨重启完整保留，前面所有 DIN 读数可信。
-
-### 3.4 PMIC 侧：拿到了"能用时"的黄金寄存器表
-
-两个来源：
-
-**(a) TWRP 设备树里的旧 `ramoops.txt`**（`/Users/xiaohuasheng/Documents/twrp/output/ramoops.txt`）：
-
-```
-mt6373_vtp: Bringing 1800000uV into 3300000-3300000uV
-```
-
-含义：开机时 VTP 硬件选择器是 **1.8 V**，Recovery 内核按 DT 约束（`regulator-min/max-microvolt = 3300000`）把它抬到 3.3 V。XNU 从不做这件事。VRF18_AIF 同理，DT 钉死 1.8 V。
-
-**(b) Recovery 内核开了 regmap debugfs**，可以直接 dump MT6373 整张寄存器表：
-
-```sh
-adb shell 'mount -t debugfs none /sys/kernel/debug'
-adb shell 'cat /sys/kernel/debug/regmap/0-05/registers' > recovery-mt6373-regs.txt
-```
-
-`0-05` 即 SID 5（MT6373），输出是 `addr: value` 文本，共 65536 行。
-**黄金状态**（触控存活）：
-
-| 寄存器 | 含义 | Recovery（能工作） | XNU 启动时 |
-|---|---|---|---|
-| `0x1bbf` | VRF18_AIF 使能 | `0x01` | `0x00`（关） |
-| `0x1e8d` | VRF18_AIF VOSEL | `0x0c`（`ldo_volt_table3[12]` = 1.8 V） | `0x07`（= 1.3 V） |
-| `0x1d23` | VTP 使能 / LP | `0x01`（EN=1，LP=0） | `0x03`（EN=1，LP=1） |
-| `0x1e35` | VTP VOSEL | `0x0d`（`ldo_volt_table1[13]` = 3.3 V） | `0x74`（= 1.8 V） |
-
-快照已存：`research/matisse/20261025-touch/recovery-mt6373-regs.txt`。
-
-### 3.5 写通路正常（空写判别实验）
-
-把四个寄存器**各自写回它原本的值**（电气状态不变）：
-
-```
-186  noop VTP VOSEL    rc=0 value=0x74   ✓
-187  noop VRF18 VOSEL  rc=0 value=0x70   ✓
-188  noop VTP EN       rc=0 value=0x03   ✓
-189  noop VRF18 EN     rc=0 value=0x00   ✓
-50   bsd_init -> vfs_mountroot           ✓
-51   root mounted                        ✓
-84   init exec failed, about to panic    ✓
-```
-
-**系统完整跑完**。所以 PMIF 的写命令编码、地址、VALUE 字段都是对的，问题不在"写不进去"。
-
----
-
-## 4. 崩溃边界：哪些写是安全的
-
-每一笔写后立刻落标记，逐条记录：
-
-| 写操作 | 结果 |
-|---|---|
-| `0x1bbf ← 0x01`（VRF18 使能） | **安全**，读回 `0x01`，多次验证 |
-| 四个寄存器写回原值（空写） | **安全**，完整启动 |
-| `0x1e8d ← 0x7c` / `0x1e35 ← 0x7d`（保留高半字节） | 存活，但芯片仍静默 |
-| `0x1e8d ← 0x0c`（一步到位 1.8 V） | **死机** |
-| `0x1e35 ← 0x0d`（一步到位 3.3 V） | **死机** |
-| `0x1d23 ← 0x01`（清 LP，VTP 保持开） | **死机** |
-| `0x1d23 ← 0x00`（关断 VTP） | **死机** |
-| **分步 ramp**：`0x1e8d` 7→12、`0x1e35` 4→13（每步 5 ms） | **安全** |
-
-结论：
-
-1. **一步跨压会打死 SoC**，分 100 mV 步进就没问题——这是软启动冲击，不是写通路问题。
-2. **`0x1d23` 的任何取值变化都是致命的**，无论：
-   - 在触摸线程里（≈2 s）；
-   - 在 `sweet_ufs_rootdev()` 的挂载前窗口（≈1 s，UFS DMA 已就绪、根分区未挂）；
-   - 在 1.8 V 下改，还是先 ramp 到 3.3 V 再改。
-
-第 2 点是当前唯一的硬阻塞。
-
----
-
-## 5. 当前状态与三个假设
-
-### 已站得住的事实
-
-- 主控、焊盘、复用、时钟、片选、上下拉、输入使能、复位电平：**全部正确**。
-- SPMI 读写：**正确**（空写证明）。
-- 两路电压：**能安全抬到 DT 要求的值**（分步 ramp）。
-- 芯片：MISO 恒 0、INT 恒 0、`0x81` 无回执、ID `00:00`、FW VER 全 0。
-
-### 剩余假设（按可能性排序）
-
-**H1：VTP 处于 LP（低功耗）模式，输出电流能力不足，芯片起不来。**
-这是与 Recovery 的最后一个已知差异。未解之处：清 LP 必崩，说明 LP 位在这块板上牵动别的东西（或 LP 位的清除会引发 LDO 重新软启动）。
-
-**H2：VTP 的 VOSEL 写入没有真正改变输出。**
-同一次启动里 `0x1e35` 先读回 `0x7d`，20 ms 后再读变成 `0x74`；而 `0x1e8d` 稳定在 `0x7c`。可能是 SPMI 读回抖动（此前也见过 `0x74/0x75`、`0x70/0x07` 的不一致），也可能 PMIC 真的把值回退了。厂商头文件里 **没有**独立的 LP-VOSEL 寄存器，所以更可能是读回不可靠。
-
-**H3：芯片并不是"没电"，而是被复位/停在 bootloader 模式。**
-我们对芯片做了完整的掉电/复位序列（复位拉低 20 ms、释放、等 120 ms、发 `0x81`），而 Recovery 里芯片是**一路活着**过来的。FTS 的 ROM 在硬复位后是否需要特定下载模式握手才能应答，尚未验证。
-
----
-
-## 6. 下一步建议
-
-按性价比排序：
-
-1. **硬件测量（最快一锤定音）**
-   在 XNU 启动后量 VTP 与 VRF18 的实际电压。只要确认 VTP 真的到 3.3 V，H2 直接排除，焦点收敛到 H1/H3。
-2. **验证读回可靠性**
-   在同一笔写之后连续读 8 次并全部落标记；若读数在 `0x0d`/`0x74` 之间跳变，则 H2 是伪问题，同时说明此前的"读回确认"都需要重新审视。
-3. **绕开 LP 位**
-   如果 H1 成立而 `0x1d23` 又动不了，只剩两条路：
-   - 在**引导器（LK）**里就把 VTP 配好（风险高，需改 `lk` 分区）；
-   - 或确认芯片在 LP 下其实能工作，转而排查 H3（复位时序/下载模式握手）。
-4. **H3 的验证**
-   不做硬复位，仅上电后直接发 `0x81` + 读 FW VER；以及尝试更长的上电稳定时间（500 ms）。这两项都很便宜。
-
----
-
-## 7. 复现方法（工具链）
-
-### 7.1 只读 dump PMIC 寄存器（Recovery）
-
-```sh
-adb shell 'mount -t debugfs none /sys/kernel/debug'
-adb shell 'ls /sys/kernel/debug/regmap'          # 0-04 = 主 PMIC, 0-05 = MT6373
-adb shell 'cat /sys/kernel/debug/regmap/0-05/registers'
-```
-
-`/sys/kernel/debug/regulator/<name>/` 还能看到 `use_count`、`open_count` 与该稳压器的消费设备（如 `spi6.0-avdd`）。
-
-### 7.2 临时启动镜像（可逆）
-
-- 构建：`tools/build-xnu-local.sh xnu/out/local`（需 `DEVELOPER_DIR=/Users/xiaohuasheng/Downloads/Xcode.app/Contents/Developer`）
-- 打包：`tools/mkpayload.py <kernel> research/matisse/20261025-display-0148/matisse-dual.adt <payload> --cmdline '...'`
-- 封 shim：`research/matisse/20261025-touch/repack-touch-spi-sweep.py <payload> <img>`
-  （脚本会改写 shim 里两处 32-bit `MOVZ/MOVK` 立即数，即 `EMBEDDED_XNU_BYTES`）
-- 预检：`run-touch-spi-sweep.py <img>`（只读，校验设备在 Recovery、`boot_a` 与备份一致）
-- 写盘 + 重启：`adb push` → `dd of=/dev/block/by-name/boot_a` → 校验 → `adb reboot recovery`
-- 恢复：`/usr/bin/python3 tools/fbraw.py flash boot_a backup/recovery-20261021/boot_a-live-20261021.img`
-  → `fbraw.py reboot-recovery` → 机上 `sha256sum` 比对 `2931647a56…86b1`
-
-> 注意：`fbraw.py` 依赖 pyusb，**只有 `/usr/bin/python3` 有**，用其他解释器会恢复失败（本轮踩过一次）。
-
-### 7.3 启动标记
-
-`tools/sweet-marks.py` 负责拉取与解码。标记是**同步落盘**的，写到 userdata 末尾一个 4 KiB 块（`SWEET_MARK_MAX = 160` 条），所以崩溃点之前的内容一定保留。
-
-常用启动参数：
-
-```
-sweettouch=1 sweettouchdelay=1 sweettouchhold=45 sweettouchmark=1
-sweettouchpower=1      # 电源/SPMI 诊断
-sweettouchsweep=1      # SPI 五组配置扫掠
-sweetvtplp=1           # 清 VTP LP 位（危险，见第 4 节）
-sweetnoop=1            # 四寄存器空写判别
-```
-
----
-
-## 8. 产物清单
-
-目录：`research/matisse/20261025-touch/`
-
-| 类型 | 文件 |
-|---|---|
-| 黄金寄存器表 | `recovery-mt6373-regs.txt`（65536 行） |
-| 源码快照 | `sweet_matisse_touch-0111.c`、`sweet_matisse_touch-0120.c`、`sweet_matisse_touch-0126.c`、`sweet_matisse_touch-0131.c`、`sweet_spmi-0120.c`、`sweet_spmi-0126.c`、`sweet_spmi-0131.c` |
-| 镜像 | 37 个 `matisse-xnu-touch-*.img`，关键节点：`padwatch`、`bitbang`、`ies`、`spmilane`、`spmiret`、`railvolt`、`railvtp`、`powerorder`、`vddorder`、`seqr`、`earlyrails`、`isolate`、`noop`、`ramp`、`ramp3v3`、`lpearly` |
-| 标记 | 33 份 `*-after-marks.{bin,txt}` |
-| 运行器 | `run-touch-spi-sweep.py`、`repack-touch-spi-sweep.py`、`fdtq.py`（DT 解析） |
-| Recovery 模块 | `recovery-modules/`（`fts_touch_spi.ko`、`fts.c`、`spi-mt65xx.ko`、`spi-mt65xx.c`、`fts_probe.asm`） |
-
-关键镜像哈希（boot 镜像，7,061,504 B）：
-
-| 补丁 | 用途 | `boot_sha256` |
+| 节点 | `/spi6@11016000/fts@0`，`st,spi` |
+| SPI | SPI6 CS0，mode 0，12 MHz，GPIO164–167 func2 |
+| 复位 / 中断 | GPIO3 / GPIO8 |
+| 固件文件 | `st_fts_L11.ftb` |
+| VDD | MT6373 VRF18_AIF，1.8 V，consumer `spi6.0-vdd` |
+| AVDD | MT6373 VTP，3.3 V，consumer `spi6.0-avdd` |
+| PMIF | `0x1c015000`，SWINF2，SPMI SID5 |
+
+Recovery `regulator_summary` 报告两轨 normal、各一个 consumer。
+这是正常工作状态的参考，不能单凭 consumer 数量排除电气冲击。
+
+Recovery 的寄存器参考：
+
+| 地址 | 内容 | 值 |
 |---|---|---|
-| 0134 | 空写判别 | `07ba97cc…ac7c3` |
-| 0135 | 分步 ramp | `70b5db8d…bbbc3` |
-| 0136 | ramp 后不清 LP | `2e13c48d…f078` |
-| 0137 | 挂载前清 LP | `bff9fa2c…7342` |
+| `0009` | MT6373 ID | `73` |
+| `1bbf` | VRF18_AIF EN | `01` |
+| `1d23` | VTP EN | `01` |
+| `1e8d` | VRF18_AIF selector | `0c` |
+| `1e35` | VTP selector | `0d` |
 
----
+## 确定的软件错误：PMIF 使用了错误的命令类型
 
-## 9. 风险与安全
+此前 XNU 的 `sweet_spmi.c` 将 `PMIF_CMD_REG=1` 用于上述 16 位地址。
+SPMI 普通寄存器命令只支持 5 位地址；厂商 PMIF 的 16 位访问使用
+`PMIF_CMD_EXT_REG_LONG=3`。厂商源码和 Recovery 实际 `spmi-mtk-pmif.ko`
+反汇编一致：EXT_READL 基码 `0xc0000000`，EXT_WRITEL 基码 `0xe0000000`。
+例如 SID5 地址 `0x1d23` 的单字节读命令应为 **`0xc5001d23`**。
 
-- **`0x1d23` 是禁区**：任何取值变化都会打死 SoC。若要再试，必须接受"设备需长按电源 15–20 s 强制复位"的代价。
-- **不要一步跨压**：改 VOSEL 必须分步（本轮 100 mV/5 ms 有效）。
-- **`boot_a` 是唯一改动过的分区**。每次试验后都用完整 64 MiB 备份写回并校验哈希；其他分区从未触碰。
-- 若设备失联（USB 完全不枚举），长按电源 15–20 s 可回到 Fastboot，然后按 7.2 恢复。
-- `xnu/patches/` 目前仍停在 `0105`，`0106`–`0137` 全是工作树里的诊断改动，尚未整理成补丁文件。
+因此，旧实验中的数字记录仍可保留，但不能继续当作目标 LDO 寄存器或电压的证明：
 
----
-
-## 10. 附：本轮推翻的旧结论
-
-| 曾经的判断 | 实际 |
+| 旧结论 | 本次更正 |
 |---|---|
-| 片选建立/保持时间不足 | 补齐 300/30 周期后无变化 |
-| `CFG3` 半双工位写错 | 五种配置全部返回 8 个 0 |
-| 三线/四线模式不对 | 位翻转（完全不经过控制器）同样全 0 |
-| 复位脚一直被拉住 | 读回 GPIO 模式、输出、高电平 |
-| 焊盘输入使能（IES）没开 | 读回全 1，且 PU/PD 与 Recovery 逐位一致 |
-| `0x1000544c` 能写引脚模式 | 是空写，实际寄存器是 `0x10005440` |
-| 电源使能位写不进去 | 写进去了（`0x00 → 0x01` 读回确认） |
-| 电压已按 DT 配好 | 实际 VRF18 只有 1.3 V、VTP 只有 1.8 V |
-| 一步改电压就行 | 一步必崩，必须分步 ramp |
+| 空写不崩溃，所以 PMIF 地址和写命令正确 | 不成立；没有证明实际访问了目标 16 位地址 |
+| VRF18 已到 1.8 V、VTP 已到 3.3 V | 不成立；需要正确寻址后的读数与必要的实测 |
+| selector 高半字节是模式位 | 未证实；旧读数不能用于推断目标寄存器位义 |
+| 清 VTP LP 导致整机复位 | 只能保留“旧命令发出后整机复位”的观察，不能归因到目标 LP 位 |
+| VTP 是唯一剩余硬件故障 | 未证实；应先重建可信的 PMIF 和 SPI 证据 |
+
+**本次没有确定旧写命令实际落到哪个寄存器，也没有证明此错误已解释所有历史复位。**
+
+历史上仍有用的记录包括 SPI 内部回环成功、波形采样变化、XNU ID 为零、部分命令后 watchdog 复位等。
+内部回环只验证控制器内部通路，焊盘 DIN 采样也不能替代外部逻辑分析仪测量。
+旧 `0x81` 单字节复位与 GPIO8 mux 的问题也会影响过去的解释。
+
+## 移植修改
+
+补丁依次为 `0106-matisse-touch-diagnostics-baseline.patch`、已有 `0107` / `0108`、
+`0109-matisse-pmif-addressing-salixp-startup.patch`。
+0106 补齐此前仅存在于 ignored 本地编译树的诊断前置代码，使 0108 可从补丁树重现；0109 给出最终修复状态。
+
+- PMIF 读采用 type3，必须观察到 `WFVLDCLR`，读取数据并确认完成标志已清除才返回成功。
+- `sweet_spmi_write()` 总是返回失败，不执行任何 MMIO；旧供电 ramp / LP / unlock 试验入口已移除。
+- `sweetpmicaudit=1` 在挂载前读取上述五个 SID5 地址，连续八轮，不改变 PMIC 配置。
+- `sweettouchinit=1` 仅在 ID 匹配后执行 SALIXP 启动：`FA 20 00 00 24 81` 软复位，
+  最多等待 100 ms 的 `03` Controller Ready，读取 System Info 前 24 字节，
+  校验 `A5 01` 和有效 FW，再发送 `A0 00 01` 开始扫描。该选项默认关闭。
+- `87` 是本分支 FIFO 读取命令，不能当作“清 FIFO”；厂商 `flushFIFO()` 使用 `A4 00 01`。
+- 控制器 Ready / error 事件会释放已有触点；修复 bitbang 短接收缓冲区的调试输出越界读取。
+- 同步内核 mark 容量至 160，build ID 为 `0x230a`，解码器增加 201–204。
+
+新 mark：
+
+| code | 含义 |
+|---|---|
+| 201 | `a=pass<<32|error_bitmap`；`b` 从低字节起为 ID / EN8 / EN3 / SEL8 / SEL3；`a=ff` 表示初始化失败 |
+| 202 | Controller Ready，`a=0/1`，`b=100` ms |
+| 203 | `a=FW<<32|cfg`，`b=signature<<8|type` |
+| 204 | Sense On 传输返回值与命令 |
+
+## LK / VCP / DTBO 静态检查
+
+原文件均未改动：
+
+| 文件 | 字节数 | SHA256 |
+|---|---:|---|
+| `Documents/lk.img` | 2947648 | `32fa264a3e728d54ba204373c39bf339407dd9b6488165569a0762d2b5407c4a` |
+| `Documents/vcp.img` | 1590800 | `8206c5b00a28dcd7206b88c019e5fd2a27a1ebca7f7d1c96d6631f00544ffea7` |
+| `Documents/dtbo.img` | 75136 | `8bc2f0f11a09ecf36fc37f09111327b403566eb2372e77027d9b4d96da7a591c` |
+
+LK 的 MTK 分段含 `lk` / `bl2_ext` / `aee` / `lk_main_dtb`。
+`mt6373_ldo_1p8_enable` / `mt6373_ldo_3p0_enable` 字符串交叉引用附近访问
+`0x1b87`、`0x1e29`、`0x1cce`，不是已确认的触控轨寄存器。
+目前未找到可直接采用的 VTP 初始化路径。VCP header 为 `tinysys-vcp-RV55_A`；未运行、未刷写这些固件。
+
+## 构建与镜像校验
+
+本地完整 XNU 构建成功（CLT，`tools/build-xnu-clt.sh`，exit 0）。
+七项定向测试通过（三项硬件 mock、四项 mark 解码）；mock 覆盖完整地址命令、完成所有权、禁止写 PMIC，以及 Ready / System Info 对 Sense On 的门控。
+
+| 产物 | 字节数 | SHA256 |
+|---|---:|---|
+| kernel，build `0x230a` | 16723304 | `099fce838614cf3a9e0dc64f1b0492482b5ff5aef91cd8521b38d926565be6e9` |
+| payload | 16719184 | `fe3a537cf859ea406769d142fa2d60fcbfcd4b0d6a557480796d61a555bc612c` |
+| `matisse-xnu-230a-pmif-audit.img` | 7061504 | `20a5c23bdde95a90da47d57425a0703d26e53c897bd63618c48a56aa49dae412` |
+
+Shim 使用 `49100674e2e889857a1e60554ffd8e095eeb5606` 的已提交源码在 ignored 目录构建，
+工具链为 NDK 28.2 clang/lld。本轮保留用户已有的 shim `--kick` 未提交修改；该镜像未包含这些修改。
+本地 XNU 还包含此前未提交的 `0093-sweet-log-readonly.patch`，其差异已记录在产物元数据中。
+无新 GitHub Actions run。
+
+已校验 boot header v4、完整 gzip、ARM64 Image 长度、SWEETAPP 对齐与长度、
+payload 逐字节一致、stock ramdisk 1250233 B 和 signature 4096 B 完全一致。
+镜像显式禁用 keys / battery / USB / touch-init，启用 touch ID probe 和 PMIC audit：
+
+```text
+debug=0xc serial=0 cpus=8 keepsyms=1 -enable_kprintf_spam rd=ufsroot0 ufsrw=0 ufscache=1 -noprogress sweetkeys=0 sweetbattery=0 sweetusb=0 sweettouch=1 sweettouchdelay=3 sweettouchhold=30 sweettouchmark=1 sweetpmicaudit=1 sweettouchinit=0
+```
+
+“PMIC 只读”指不写 PMIC 配置；启动仍会配置 SPI / GPIO，并使用既有 userdata 尾部诊断记录区。
+测试使用临时 `boot_a` 镜像并恢复完整 64 MiB 备份，不改变 GPT。
+
+## 本轮上机状态
+
+用户已于 2026-10-27 明确回复“可以启动测试”。本轮产生 57 个新 mark，build ID `0x230a`。
+8 轮 mark201 全部相同且错误位为零：
+
+| 寄存器 | XNU 实测 | Recovery 参考 |
+|---|---|---|
+| MT6373 ID | `73` | `73` |
+| VRF18 EN | `00` | `01` |
+| VTP EN | `00` | `01` |
+| VRF18 selector | `0c` | `0c` |
+| VTP selector | `04` | `0d` |
+
+这建立了正确寻址后稳定的参考：本次 XNU 启动时两轨的使能位都为零。
+VTP selector `04` 对应厂商表 1.8 V；使能位为零时不能据此声称引脚实际输出 1.8 V。
+mark96 的 SPI 返回码为 0、ID 为 `00 00`；触控线程已于 3 s 运行，30 s 等待窗口完整结束。
+此后 mark63/64 显示 init 候选路径返回 ENOENT，与已知缺少 launchd 的阶段一致。
+
+约 135.47 s 后进入 fastboot，经 fbraw 恢复完整 64 MiB `boot_a` 备份并返回 Recovery。
+恢复后 SHA256：`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`。
+Recovery 报告 bootreason Watchdog；本次没有 PMIC 写，不能归因到电源切换。
+未取得 SWEETLOG console header；以新 build 的持久 mark 为证据。
+原始结果为 `audit-result.json`、`audit-after-marks.bin` / `.txt`。
+
+**XNU 触控尚未工作。** 下一步应使用正确 type3 写命令完成有边界的 LDO 配置，
+验证读回后，再启用 SALIXP 初始化。该后续镜像尚未上机。
+
+## 证据位置与下一步
+
+原始实测、固件反汇编、厂商源码、构建日志、镜像、校验 JSON 和运行脚本都在 ignored：
+`research/matisse/20261027-ic-diagnosis/`。
+
+厂商参考版本：MiCode Xiaomi_Kernel_OpenSource，`rubens-s-oss`，commit
+`270b84910b941bf75490fccdb5fb2b3021dd7cbf`。
+关键路径是 `drivers/spmi/spmi-mtk-pmif-core.c`、
+`drivers/input/touchscreen/L11_fts_spi/fts_lib/{ftsHardware.h,ftsCore.c,ftsTool.c}`。
+
+下一步首先按 mark201 检查正确寻址后的 MT6373 ID 是否稳定为 `73`，再比较两轨实际寄存器与 Recovery，
+然后判断 XNU SPI ID 是否返回 `36 40`。只有可靠的供电和通信证据到位后，才启用 SALIXP 初始化与实际触摸上报测试。

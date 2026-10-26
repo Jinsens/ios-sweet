@@ -1,9 +1,69 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ACTIVE 2026-10-27 (touch): SALIXP confirmed; PMIF type1 bug fixed; 0x230a audit completed; both LDO enable registers are zero <<<
+
+**Read this before the older entries below: the old PMIC voltage / VTP-LP
+conclusions are invalidated by a confirmed PMIF command-addressing bug.**
+Recovery chip ID `36 40`, FW `0x0020`, cfg `0x001b`, ICR `0x42` confirm
+ST FTS/FTM5 SALIXP (commercial package part number not read).
+User's `Documents/dtbo.img` matches live FDT: SPI6 CS0 12 MHz,
+GPIO3 reset / GPIO8 IRQ, st_fts_L11.ftb, VRF18_AIF 1.8 V / VTP 3.3 V.
+
+Old sweet_spmi.c used `PMIF_CMD_REG=1` (5-bit address) with 16-bit addresses.
+Vendor source and Recovery module disassembly require type3 EXT_REG_LONG:
+SID5 0x1d23 read must be `0xc5001d23`. Therefore old readbacks, noop-write
+success, claimed rail voltages, upper-nibble mode theory and attributing
+watchdog resets to the physical VTP LP transition are **not established**.
+The wrong opcode is certain; where old writes landed / whether this explains
+all reset events remains unknown. Preserve historical raw results, not their
+old electrical interpretation. See `docs/matisse-touch-report.md`.
+
+Completed changes for this milestone:
+- 0106 restores the missing local diagnostic baseline for existing 0108.
+- 0109 fixes PMIF reads, removes touch power-write trials and makes
+  sweet_spmi_write return failure without MMIO. `sweetpmicaudit=1` reads
+  SID5 0009/1bbf/1d23/1e8d/1e35 eight times before mountroot (mark201).
+- Optional `sweettouchinit=1`: correct FA 20 00 00 24 81 reset -> Ready03
+  <=100ms -> valid A5/01 System Info + FW -> A0 00 01 Sense On.
+  This trial keeps init=0. 87 is FIFO read, not flush. Fix bitbang short-RX
+  debug overread; release contacts after Ready/error. Marks202-204 added.
+- Sync SWEET_MARK_MAX=160 and build ID 0x230a. Three new mock tests passed.
+
+Full local CLT XNU build exit0, kernel 16723304 B SHA256
+`099fce838614cf3a9e0dc64f1b0492482b5ff5aef91cd8521b38d926565be6e9`.
+NDK28.2 shim built from frozen tracked HEAD 4910067 (excludes existing user
+--kick edits). boot v4 image 7061504 B SHA256
+`20a5c23bdde95a90da47d57425a0703d26e53c897bd63618c48a56aa49dae412`.
+Stock ramdisk/signature, gzip/Image size, embedded payload length/content
+all verified. Existing untracked 0093 is in the local kernel; keep it separate.
+No new CI run. Artifacts, exact cmdline, verifiers, build/test logs and raw
+read-only Recovery evidence: `research/matisse/20261027-ic-diagnosis/`.
+
+User explicitly approved boot testing on 2026-10-27: “可以启动测试”.
+`run-audit.py --execute-approved` completed and restored full boot_a. Preflight: Recovery/matisse/_a, boot_a matches full backup SHA256
+`2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
+Hardware result: 57 new marks, build0x230a. All eight mark201 reads matched,
+err=0, ID=73, VRF18_EN=00, VTP_EN=00, VRF18_SEL=0c, VTP_SEL=04.
+This invalidates the old XNU EN=03/selector-high-nibble interpretations.
+Mark96: SPI err=0, ID=00:00. The worker ran at3s and the full30s hold ended;
+marks reached init candidates ENOENT and mark64 (missing launchd).
+After135.47s the host saw fastboot; fbraw flashed the complete64MiB backup
+and rebooted Recovery. Restored hash is the same2931647a...86b1 above.
+Recovery reports Watchdog; do not attribute it to a PMIC write (there were
+none). No SWEETLOG header was found; marks are the valid evidence.
+Seven targeted tests pass (3 hardware mocks +4 mark decoder checks); fixed
+an old test's count97 rejection to count161 for the160-record format.
+Next local work: guarded, type3 touch-LDO configuration and a reviewable
+follow-up artifact. A new boot_a write requires its own AGENTS confirmation.
+PMIC config was read only; existing diagnostic records use userdata tail.
+
+LK/VCP were statically inspected, not modified. LK known LDO helper xrefs
+use other rails (1b87/1e29/1cce); no confirmed VTP init path found yet.
+VCP is tinysys-vcp-RV55_A. File hashes and details are in the report.
+
 ## >>> ACTIVE 2026-10-27 (matisse touch): 0117/0118 VTP mode trials both reset the SoC <<<
 
-The device was in OrangeFox Recovery (`matisse`, slot `_a`, serial
-`Q4NVQWVW4DI7EUSW`) before and after both temporary `boot_a` tests. The full
+The device was in OrangeFox Recovery (`matisse`, slot `_a`) before and after both temporary `boot_a` tests. The full
 backup was restored after each test and verified as
 `2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1`.
 
