@@ -156,7 +156,14 @@ def main():
         with raw:
             raw.seek(1024)
             assert raw.read(2) == b'HX', 'output is not a raw HFSX volume'
-        run('/sbin/fsck_hfs', '-fn', output)
+        # macOS fsck_hfs requires a device, not a regular raw-image file.
+        check = plistlib.loads(run('hdiutil', 'attach', '-nomount', '-readonly',
+                                   '-plist', output, capture=True))
+        device = check['system-entities'][0]['dev-entry']
+        devices.append(device)
+        run('/sbin/fsck_hfs', '-fn', '/dev/r' + Path(device).name)
+        run('hdiutil', 'detach', device)
+        devices.pop()
         digest = hashlib.sha256()
         with output.open('rb') as f:
             for block in iter(lambda: f.read(8 << 20), b''):

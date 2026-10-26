@@ -1,0 +1,91 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -170,12 +170,12 @@
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	if (!native) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
+-	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+-	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	fOffX = ((int32_t)fLogicalW - (int32_t)fWidth) / 2;
++	fOffY = ((int32_t)fLogicalH - (int32_t)fHeight) / 2;
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -317,6 +317,11 @@
+ 	if (!fConsolePaused) {
+ 		int quiet = 0;
+ 		fConsolePaused = true;
++		/* A larger panel shows a centered iPhone canvas. Clear the margins
++		 * once so the kernel console does not remain around the UI. */
++		if (fWidth > fLogicalW || fHeight > fLogicalH) {
++			bzero((void *)fPixels, (size_t)fRowBytes * fHeight);
++		}
+ 		if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
+ 			/* Not PE_initialize_console(kPEDisableScreen): its console switch
+ 			 * writes the read-only-late cons_ops_index and panics. */
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -367,7 +367,7 @@
+ 	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 2; }
+ private:
+ 	IOLock *fLock;
+-	int fLogicalW, fLogicalH, fOffX, fOffY;
++	int fLogicalW, fLogicalH, fOffX, fOffY, fPanelW, fPanelH;
+ 	bool fDown[SWEET_TOUCH_FINGERS];
+ 	bool fEdge[SWEET_TOUCH_FINGERS];
+ 	IOFixed fX[SWEET_TOUCH_FINGERS];
+@@ -434,10 +434,14 @@
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	PE_Video video;
++	PE_current_console(&video);
++	fPanelW = video.v_width ? (int)video.v_width : 1080;
++	fPanelH = video.v_height ? (int)video.v_height : 2400;
++	fLogicalW = native ? fPanelW : 1125;
++	fLogicalH = native ? fPanelH : 2436;
++	fOffX = (fLogicalW - fPanelW) / 2;
++	fOffY = (fLogicalH - fPanelH) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+@@ -463,9 +467,16 @@
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+-	/* Panel pixels -> the presented 1125x2436 display (SweetFramebuffer.cpp). */
+-	IOFixed nx = (IOFixed)(((int64_t)(x + fOffX) << 16) / fLogicalW);
+-	IOFixed ny = (IOFixed)(((int64_t)(y + fOffY) << 16) / fLogicalH);
++	/* Both board drivers supply 1080x2400 normalized panel coordinates.
++	 * Expand to physical pixels, then apply the same centered viewport as
++	 * SweetFramebuffer. Contacts in a larger panel's margins clamp to its
++	 * logical edge; they never produce negative HID coordinates. */
++	int lx = (int)((int64_t)x * fPanelW / 1080) + fOffX;
++	int ly = (int)((int64_t)y * fPanelH / 2400) + fOffY;
++	lx = lx < 0 ? 0 : (lx >= fLogicalW ? fLogicalW - 1 : lx);
++	ly = ly < 0 ? 0 : (ly >= fLogicalH ? fLogicalH - 1 : ly);
++	IOFixed nx = (IOFixed)(((int64_t)lx << 16) / fLogicalW);
++	IOFixed ny = (IOFixed)(((int64_t)ly << 16) / fLogicalH);
+ 	bool moved = down && (nx != fX[finger] || ny != fY[finger]);
+ 	if (was == down && !moved) {
+ 		IOLockUnlock(fLock);
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -594,7 +594,7 @@
+ #define SWEET_MARK_MAX  160
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x230bu
++#define SWEET_BUILD_ID 0x230cu
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;

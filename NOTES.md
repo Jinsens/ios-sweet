@@ -35,8 +35,32 @@ User's existing shim/build.sh, shim/shim.c, tools/sweet-marks.py and untracked
 0093 patch are retained separately. Frozen tracked shim excludes --kick edits.
 No new CI run; using the previously hardware-tested 0x230b kernel.
 
-Next: finish/verify root image, write and readback-check userdata, boot
-userland trial, recover full console/marks and restore boot_a when possible.
+Milestone: native copy/tweaks completed. The builder's final fsck call on a
+regular file failed (macOS requires a block device); no data-copy failure.
+Separate readonly /dev/rdisk5 fsck_hfs -fn reported iOSRoot appears OK,
+followed by readonly mounted verification of all four executable owners,
+modes/content and arm64 shared-cache hardlinks. root-verify.json records
+this recovery; tools/mkiosroot-macos.py now checks an attached block device.
+No mobileactivationd system container existed in the source, so the optional
+data ark seed was skipped; native activation status remains to be observed.
+
+0x230c changes (0111): AppleCLCD always presents 1125x2436 unless native is
+requested, centering on larger panels and clearing the margins on first
+present. HID converts the board drivers' normalized 1080x2400 input to the
+same physical/centered viewport and clamps margin contacts. Previous code
+fell back to native 1440x3200 on matisse. Complete local CLT build exit0;
+kernel 16723464 B SHA256
+59d0d777e22863a7d06b3e00673aeb8c7709f831e42a70b971d84ba2b4ef5164.
+Actual present() and HID mapping statements compiled into a host harness
+with ASan+UBSan: 1080x2400, 1440x3200, native1440x3200 and1125x2436 all PASS,
+including per-pixel destination verification and normalized input bounds.
+Logs: build-kernel-230c.log and test-canvas.log under the userland directory.
+
+Userdata installation is IN PROGRESS: gzip over adb shell -T to raw dd,
+no GPT changes; local SHA256 while streaming, then full16GiB on-device hash.
+Do not reboot until install-result.json has readback_matches=true.
+Next: finish readback, boot 0x230c userland trial, recover full console/marks
+and restore boot_a when possible. No new CI run; full local build passed.
 
 ## >>> ACTIVE 2026-10-27 (touch): 0x230b receives real SALIXP touch events; boot_a restored and verified <<<
 
