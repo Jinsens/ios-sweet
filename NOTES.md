@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2311 RUNNING; boot_a restoration pending; HS validated in2310 <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2311 restored; logo framebuffer; lsd waits in MobileGestalt <<<
 
 Read this handoff before the historical entries below. 0x230f returned to
 FASTBOOT at759.79s after the user's requested return. Full64MiB original
@@ -117,6 +117,26 @@ full written boot_a hashd0908aefcb593d06b1a0eed161d70c09a7051751f573dbb290d524ff
 boot-ui-2311-result.json restore_pending=true; runner session79300 watches
 1200s and restores on FASTBOOT/Recovery return. Never import run-ui-2311.py.
 Need fresh2311 marks, lsd stacks and FBIMG thumbnails; no current UI claim.
+
+0x2311 RETURNED FASTBOOT at243.02s after user's forced return; user saw
+Apple/black screen. Runner restored original64MiB boot_a and result now
+boot_a_restore_pending=false. Live Recovery readback independently matches
+2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1.
+Fresh marks identify2311; console244652B. Decoder recovered all3 complete
+80x178 FBIMG frames2/3/4; visual inspection of2/4 shows white Apple logo
+on black. This is actual framebuffer RAM content, not physical panel proof.
+DSP counters fixed at calls134381/pushes208/busy_skips0 by first105s sample;
+no later GUI presents were observed. HS reads1357123584B by225485ms,
+R/W/S errors0; MMU v2 on MPIDR0x81000200 again confirms M/C/I, WB RAM.
+Lsd102 sampled at105/165/225s with actual shared-cache slide0x1b02c000:
+t0 performJournalRecovery -> dispatch_sync; t1 BuiltInAppInstallSessionID
+-> MIInstallationIdentity -> libMobileGestalt -> semaphore_wait, unchanged;
+t2 LSDatabaseBlockingFetchClient waits for seeding; t3 restoreInactiveInstalls
+waits for a dispatch group. A MG worker runs CFRunLoopRunSpecific from
+libMobileGestalt func_19c57c4dc. Full symbols in ui2311-lsd-symbols.txt/json.
+Next: disassemble MG wait chain and identify the exact missing property/
+notification before changing userland or registry. No lsd database mutation.
+Readonly pristine root remains mounted for this analysis; detach when done.
 
 ## Historical 2026-10-27 userland installation and trials
 
