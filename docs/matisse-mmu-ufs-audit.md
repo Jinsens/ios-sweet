@@ -4,8 +4,10 @@ Corrected hardware probes in 0x2310/2311 confirm Normal Inner/Outer WB RAM
 and enabled MMU/data/instruction caches. Opt-in HS Gear1 removes the measured
 PWM storage bottleneck. ADT network identity resolves lsd seeding; the
 flashlight-only startup correction in 0x2314 reaches a user-confirmed visible
-iOS lock screen. Touch remains disabled. Fresh 0x2314 logs and original
-boot_a restoration verification are pending Recovery return.
+iOS lock screen. Trial 0x2314 logs confirm SpringBoard in its UIApplication event loop,
+GUI swaps through 40 and no mediaserverd crash; full stock boot_a restoration
+is independently hash verified. Touch was disabled in that trial. Native
+1440x3200 display and touch/key interaction are being tested in 0x2315.
 
 ## Memory attributes
 
@@ -324,3 +326,13 @@ positive visible-UI observation in this matisse trial series. The exact
 screen is still being clarified, touch remains disabled, and fresh runtime
 logs have not yet been recovered. Original boot_a restoration is armed and
 pending FASTBOOT/Recovery return; do not call this fully verified yet.
+
+0x2314 recovered evidence: fresh sweettrial=2314; SpringBoard PID26 main
+is UIApplicationMain/GSEventRunModal/CFRunLoop at105.499s, not the flashlight
+sync wait. GUI swaps reach40 and SpringBoard creates additional surfaces.
+Mediaserverd28 is idle without a recorded crash. PosterBoard crashes once
+in first switcher configuration, then replacement233 reaches UIApplicationMain;
+this does not block the observed lock screen. The user manually returned
+FASTBOOT at176.77s. Full stock64MiB boot_a SHA256 matches backup; Recovery
+is online. UFS read throughput87.84MiB/s with R/W/S errors0, valid MMU v2
+again confirms M/C/I, WB walks and sampled PTE index0/MAIR0xff.

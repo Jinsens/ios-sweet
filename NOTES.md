@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2314 lock screen confirmed and restored; native/input trial next <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2315 native display + touch/keys RUNNING; restore armed <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -107,6 +107,16 @@ check PASS;533-byte cmdline not truncated. Image7069696B SHA256
 181ec5e5e9a5caaa325eab0ce76c062851057d7d818c84f9466ba0819b64df7e;
 expected written boot_a hash1a12a71ce7f90a7ea5fd0965e5dc94fef7fe83e5e05c60424201c7bf3f8a90a0.
 Runner run-ui-2315.py prepared, not started at this note. Never import it.
+
+0x2315 BOOT STARTED Unix1793404673.039019. Full written boot_a verified
+SHA2561a12a71ce7f90a7ea5fd0965e5dc94fef7fe83e5e05c60424201c7bf3f8a90a0;
+resultboot-ui-2315-result.json restore_pending=true. Runner session71161
+monitors1200s with full stock boot_a restore on FASTBOOT/Recovery return.
+Never import/rerun run-ui-2315.py. User authorized enabling touch/keys and
+correcting resolution. Code955694e pushed; exact kernel2311 unchanged.
+Need actual native display and touch/keys user observation, then fresh2315
+marks/console and final stock hash verification. No current success claim
+for input/native mode. Prior2314 lock screen success and restore confirmed.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
