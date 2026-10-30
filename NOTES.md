@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x230f restored; PWM UFS bottleneck confirmed; HS trial preparation <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2310 RUNNING; boot_a restoration pending; waiting for FASTBOOT <<<
 
 Read this handoff before the historical entries below. 0x230f returned to
 FASTBOOT at759.79s after the user's requested return. Full64MiB original
@@ -67,9 +67,18 @@ _dyld_shared_cache_for_each_image -> helper+0x5014 ->
 forEachInstalledCacheWithSystemPath -> _dyld_for_each_installed_shared_cache.
 This establishes cache-image harvesting, not its cause or an infinite loop.
 Raw symbol/disassembly evidence in20261031-hs/helper-* and logd-helper-*.
-Readonly pristine root mounted /tmp/ios-sweet-20H392-analysis (disk7) for
-symbolication; detach when done. SpringBoard/backboardd remain before UI;
+Readonly pristine root was mounted at/tmp/ios-sweet-20H392-analysis (disk7)
+for symbolication and detached afterwards. SpringBoard/backboardd remain before UI;
 no GUI open/swap observed in230f. Current2310 result still pending.
+
+Last continuation: trial passed6min without host USB (expected with USB off).
+Asked user for screen status at~90s, then FASTBOOT return at~4min to restore
+and capture logs. Neither answer had arrived at this handoff. Do not claim
+runtime HS success or UI. Runner process remains live (session38066), with
+1200s no-USB timeout. On a later turn inspect result/log BEFORE any flashing.
+If still restore_pending, use the safe run-power.py restore() import above
+on FASTBOOT/Recovery return, then pull fresh marks and console into2310
+files. Never import the top-level run-ui-2310.py to continue it.
 
 ## Historical 2026-10-27 userland installation and trials
 
