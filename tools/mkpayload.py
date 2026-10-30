@@ -215,6 +215,35 @@ def platform_cmdline(adt_blob, cmdline, *, allow_matisse_root_write=False):
     return result
 
 
+def platform_adt(adt_blob, cmdline):
+    """Keep userspace's display canvas consistent with opt-in native scanout.
+
+    The kernel framebuffer and HID already honor sweetfb_native. IOMFB also
+    reads canvas-width/height from the ADT; leaving the iPhone dimensions
+    there would advertise a second, conflicting display size to userspace.
+    """
+    root, _ = adt.parse(adt_blob)
+    if b'xiaomi,matisse' not in (root.prop('compatible') or b'').split(b'\0'):
+        return adt_blob
+    native = [v for k, sep, v in (t.partition('=') for t in cmdline.split())
+              if k == 'sweetfb_native' and sep]
+    if not native or int(native[-1], 0) == 0:
+        return adt_blob
+    fb = next(c for c in root.children if c.name == 'sweet-fbcon')
+    armio = next(c for c in root.children if c.name == 'arm-io')
+    disp = next(c for c in armio.children if c.name == 'disp0')
+    dimensions = {key: fb.prop(source) for key, source in
+                  (('canvas-width', 'width'), ('canvas-height', 'height'))}
+    if any(value is None or len(value) != 4 or struct.unpack('<I', value)[0] == 0
+           for value in dimensions.values()):
+        raise ValueError('native display requires valid physical framebuffer dimensions')
+    disp.props = [(name, flags, dimensions.get(name, value))
+                  for name, flags, value in disp.props]
+    if any(disp.prop(key) != value for key, value in dimensions.items()):
+        raise ValueError('native display canvas properties missing')
+    return adt.serialize(root)
+
+
 def build(kernel_path, adt_path, cmdline, ramdisk_path=None, *, allow_matisse_root_write=False):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
@@ -231,6 +260,7 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None, *, allow_matisse_ro
     adt_blob = open(adt_path, 'rb').read()
     cmdline = platform_cmdline(adt_blob, cmdline,
                               allow_matisse_root_write=allow_matisse_root_write)
+    adt_blob = platform_adt(adt_blob, cmdline)
     # The ADT decides where the kernel's RAM is (mkadt.py --highmem).
     PHYS_BASE, MEM_SIZE = adt_dram(adt_blob)
     pieces = [(s['vmaddr'], s['vmsize'], buf[s['fileoff']:s['fileoff'] + s['filesize']]) for s in segs]

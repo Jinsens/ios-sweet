@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2314 UI VISIBLE per user; boot_a restore still armed <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2314 lock screen confirmed and restored; native/input trial next <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -75,6 +75,38 @@ OKAY) and requested Recovery (OKAY); awaiting Recovery independent hash
 verification and fresh logs. Current restore_pending remains true until
 that completes. Do not confuse prior Apple framebuffer thumbnails with
 this new physical screen observation. Touch still disabled.
+
+FINAL2314: user confirms LOCK SCREEN and manual return; FASTBOOT176.77s.
+Runner97112 completed exit0; original64MiB boot_a restored and independently
+readback verified SHA2562931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1.
+restore_pending=false; Recovery online. Fresh console sweettrial=2314 has
+SpringBoard26 main in UIApplicationMain/GSEventRunModal/CFRunLoop at105.499s,
+not flashlight sync wait. GUI swaps reach40, app surfaces4..10 created.
+Mediaserverd28 main idle; no mediaserverd crash. PosterBoard crashes once
+in initial switcher config but replacement233 reaches UIApplicationMain;
+not a blocker to observed lock screen. Actual shared-cache slide0x3a9d8000.
+Perf confirms NormalWB attr0, M/C/I and WB walks, R87.84MiB/s, R/W/S errors0.
+FBIMG first3 frames2/3/6 still Apple; these early RAM samples do not contradict
+later user-confirmed physical lock screen. Analysis images detached.
+User now requests correct resolution plus touch and keys. Existing canvas
+1125x2436 was centered inside1440x3200 panel; next use sweetfb_native=1 and
+verified touch enable1/init1/rails1/mark1/delay3 plus sweetkeys=2. Root correction
+remains installed; no new root mutation required. Do not reuse stale source
+in research/matisse/xnu-upstream as the final2311 build tree.
+
+2315 prepared for user's resolution/input request: same exact2311 kernel,
+shim and installed root as2314; native canvas1440x3200 set consistently in
+ADT /arm-io/disp0 and kernel/HID boot arg sweetfb_native=1. tools/mkpayload.py
+now synchronizes opt-in native ADT dimensions with sweet-fbcon; default
+canvas1125x2436 unchanged. Identity props/other ADT bytes unchanged (revert
+just2 dimensions reconstructs2312 ADT). sweetkeys=2 feeds HID; sweettouch=1,
+init=1, rails=1, mark=1, delay=3 use hardware-proven SALIXP path. USB/battery
+remain off. No kernel/CI rebuild. Eight board tests, four actual present/HID
+ASan+UBSan geometries and five touch/PMIF mocks all PASS. Independent image
+check PASS;533-byte cmdline not truncated. Image7069696B SHA256
+181ec5e5e9a5caaa325eab0ce76c062851057d7d818c84f9466ba0819b64df7e;
+expected written boot_a hash1a12a71ce7f90a7ea5fd0965e5dc94fef7fe83e5e05c60424201c7bf3f8a90a0.
+Runner run-ui-2315.py prepared, not started at this note. Never import it.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 

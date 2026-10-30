@@ -84,6 +84,24 @@ class BoardProfileTests(unittest.TestCase):
         self.assertEqual(words(disp.prop('canvas-width'), 32), (1125,))
         self.assertEqual(words(disp.prop('canvas-height'), 32), (2436,))
 
+    def test_matisse_native_canvas_matches_physical_panel(self):
+        blob = adt.serialize(self.build(board='matisse'))
+        self.assertEqual(mkpayload.platform_adt(blob, ''), blob)
+        self.assertEqual(mkpayload.platform_adt(blob, 'sweetfb_native=0'), blob)
+        native = mkpayload.platform_adt(blob, 'sweetfb_native=1')
+        root, _ = adt.parse(native)
+        disp = child(child(root, 'arm-io'), 'disp0')
+        self.assertEqual(words(disp.prop('canvas-width'), 32), (1440,))
+        self.assertEqual(words(disp.prop('canvas-height'), 32), (3200,))
+        self.assertEqual(mkpayload.platform_adt(native, 'sweetfb_native=1'), native)
+        # Reverting just the two properties must reconstruct the input exactly.
+        dims = {'canvas-width': 1125, 'canvas-height': 2436}
+        disp.props = [(n, f, struct.pack('<I', dims[n]) if n in dims else v)
+                      for n, f, v in disp.props]
+        self.assertEqual(adt.serialize(root), blob)
+        sweet = adt.serialize(self.build())
+        self.assertEqual(mkpayload.platform_adt(sweet, 'sweetfb_native=1'), sweet)
+
     def test_matisse_payload_disables_qualcomm_drivers(self):
         blob = adt.serialize(self.build(board='matisse'))
         args = mkpayload.platform_cmdline(blob, 'debug=0xc serial=3 cpus=1')
