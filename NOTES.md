@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2312 RUNNING; boot_a restore pending; ADT network identity fix <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2312 restored; MG/lsd blocker cleared; SpringBoard new sync wait <<<
 
 Read this handoff before the historical entries below. 0x230f returned to
 FASTBOOT at759.79s after the user's requested return. Full64MiB original
@@ -159,6 +159,36 @@ boot_a_restore_pending=true; runner session14598 watches1200s and restores
 stock on FASTBOOT/Recovery return. Fresh logs must contain sweettrial=2312;
 kernel marks intentionally remain2311 because the kernel is identical.
 No runtime claim yet. Readonly analysis root remains mounted.
+
+Trial0x2312 RETURNED FASTBOOT at208.11s after requested forced return.
+User initially reported black, later text/Apple. Original64MiB boot_a
+restored and independently rechecked SHA2562931647a...86b1 in Recovery;
+restore_pending=false. Fresh console has sweettrial=2312; marks intentionally
+remain2311. The ADT identity correction WORKED for the observed blocker:
+lsd100 main now ordinary CFRunLoop, no MG/seeding worker; installd178 now
+executes and idles in CFRunLoop; runningboardd's LS sync wait gone.
+SpringBoard advances to a different sync XPC call by105/165s; full symbols
+are being recovered using actual slide0x289cc000. Visible UI not confirmed.
+First3 framebuffer shots remain Apple logo. DSP counters214 pushes fixed
+by105s. R/W/S errors0; PA_PWRMODE0x11, corrected MMU still M/C/I and WB.
+Next: identify SpringBoard's new synchronous service dependency. No root
+filesystem/database edits were made by the host.
+
+2312 focus symbols complete: SpringBoard t0 at105/165s in
+FigFlashlightRemoteCreate -> flashlightRemote_ensureClientEstablished ->
+FigXPCRemoteClientCreate -> FigXPCConnectionSendSyncMessageCreatingReply.
+Actual disassembly names com.apple.coremedia.flashlight, owned by mediaserverd
+in the stock job. Need sample mediaserverd before changing config. Existing
+root StartRecorderServer=false is a prior GPU-crash workaround; whether it
+also suppresses the flashlight service is unproven. Trial2313 is preparing
+with identical2311 kernel/2312 ADT and only sampler cmdline changed. Includes
+mediaserverd, containermanager, mobileactivation (proc_name uses16-byte
+p_comm, so original full long names did not match). No next boot started.
+
+2313 image ready: kernel2311 and ADT2312 hashes unchanged; stock sections
+and embedded payload verified. Image7069696B SHA256
+e527e28648911d26db4e3457fc895fbc3d7c72817d6e824d52e1c8d41a6cedfe; expected full written hash
+30567ce223a60392919f0a808ec2efb784c0b31153cd310d6aa1bcb02f264be1. No kernel source/build/CI change.
 
 ## Historical 2026-10-27 userland installation and trials
 

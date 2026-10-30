@@ -271,3 +271,14 @@ Seven existing board-profile tests pass; no kernel rebuild or new CI run
 is needed. The rebuilt image preserves stock ramdisk/signature and its
 embedded payload, ADT and command line were independently verified.
 Hardware result for this identity correction is pending.
+
+Trial2312 confirmed that the identity correction clears the observed lsd
+blocker: at105/165s the server has completed seeding and its main is in
+`runServerMainRunLoop`; installd now executes, and the previous LS waits
+are gone. SpringBoard now blocks establishing `com.apple.coremedia.flashlight`
+through `FigFlashlightRemoteCreate` -> `FigXPCRemoteClientCreate` -> synchronous
+XPC message. The stock service belongs to mediaserverd. This establishes
+the next dependency, not whether mediaserverd is stalled or its flashlight
+server is disabled. Capture mediaserverd threads before changing that service.
+The first three framebuffer shots are still Apple logos; no visible UI.
+Original boot_a restored and full hash verified after208.11s forced return.
