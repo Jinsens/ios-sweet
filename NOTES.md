@@ -1,6 +1,28 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2313 RUNNING; boot_a restore pending; sampling mediaserverd <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2313 restored; flashlight startup dependency identified <<<
+
+Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
+confirms this was MANUAL and screen was Apple/black; no spontaneous crash
+or visible UI is established. Runner58786 exited successfully. Full64MiB
+original boot_a restored; boot_a_restore_pending=false and independent
+Recovery readback SHA2562931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1.
+Recovery was online at the end of the preceding phase. Do not rerun/import runner.
+
+SpringBoard still waits in FigFlashlightRemoteCreate sync XPC. Actual20H392
+MediaToolbox _FigMediaServerStart gates FigStartCaptureServers on
+StartRecorderServer. CMCaptureCore FigStartCaptureServers starts both
+FigPreloadShaders and FigFlashlightServerStart. Existing root tweak sets
+StartRecorderServer=false to avoid a verified NULL-OpenGL shader-prewarm
+crash. This static dependency strongly explains absent flashlight replies;
+mediaserverd sampled in ordinary CFRunLoop/workqueue waits. Next: find a
+minimal way to retain shader/GPU protection while allowing flashlight
+startup, before making root changes. No host root/database mutation yet.
+Fresh evidence: research/matisse/20261031-hs/ui2313-console.txt and
+dis-Fig{MediaServerStart,StartCaptureServers}.txt. Shared-cache slide0x8984000.
+PosterBoard crashed once (sig5, pc0x1ca0fc268); causal role unproven.
+Read-only analysis root remains /tmp/ios-sweet-20H392-analysis (disk7).
+Earlier RUNNING/pending entries below are superseded by this handoff.
 
 Read this handoff before the historical entries below. 0x230f returned to
 FASTBOOT at759.79s after the user's requested return. Full64MiB original
