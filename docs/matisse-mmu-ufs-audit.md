@@ -1,11 +1,10 @@
 # Matisse MMU and UFS performance audit, 2026-10-27
 
-Latest recovered hardware baseline is build 0x230f, commit 7ccc630, using
-`xnu/out/local/xnu` and the frozen shim from 8dc3bce. Valid sampled RAM PTEs
-and MAIR agree on Normal Inner/Outer WB. A separate diagnostic assembly bug
-invalidates the old SCTLR/PAR values. The confirmed storage bottleneck is
-PWM Gear1, one lane, SLOWAUTO in both directions. See the runtime results
-below; no iOS UI has been confirmed.
+Latest recovered hardware results are builds 0x2310 and 0x2311. Corrected
+register probes confirm Normal Inner/Outer WB RAM and enabled MMU/data/
+instruction caches. Opt-in HS Gear1 removes the measured PWM storage
+bottleneck. The current UI blocker is lsd's MobileGestalt network-identity
+lookup, described below; no iOS UI has been confirmed.
 
 ## Memory attributes
 
@@ -226,3 +225,49 @@ not yet known. Backboardd's main thread is in its ordinary CFRunLoop.
 The user returned FASTBOOT at393.12s. Original64MiB boot_a restored and
 full SHA256 verified; `boot-ui-2310-result.json` has restore_pending=false.
 Watchdog is after the forced return, not evidence of a spontaneous reset.
+
+## Hardware result 0x2311 and device-identity correction
+
+The user returned FASTBOOT at243.02s after seeing Apple/black. Original
+boot_a was restored and the entire64MiB hash independently verified again
+in Recovery; restore_pending=false. Fresh marks identify2311. All three
+complete framebuffer thumbnails (frames2/3/4) contain a white Apple logo
+on black. These describe framebuffer RAM, not physical-panel output.
+Display transfer counters are unchanged after the first105s sample.
+
+With actual shared-cache slide0x1b02c000, lsd102's seeding worker is stable
+at105/165/225s in this chain:
+
+```
+MIInstallationIdentity installationIdentityForBundle
+  GenerateBuiltInAppInstallSessionID
+    MGCopyAnswer
+      libMobileGestalt func_19c5673dc / func_19c568910
+        func_19c5716e8: Wi-Fi address
+          func_19c57c084: IONetworkController match
+            dispatch_semaphore_wait
+```
+
+The corresponding worker runs MobileGestaltRunLoopMode. Lsd's main waits
+in performJournalRecovery; its database-fetch service waits for seeding.
+SpringBoard and a backboardd worker consequently await the server store.
+Backboardd's main remains in an ordinary CFRunLoop wait.
+
+Disassembly of the actual20H392 cache establishes that func_19c5716e8 first
+reads the six-byte `IODeviceTree:/chosen/mac-address-wifi0`. The trial ADT
+has no such property; after missing sdio/wlan/marconi-wifi paths the code
+waits for an IONetworkController, which this port does not publish. The
+same device-ID routine next asks for Bluetooth; func_19c56883c first reads
+`/chosen/mac-address-bluetooth0`. This is a demonstrated dependency path,
+not an assumption that resetting the LaunchServices database will help.
+Raw disassembly and complete symbols remain in the ignored research tree.
+
+`tools/mkadt.py` now publishes locally administered, synthetic Wi-Fi and
+Bluetooth addresses alongside the existing synthetic ECID. This supplies
+identity inputs only; no radio functionality is added. Trial2312 reuses
+exact kernel2311 and adds only these two ADT properties, preserving all
+original ADT bytes otherwise, plus `sweettrial=2312` for log attribution.
+Seven existing board-profile tests pass; no kernel rebuild or new CI run
+is needed. The rebuilt image preserves stock ramdisk/signature and its
+embedded payload, ADT and command line were independently verified.
+Hardware result for this identity correction is pending.

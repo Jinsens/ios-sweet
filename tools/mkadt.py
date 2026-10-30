@@ -140,6 +140,14 @@ def build(seed=None, qemu=False, highmem=False, board="sweet", lowmem=False):
         # of the A11 that the iPhone X userland expects.
         ('unique-chip-id', struct.pack('<Q', SWEET_ECID)),
         ('chip-id', u32(0x8015)),
+        # 20H392 lsd derives built-in app installation IDs through
+        # MobileGestalt's device identity. Without these /chosen values,
+        # its Wi-Fi lookup waits for an IONetworkController we do not have,
+        # preventing the LaunchServices database from finishing seeding.
+        # Locally administered synthetic addresses, like SWEET_ECID above;
+        # these publish identity only and do not provide radio drivers.
+        ('mac-address-wifi0', bytes.fromhex('025357455401')),
+        ('mac-address-bluetooth0', bytes.fromhex('025357455402')),
         # Security status as on a dev-fused, undemoted board (tuple 0,0,1,1):
         # MobileGestalt reads these from /chosen, and mobileactivationd's
         # DeviceType then takes its native "Hactivation" branch (state

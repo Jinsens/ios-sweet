@@ -138,6 +138,21 @@ Next: disassemble MG wait chain and identify the exact missing property/
 notification before changing userland or registry. No lsd database mutation.
 Readonly pristine root remains mounted for this analysis; detach when done.
 
+MG disassembly establishes exact missing input: func_19c5716e8 reads
+/chosen/mac-address-wifi0 then sdio/wlan/marconi-wifi before waiting for
+IONetworkController in func_19c57c084. The trial ADT has none. The same
+identity computation next needs Bluetooth; func_19c56883c directly reads
+/chosen/mac-address-bluetooth0. tools/mkadt.py adds both6-byte locally
+administered synthetic values, alongside existing synthetic ECID; no radio
+support or userland/database mutation. Seven existing board tests PASS.
+Prepared trial0x2312 REUSES EXACT kernel2311 (no kernel rebuild/new CI),
+adds only2 ADT props (removing them reconstructs original ADT byte-for-byte)
+and sweettrial=2312. Frozen shim source unchanged from2311/8dc3bce.
+Image7069696B SHA25632552d4daf99fbf8b3038561d5c9ca1b56e8e80fe4d7bfbadacab122606d71ec;
+stock ramdisk/signature, Image/payload, cmdline/ADT checks all PASS.
+Expected full written boot_a SHA256cb42a503c14b9bb5165205f0a0f528753d2d568bd9764266c54bae422a4a5fb2.
+Runner run-ui-2312.py is prepared but NOT STARTED here; never import it.
+
 ## Historical 2026-10-27 userland installation and trials
 
 User request: bring the online device through real iOS userland into UI.
