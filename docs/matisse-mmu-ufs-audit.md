@@ -1,9 +1,11 @@
 # Matisse MMU and UFS performance audit, 2026-10-27
 
-The running userland baseline is build 0x230d, commit 9b6c6d6, using
-`xnu/out/local/xnu` and the frozen shim from 8dc3bce. Source inspection does
-not show ordinary kernel/user RAM mapped globally as Device or Normal-NC.
-Hardware readbacks are required to verify that conclusion at runtime.
+Latest recovered hardware baseline is build 0x230f, commit 7ccc630, using
+`xnu/out/local/xnu` and the frozen shim from 8dc3bce. Valid sampled RAM PTEs
+and MAIR agree on Normal Inner/Outer WB. A separate diagnostic assembly bug
+invalidates the old SCTLR/PAR values. The confirmed storage bottleneck is
+PWM Gear1, one lane, SLOWAUTO in both directions. See the runtime results
+below; no iOS UI has been confirmed.
 
 ## Memory attributes
 
@@ -120,3 +122,77 @@ string evidence is retained in the ignored userland research directory.
 
 0x230f validation: full CLT build exit 0, 16,723,880 bytes, SHA256
 `3ccc1849d8e421e0f01d79a99e17461de6d985c94fc4288090529c948e4b02f3`. Patch 0114 applies cleanly and the resident-sampler ASan/UBSan test passes.
+
+## Recovered 0x230f results, reviewed October 31
+
+The user saw boot text updating and returned the device to FASTBOOT.
+Original boot_a was restored and the entire 64 MiB verified against the
+backup. Fresh marks identify build 0x230f; these are not stale 0x230d logs.
+The ignored evidence is `research/matisse/20261027-userland/ui230f-*`.
+
+MAIR readback is `0x0c08044f00bb44ff`, with index0=`0xff`. Every valid
+sampled PTE for kernel text, DMA, launchd, SpringBoard, backboardd, logd and
+logd_helper uses AttrIndx0. Some nonresident pages return zero; those must
+not be decoded as valid WB entries. The cached 32 MiB copy took 4081 us,
+about 7.8 GiB/s, repeatedly copying between two 512 KiB bounce-buffer halves.
+This is not sustained DRAM bandwidth.
+
+**The old DMA PAR and SCTLR values are invalid.** Darwin's ARM64 assembler
+treats `;` as a comment. The combined inline-assembly string emitted only
+`mrs x9, MAIR_EL1`, then stored uninitialized registers for SCTLR/PAR.
+Actual 0x230f kernel disassembly proves that the intended SCTLR read,
+AT/ISB and PAR read are missing. Do not infer disabled caches from these
+values. Startup disassembly does set SCTLR_EL1=`0x3454593d` (M/C/I set),
+but valid runtime SCTLR/TCR/PAR sampling is still required. Early per-CPU
+kprintf records were not recovered through the persistent console.
+
+| Successful DME_GET | Value |
+| --- | --- |
+| PA_TXGEAR / PA_RXGEAR | 1 / 1 |
+| PA_ACTIVETXDATALANES / PA_ACTIVERXDATALANES | 1 / 1 |
+| PA_PWRMODE | 0x55 (SLOWAUTO / SLOWAUTO, PWM) |
+| PA_HSSERIES | 1 |
+
+At uptime707920ms, 4792 reads transferred446234624B. Cumulative preparation,
+hardware-wait and postprocessing times were20336us,652093493us,19409us;
+errors0, sleeps0. Command throughput was about0.65MiB/s. Bounce copies
+across strategies totaled107090us. Mutex waiting accumulates across
+callers and is not elapsed wall time. Hardware waiting dominates; the
+pending-loop delay is1us and is not a fixed millisecond read delay.
+
+## Opt-in HS Gear1 trial, build 0x2310
+
+Patch0115 fixes the probe with explicit newline-separated AT/ISB/MRS
+instructions and builtin MAIR/SCTLR/TCR/MPIDR reads. Interrupts stay disabled
+only across this short register snapshot; printing happens afterwards.
+The `MMU v2` marker distinguishes the corrected probe from invalid legacy
+records. The sampler bounds console lines so a lost newline cannot join
+two thread records.
+
+`ufshs=1` checks local/peer HS capabilities and connected lanes, requests
+HS Gear1/one lane/seriesA/FAST in both directions and applies UniPro timeout
+defaults. It follows Linux v6.6 `ufshcd_change_power_mode` and MTK's
+no-adaptation setting for gears below4. The transition requires both UIC
+command completion and the independent power-mode completion, then
+HCS.UPMCRS=PWR_LOCAL and exact DME readback. Initialization aborts on any
+failure; no automatic fallback continues with uncertain link state.
+
+After partition discovery and before enabling writes, the driver times
+one1MiB READ(10) in PWM and HS modes and exactly compares the first4KiB.
+This is a read-only check, not a full filesystem integrity check. Existing
+filesystem/log writes become possible only after it succeeds. Default
+boots do not negotiate HS unless explicitly opted in.
+
+Host tests execute the actual patched functions against a UFSHCI/DME
+model with delayed/missing power completion, stale status, capability
+failure, failed commands, bad status/readback and corrupt data. ASan/UBSan
+passes. The Darwin assembler test verifies emitted AT/ISB/PAR instructions;
+the existing resident WB-only sampler test also passes. Hardware outcome
+is still pending.
+
+Full local CLT build exit0: kernel16723920B, SHA256
+`d8f1c7d126ca07932b268c1994d39c37de680fb136f15e1cd4d03ba69f5aa3c2`.
+Linked-kernel disassembly at0xfffffe00074dccfc confirms all four register
+reads followed by AT S1E1R, ISB, MRS PAR and interrupt-state restoration.
+The five targeted tests pass. These checks establish the emitted code,
+not the device's resulting HS mode or runtime cache state.

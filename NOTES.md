@@ -1,6 +1,56 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-27 (userland): 0x230f RUNNING; boot_a restoration pending <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x230f restored; PWM UFS bottleneck confirmed; HS trial preparation <<<
+
+Read this handoff before the historical entries below. 0x230f returned to
+FASTBOOT at759.79s after the user's requested return. Full64MiB original
+boot_a restored and verified SHA2562931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1;
+boot-ui-230f-result.json restore_pending=false. User saw boot text updating;
+UI is not confirmed. Watchdog after forced return is not a spontaneous crash.
+October31 Recovery USB was initially absent, then reconnected by the user.
+Live preflight reconfirms matisse/_a, stock boot_a hash and userdata size
+114319917056B. No new device writes in this continuation yet.
+
+Fresh230f marks/build ID and console were recovered under
+research/matisse/20261027-userland/ui230f-*. DME_GET confirms TX/RX gear1,
+one active lane each, PA_PWRMODE0x55 (SLOWAUTO/PWM), HS series1. Last snapshot
+at707920ms:4792 reads/446234624B, prep20336us, hardware652093493us,
+post19409us, errors0, sleeps0. Command throughput about0.65MiB/s, almost all
+hardware wait; lock waiting is cumulative across callers. No fixed per-read
+millisecond delay: pending polls delay1us, optional ufswait is off.
+
+MAIR0x0c08044f00bb44ff is valid. All valid sampled kernel/DMA and user
+header/PC/SP PTEs use index0=0xff Normal Inner/Outer WB. Cached32MiB memcpy
+4081us is two512KiB regions repeatedly copied, not sustained DRAM bandwidth.
+CRITICAL:230f SCTLR/PAR samples are INVALID. Darwin assembler treats ';' as
+comment; actual kernel emits only MRS MAIR_EL1 then stores uninitialized
+SCTLR/PAR outputs. Disassembly proves missing MRS SCTLR/AT/ISB/MRS PAR.
+Do not infer caches disabled. Startup binary sets SCTLR0x3454593d (M/C/I).
+Runtime SCTLR/TCR/PAR still need corrected newline-separated instructions.
+CPU kprintf register records were not captured in persistent console.
+
+0115/build0x2310 now implements corrected register sampling and opt-in
+ufshs=1: HS Gear1/one lane/seriesA, separate power-mode completion,
+HCS PWR_LOCAL and exact DME readbacks. It times the same1MiB READ(10) in
+PWM/HS and exactly compares its first4KiB before allowing root writes.
+Any transition/readback/data failure leaves the disk offline. Default is
+unchanged without ufshs=1. Sampler lines bounded to240B to preserve newline.
+Full local CLT build exit0, kernel16723920B SHA256
+d8f1c7d126ca07932b268c1994d39c37de680fb136f15e1cd4d03ba69f5aa3c2.
+Actual kernel disassembly at0xfffffe00074dccfc shows MAIR/SCTLR/TCR/MPIDR
+reads then AT S1E1R, ISB, MRS PAR and IRQ restoration. Five targeted tests
+PASS, including modeled HS completion/failure cases and ASan/UBSan.
+Legacy ignored decode-perf.py now explicitly invalidates old SCTLR/PAR
+and does not label missing PTEs as WB. Hardware trial still pending.
+Artifacts go in research/matisse/20261031-hs/. Preserve the user's unrelated
+dirty shim/build.sh, shim/shim.c, tools/sweet-marks.py and untracked0093.
+No new CI run yet. Continue UI only after storage validation.
+
+logd_helper samples now captured, shared-cache slide0x0f2b8000, main header
+0x1043a8000; t0 from467s pc0x1b5f3cbd4/lr0x1b5f3cbd0. Symbolication pending.
+SpringBoard/backboardd remain before UI; no GUI open/swap observed.
+
+## Historical 2026-10-27 userland installation and trials
 
 User request: bring the online device through real iOS userland into UI.
 User explicitly authorized partition/flashing operations in this session

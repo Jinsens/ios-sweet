@@ -39,7 +39,7 @@ class DarwinAsmTests(unittest.TestCase):
     def assemble(self, template):
         # Preserve the actual separators and instructions. Operand substitution
         # is irrelevant to the delimiter bug; use distinct architectural regs.
-        source = template.replace('%0', 'x0').replace('%1', 'x1')
+        source = re.sub(r'%(\d+)', lambda m: 'x' + m[1], template)
         (self.work / 'probe.s').write_text('.text\n_probe:\n' + source + '\nret\n')
         subprocess.run(['clang', '-target', 'arm64-apple-macos11', '-c',
                         str(self.work / 'probe.s'), '-o', str(self.work / 'probe.o')],
@@ -65,13 +65,14 @@ class DarwinAsmTests(unittest.TestCase):
         self.assertEqual(self.assemble(templates[0]),
                          [0xd5033fdf, 0xd53be020, 0xd65f03c0])  # ISB; MRS; RET
 
-    def test_all_framebuffer_checks_read_par_after_isb(self):
+    def test_all_translation_checks_read_par_after_isb(self):
         templates = [(name, t) for name, t in self.templates if 'par_el1' in t]
-        self.assertEqual(len(templates), 4)
+        self.assertEqual(len(templates), 5)
         for name, template in templates:
             with self.subTest(source=name, template=template):
+                at = 0xd5087801 if 'at s1e1r,' in template else 0xd5087821
                 self.assertEqual(self.assemble(template),
-                                 [0xd5087821, 0xd5033fdf, 0xd5387400, 0xd65f03c0])
+                                 [at, 0xd5033fdf, 0xd5387400, 0xd65f03c0])
 
     def test_ufs_smc_is_emitted_with_all_unused_arguments_zeroed(self):
         templates = [t for _, t in self.templates if 'smc #0' in t]

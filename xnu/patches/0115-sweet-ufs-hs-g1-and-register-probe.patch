@@ -1,0 +1,243 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -79,6 +79,22 @@
+ #define REG_XOUFS_CTRL  0x140
+ #define REG_REFCLK_CTRL 0x144
+ #define IS_UIC_COMPL    (1u << 10)              /* IS.UIC_COMMAND_COMPL */
++#define IS_UIC_PWRMODE  (1u << 4)               /* separate asynchronous completion */
++#define HCS_PWR_LOCAL   (1u << 8)               /* UPMCRS == PWR_LOCAL */
++#define HCS_PWR_MASK    (7u << 8)
++
++#define PA_TXGEAR               0x1568u
++#define PA_RXGEAR               0x1583u
++#define PA_ACTIVETXDATALANES     0x1560u
++#define PA_ACTIVERXDATALANES     0x1580u
++#define PA_CONNECTEDTXDATALANES  0x1561u
++#define PA_CONNECTEDRXDATALANES  0x1581u
++#define PA_TXTERMINATION        0x1569u
++#define PA_RXTERMINATION        0x1584u
++#define PA_HSSERIES             0x156au
++#define PA_PWRMODE              0x1571u
++#define PA_MAXRXHSGEAR           0x1587u
++#define PA_TXHSADAPTTYPE         0x15d4u
+ 
+ /* ti,syscon-reset windows for UniPro/HCI/crypto on matisse. */
+ #define MTK_UFS_AO_PA   0x112b8000ull
+@@ -275,11 +291,18 @@
+ static uint32_t
+ ufs_uic(uint32_t op, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t *out3)
+ {
+-	uint32_t is = ufs_rd(REG_IS);
++	for (int i = 0; i < 500000 && !(ufs_rd(REG_HCS) & HCS_UCRDY); i++) {
++		delay(1);
++	}
++	if (!(ufs_rd(REG_HCS) & HCS_UCRDY)) {
++		return 0xfe;
++	}
++	/* Do not acknowledge unrelated asynchronous power-mode completion here. */
++	ufs_wr(REG_IS, IS_UIC_COMPL);
+ 	ufs_wr(REG_UIC_ARG1, a1);
+ 	ufs_wr(REG_UIC_ARG2, a2);
+ 	ufs_wr(REG_UIC_ARG3, a3);
+-	ufs_wr(REG_IS, is);                     /* W1C */
++	__builtin_arm_dsb(0xf);
+ 	ufs_wr(REG_UIC_CMD, op);
+ 	for (int i = 0; i < 500000; i++) {       /* 500 ms */
+ 		if (ufs_rd(REG_IS) & IS_UIC_COMPL) {
+@@ -294,6 +317,88 @@
+ 		return 0xff;
+ 	}
+ 	return ufs_rd(REG_UIC_ARG2) & 0xff;
++}
++
++/* A successful DME_SET alone does not complete a power-mode transition.
++ * Wait for UPMS as well and require the local request to have succeeded. */
++static int
++ufs_power_mode(uint32_t mode)
++{
++	ufs_wr(REG_IS, IS_UIC_PWRMODE);
++	uint32_t error = ufs_uic(0x02, PA_PWRMODE << 16, 0, mode, NULL);
++	if (error) {
++		printf("SWEET UFS: power mode 0x%x DME error 0x%x\n", mode, error);
++		return EIO;
++	}
++	for (int i = 0; i < 500000 && !(ufs_rd(REG_IS) & IS_UIC_PWRMODE); i++) {
++		delay(1);
++	}
++	uint32_t is = ufs_rd(REG_IS), hcs = ufs_rd(REG_HCS);
++	if (!(is & IS_UIC_PWRMODE) || (hcs & HCS_PWR_MASK) != HCS_PWR_LOCAL) {
++		printf("SWEET UFS: power mode 0x%x incomplete IS 0x%x HCS 0x%x\n", mode, is, hcs);
++		return EIO;
++	}
++	ufs_wr(REG_IS, IS_UIC_PWRMODE);
++	return 0;
++}
++
++/* Opt-in bring-up setting: HS Gear1, one lane, series A, FAST both ways.
++ * No fallback after a partial change: callers must leave the disk offline. */
++static int
++ufs_hs_g1(void)
++{
++	static const uint16_t caps[] = {
++		PA_CONNECTEDRXDATALANES, PA_CONNECTEDTXDATALANES,
++		PA_MAXRXHSGEAR, PA_MAXRXHSGEAR
++	};
++	for (unsigned int i = 0; i < 4; i++) {
++		uint32_t value = 0;
++		uint32_t error = ufs_uic(i == 3 ? 0x03 : 0x01,
++		    (uint32_t)caps[i] << 16, 0, 0, &value);
++		printf("SWEET UFS: HS cap %s attr 0x%x value %u error 0x%x\n",
++		    i == 3 ? "peer" : "local", caps[i], value, error);
++		if (error || !value) {
++			return ENOTSUP;
++		}
++	}
++	/* UniPro default protection/replay/AFC timeouts, also sent to the peer
++	 * in the power request. TXHSADAPTTYPE=PA_NO_ADAPT for MTK HS gears <4. */
++	static const struct { uint16_t attr; uint32_t value; } setup[] = {
++		{ PA_RXGEAR, 1 }, { PA_ACTIVERXDATALANES, 1 }, { PA_RXTERMINATION, 1 },
++		{ PA_TXGEAR, 1 }, { PA_ACTIVETXDATALANES, 1 }, { PA_TXTERMINATION, 1 },
++		{ PA_HSSERIES, 1 }, { PA_TXHSADAPTTYPE, 3 },
++		{ 0x15b0, 8191 }, { 0x15b1, 65535 }, { 0x15b2, 32767 },
++		{ 0x15b3, 8191 }, { 0x15b4, 65535 }, { 0x15b5, 32767 },
++		{ 0xd041, 8191 }, { 0xd042, 65535 }, { 0xd043, 32767 }
++	};
++	for (unsigned int i = 0; i < sizeof(setup) / sizeof(setup[0]); i++) {
++		uint32_t error = ufs_uic(0x02, (uint32_t)setup[i].attr << 16,
++		    0, setup[i].value, NULL);
++		if (error) {
++			printf("SWEET UFS: HS setup attr 0x%x error 0x%x\n", setup[i].attr, error);
++			return EIO;
++		}
++	}
++	int error = ufs_power_mode(0x11);
++	if (error) {
++		return error;
++	}
++	static const struct { uint16_t attr; uint32_t value; } verify[] = {
++		{ PA_RXGEAR, 1 }, { PA_TXGEAR, 1 },
++		{ PA_ACTIVERXDATALANES, 1 }, { PA_ACTIVETXDATALANES, 1 },
++		{ PA_RXTERMINATION, 1 }, { PA_TXTERMINATION, 1 },
++		{ PA_HSSERIES, 1 }, { PA_PWRMODE, 0x11 }
++	};
++	for (unsigned int i = 0; i < sizeof(verify) / sizeof(verify[0]); i++) {
++		uint32_t value = 0;
++		uint32_t result = ufs_uic(0x01, (uint32_t)verify[i].attr << 16, 0, 0, &value);
++		printf("SWEET UFS: HS verify attr 0x%x value 0x%x error 0x%x\n",
++		    verify[i].attr, value, result);
++		if (result || value != verify[i].value) {
++			return EIO;
++		}
++	}
++	return 0;
+ }
+ 
+ /* Vendor ufs_mtk_pre_link: allow UniPro power down, clear deep stall. */
+@@ -621,6 +726,39 @@
+ 	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
+ }
+ 
++/* Called once with the mutex held and writes still disabled. Compare exactly
++ * the first 4 KiB and time a 1 MiB read of the same partition range in each
++ * mode. No filesystem has been exposed and no data is written by this probe. */
++static int
++ufs_hs_validate(void)
++{
++	static uint8_t before[UFS_BLOCK];
++	const uint32_t blocks = BOUNCE_SIZE / UFS_BLOCK;
++	if (su.writable || su.nblocks < blocks) {
++		return EINVAL;
++	}
++	uint64_t start = mach_absolute_time();
++	int error = ufs_read_blocks(su.first_block, blocks);
++	uint64_t pwm_us = sweet_perf_us(mach_absolute_time() - start);
++	if (error) {
++		return error;
++	}
++	memcpy(before, (void *)(su.dma + DMA_BOUNCE), sizeof(before));
++	error = ufs_hs_g1();
++	if (error) {
++		return error;
++	}
++	start = mach_absolute_time();
++	error = ufs_read_blocks(su.first_block, blocks);
++	uint64_t hs_us = sweet_perf_us(mach_absolute_time() - start);
++	if (!error && memcmp(before, (void *)(su.dma + DMA_BOUNCE), sizeof(before))) {
++		error = EIO;
++	}
++	printf("SWEET UFS: HS readcheck bytes %u compare_bytes %u pwm_us %llu hs_us %llu error %d\n",
++	    BOUNCE_SIZE, UFS_BLOCK, pwm_us, hs_us, error);
++	return error;
++}
++
+ /*
+  * WRITE(10) of count device blocks from the bounce buffer to lba. The range
+  * must lie inside the partition: this is the only place data goes out.
+@@ -663,7 +801,7 @@
+ #define SWEET_MARK_MAX  160
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x230fu
++#define SWEET_BUILD_ID 0x2310u
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;
+@@ -1080,9 +1218,10 @@
+ 	PE_parse_boot_argn("ufsroot", want, sizeof(want));
+ 	uint32_t rw = 0;
+ 	PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+-	uint32_t cache = 0, wait = 0;
++	uint32_t cache = 0, wait = 0, hs = 0;
+ 	PE_parse_boot_argn("ufscache", &cache, sizeof(cache));
+ 	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
++	PE_parse_boot_argn("ufshs", &hs, sizeof(hs));
+ 	PE_parse_boot_argn("sweetperf", &sweet_perf, sizeof(sweet_perf));
+ 	su.cache = (cache == 1);
+ 	su.wait = (wait == 1);
+@@ -1129,6 +1268,9 @@
+ 	}
+ 	if (!error) {
+ 		error = ufs_find_partition(want);
++	}
++	if (!error && hs == 1) {
++		error = ufs_hs_validate();
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
+ 	if (error) {
+@@ -1193,10 +1335,19 @@
+ 	printf("MMU kernel_text_pte 0x%llx dma_pte 0x%llx\n",
+ 	    sweet_pmap_sample(kernel_pmap, (vm_map_address_t)&sweet_ufs_init, NULL, 0),
+ 	    sweet_pmap_sample(kernel_pmap, su.dma + DMA_BOUNCE, NULL, 0));
+-	uint64_t par, sctlr, mair;
+-	__asm__ volatile("mrs %0, mair_el1; mrs %1, sctlr_el1; at s1e1r, %3; isb; mrs %2, par_el1"
+-	    : "=&r"(mair), "=&r"(sctlr), "=&r"(par) : "r"(su.dma + DMA_BOUNCE) : "memory");
+-	printf("MMU dma_par 0x%llx mair 0x%llx sctlr 0x%llx\n", par, mair, sctlr);
++	/* Darwin's assembler treats ';' as a comment. Use explicit newlines,
++	 * and keep AT/PAR on one CPU with interrupts disabled until PAR is read. */
++	boolean_t irq = ml_set_interrupts_enabled(FALSE);
++	uint64_t mair = __builtin_arm_rsr64("MAIR_EL1");
++	uint64_t sctlr = __builtin_arm_rsr64("SCTLR_EL1");
++	uint64_t tcr = __builtin_arm_rsr64("TCR_EL1");
++	uint64_t mpidr = __builtin_arm_rsr64("MPIDR_EL1");
++	uint64_t par;
++	__asm__ volatile("at s1e1r, %1\n\tisb\n\tmrs %0, par_el1"
++	    : "=&r"(par) : "r"(su.dma + DMA_BOUNCE) : "memory");
++	ml_set_interrupts_enabled(irq);
++	printf("MMU v2 mpidr 0x%llx mair 0x%llx sctlr 0x%llx tcr 0x%llx dma_par 0x%llx\n",
++	    mpidr, mair, sctlr, tcr, par);
+ 	/* Own the shared bounce buffer; never race a filesystem/DMA command. */
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	void *src = (void *)(su.dma + DMA_BOUNCE);
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1036,7 +1036,9 @@
+ 		    sweet_pmap_sample(map->pmap, states[0].sp, NULL, 0));
+ 	}
+ 	for (int t = 0; t < tn; t++) {
+-		char line[400];
++		/* Keep printf's whole line below its console buffer limit, including
++		 * the final newline; otherwise adjacent thread records concatenate. */
++		char line[240];
+ 		uint64_t fp = states[t].fp;
+ 		int n = snprintf(line, sizeof(line), "SMP %s t%d pc 0x%llx lr 0x%llx sp 0x%llx bt", name, t,
+ 		    states[t].pc, states[t].lr, states[t].sp);
