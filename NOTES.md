@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2313 restored; flashlight startup dependency identified <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2314 root correction verified locally; applying checked delta <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -33,6 +33,21 @@ Original boot_a remains restored, Recovery online. Prepared2314 image
 7069696B SHA2564202e13c009e55ca29fe6b30811375c9356ddc11bc3983541031740f73a547eb;
 identical kernel2311/ADT2312; only cmdline trial ID and PosterBoard sampler
 added. No kernel build or new CI. Do not import/execute run-ui-2314.py yet.
+
+2314 native-image milestone: pulled current16GiB root SHA256
+9ed3b9d4bd2447a0a3adce867637f83971bd430d4c16206b895e760748b14016.
+APFS clone mounted with native macOS HFS; journal replay completed. Patched
+in place, preserved hardlinks/uid/gid/modes/extents (cache fork clumpSize
+340->0 is a native metadata update; logicalSize/blocks/extents unchanged).
+Unmounted native fsck_hfs -fn exit0, volume appears OK. Journal now clean,
+start=end3142656; volume attributes0x80002100. Patched disassembly confirms
+str xzr,[sp] then first object FigFlashlightServerStart, so shaders/camera
+are not in the iteration. Image SHA256
+4c5c6bd2b9d6f01752204d05ab8801b315645638a08e40dcd7d8d1780d7ad642.
+Delta34 runs/573440B, every device preimage matched in read-only preflight.
+Now applying with per-run readback; see apply-root-delta-2314-result.json.
+Keep live-root-before-2314.dmg and root-delta-2314 before blocks for rollback.
+No GPT/other partition changes. 0x2314 boot runner NOT STARTED yet.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
