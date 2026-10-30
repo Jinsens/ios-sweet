@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2314 RUNNING; boot_a restoration armed <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2314 UI VISIBLE per user; boot_a restore still armed <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -59,6 +59,15 @@ fresh sweettrial=2314 logs. Kernel marks intentionally remain2311.
 Original/local root and delta preimages preserved. Read-only analysis disk7
 detached; no live image mount remains. Code380cce3 pushed; handoff9a66163
 records native replay. No new kernel/CI; fork Actions remains disabled.
+
+MILESTONE: user answered2314 screen question with “出现锁屏、设置或主屏幕”.
+This is first positive user observation of visible iOS UI on matisse in this
+sequence. Exact lock/setup/home screen not yet distinguished; touch remains
+OFF. Flashlight-only correction was the sole root change beyond native HFS
+journal replay. Fresh logs still require Recovery return; do not infer their
+contents or claim touch works. Runner97112 continues, stock boot_a restore
+pending until FASTBOOT/Recovery. Record observation separately in
+ui2314-user-observation.json because runner owns boot result JSON.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
