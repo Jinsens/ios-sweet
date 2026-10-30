@@ -69,6 +69,13 @@ contents or claim touch works. Runner97112 continues, stock boot_a restore
 pending until FASTBOOT/Recovery. Record observation separately in
 ui2314-user-observation.json because runner owns boot result JSON.
 
+2314 user clarifies exact screen: LOCK SCREEN. User manually returned to
+FASTBOOT at176.77s. Runner has flashed full64MiB stock boot_a (raw fastboot
+OKAY) and requested Recovery (OKAY); awaiting Recovery independent hash
+verification and fresh logs. Current restore_pending remains true until
+that completes. Do not confuse prior Apple framebuffer thumbnails with
+this new physical screen observation. Touch still disabled.
+
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
 Read this handoff before the historical entries below. 0x230f returned to

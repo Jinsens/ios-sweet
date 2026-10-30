@@ -1,10 +1,11 @@
 # Matisse MMU and UFS performance audit, 2026-10-27
 
-Latest recovered hardware results are builds 0x2310 and 0x2311. Corrected
-register probes confirm Normal Inner/Outer WB RAM and enabled MMU/data/
-instruction caches. Opt-in HS Gear1 removes the measured PWM storage
-bottleneck. The current UI blocker is lsd's MobileGestalt network-identity
-lookup, described below; no iOS UI has been confirmed.
+Corrected hardware probes in 0x2310/2311 confirm Normal Inner/Outer WB RAM
+and enabled MMU/data/instruction caches. Opt-in HS Gear1 removes the measured
+PWM storage bottleneck. ADT network identity resolves lsd seeding; the
+flashlight-only startup correction in 0x2314 reaches a user-confirmed visible
+iOS lock screen. Touch remains disabled. Fresh 0x2314 logs and original
+boot_a restoration verification are pending Recovery return.
 
 ## Memory attributes
 
