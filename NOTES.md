@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2314 root correction verified locally; applying checked delta <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2314 RUNNING; boot_a restoration armed <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -48,6 +48,17 @@ Delta34 runs/573440B, every device preimage matched in read-only preflight.
 Now applying with per-run readback; see apply-root-delta-2314-result.json.
 Keep live-root-before-2314.dmg and root-delta-2314 before blocks for rollback.
 No GPT/other partition changes. 0x2314 boot runner NOT STARTED yet.
+
+0x2314 BOOT STARTED Unix1793404200.192118. Root delta34/34 runs applied
+and individually readback verified; root write_pending=false. boot_a image
+written and full-partition SHA256c28b9ac8db4714d14c8fd2cd9f496b967590d1745f4e215a7ce48e7f98b76e6b verified.
+boot-ui-2314-result.json now boot_a_restore_pending=true. Runner session97112
+monitors1200s and restores original64MiB boot_a upon FASTBOOT/Recovery.
+NEVER import/rerun run-ui-2314.py. No UI claim; need screen observation and
+fresh sweettrial=2314 logs. Kernel marks intentionally remain2311.
+Original/local root and delta preimages preserved. Read-only analysis disk7
+detached; no live image mount remains. Code380cce3 pushed; handoff9a66163
+records native replay. No new kernel/CI; fork Actions remains disabled.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
