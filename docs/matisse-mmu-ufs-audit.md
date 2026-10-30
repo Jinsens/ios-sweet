@@ -196,3 +196,33 @@ Linked-kernel disassembly at0xfffffe00074dccfc confirms all four register
 reads followed by AT S1E1R, ISB, MRS PAR and interrupt-state restoration.
 The five targeted tests pass. These checks establish the emitted code,
 not the device's resulting HS mode or runtime cache state.
+
+## Hardware result 0x2310, October 31
+
+HS Gear1/one lane/seriesA succeeded. Local and peer advertise HS Gear4 and
+two connected lanes; the conservative requested settings all read back
+exactly, including PA_PWRMODE=`0x11`. The same1MiB read fell from1519023us
+in PWM to8870us in HS; its first4KiB matched exactly. At uptime345485ms,
+20674 reads transferred1591185408B in17539226us including preparation and
+postprocessing, about86.52MiB/s (including the initial slow PWM benchmark).
+R/W/S error counters are all zero. This removes the measured PWM bottleneck.
+
+Valid runtime register probe: MPIDR=`0x81000100`,
+SCTLR=`0x3454599d` (M/C/I all enabled), TCR=`0x226511a511` (TTBR0/1 Inner
+and Outer walk policies all WB), MAIR=`0x0c08044f00bb44ff`, and
+PAR=`0xff00000104f04b00` (successful DMA translation, Normal WB attribute
+`0xff`). Valid sampled user/kernel PTEs continue to use index0. These are
+now runtime evidence, unlike the invalid legacy SCTLR/PAR record.
+
+Userland advances past logd cache harvesting. Backboardd opens AppleCLCD
+and IOCoreSurfaceRoot, creates two1125x2436 BGRA surfaces and presents
+swaps2..6. The user still reported Apple/frozen/black, so visible UI is not
+confirmed. SpringBoard now waits on a LaunchServices context lock while
+a worker awaits a synchronous reply in
+`__LAUNCH_SERVICES_IS_RESEEDING_ITS_DATABASE_AND_MAY_BLOCK`. Sampling lsd
+is the next concrete step. Its role is established; the server's cause is
+not yet known. Backboardd's main thread is in its ordinary CFRunLoop.
+
+The user returned FASTBOOT at393.12s. Original64MiB boot_a restored and
+full SHA256 verified; `boot-ui-2310-result.json` has restore_pending=false.
+Watchdog is after the forced return, not evidence of a spontaneous reset.

@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2310 RUNNING; boot_a restoration pending; waiting for FASTBOOT <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2310 restored; HS UFS works; first GUI swaps; UI still unconfirmed <<<
 
 Read this handoff before the historical entries below. 0x230f returned to
 FASTBOOT at759.79s after the user's requested return. Full64MiB original
@@ -71,14 +71,34 @@ Readonly pristine root was mounted at/tmp/ios-sweet-20H392-analysis (disk7)
 for symbolication and detached afterwards. SpringBoard/backboardd remain before UI;
 no GUI open/swap observed in230f. Current2310 result still pending.
 
-Last continuation: trial passed6min without host USB (expected with USB off).
-Asked user for screen status at~90s, then FASTBOOT return at~4min to restore
-and capture logs. Neither answer had arrived at this handoff. Do not claim
-runtime HS success or UI. Runner process remains live (session38066), with
-1200s no-USB timeout. On a later turn inspect result/log BEFORE any flashing.
-If still restore_pending, use the safe run-power.py restore() import above
-on FASTBOOT/Recovery return, then pull fresh marks and console into2310
-files. Never import the top-level run-ui-2310.py to continue it.
+0x2310 RETURNED FASTBOOT at393.12s after user's forced return, with Apple/
+frozen/black screen choice. Original64MiB boot_a restored and full hash
+2931647a...86b1 verified again live; result restore_pending=false.
+Fresh41 marks identify2310; console is new (not stale). HS cap local/peer
+gear4 and2lanes available. Requested HS G1/1lane/seriesA FAST verifies
+PA_PWRMODE0x11 and all selected attrs. Same1MiB read PWM1519023us ->
+HS8870us, exact first4KiB match, error0. Uptime345485ms totals:
+R20674/1591185408B/hw17376214us, all-phase throughput86.52MiB/s;
+W26464/1167171584B, errors0 for R/W/S. Baseline PWM read is included in
+these cumulative totals. No fixed delay/read bottleneck remains demonstrated.
+Corrected MMU v2: MPIDR0x81000100, MAIR0xc08044f00bb44ff,
+SCTLR0x3454599d (M/C/I all1), TCR0x226511a511 (all walk policies1/WB),
+DMA PAR0xff00000104f04b00 (success, Normal WB0xff). Valid sampled PTEs0.
+
+Userland progressed materially: logd/logd_helper idle in worker waits;
+backboardd opens AppleCLCD and IOCoreSurfaceRoot, creates BGRA surfaces2/3,
+and submits swaps2..6 before the first105s sample. NO visible UI confirmed.
+SpringBoard t0 now stable in _LSContextInitCommon's unfair-lock wait,
+through LSApplicationRecord/ControlCenterServices initialization. Its t1
+and a backboardd worker await NSXPC replies through
+__LAUNCH_SERVICES_IS_RESEEDING_ITS_DATABASE_AND_MAY_BLOCK ->
+_LSCopyServerStore. Backboardd main is in its normal CFRunLoop wait (not
+proven deadlocked). Shared-cache slide0x1df88000. Focused symbols in
+ui2310-focus-symbols.txt. Need sample lsd and its service dependencies next.
+Need distinguish blocked UI services/rendering
+from panel transfer. No further flashing until this evidence is understood.
+Readonly pristine root remounted at/tmp/ios-sweet-20H392-analysis for this
+second symbolication pass; detach when done.
 
 ## Historical 2026-10-27 userland installation and trials
 
