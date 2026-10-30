@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2311 restored; logo framebuffer; lsd waits in MobileGestalt <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2312 RUNNING; boot_a restore pending; ADT network identity fix <<<
 
 Read this handoff before the historical entries below. 0x230f returned to
 FASTBOOT at759.79s after the user's requested return. Full64MiB original
@@ -152,6 +152,13 @@ Image7069696B SHA25632552d4daf99fbf8b3038561d5c9ca1b56e8e80fe4d7bfbadacab122606d
 stock ramdisk/signature, Image/payload, cmdline/ADT checks all PASS.
 Expected full written boot_a SHA256cb42a503c14b9bb5165205f0a0f528753d2d568bd9764266c54bae422a4a5fb2.
 Runner run-ui-2312.py is prepared but NOT STARTED here; never import it.
+
+Identity correction committeddd5a8d9; trial0x2312 BOOT STARTED
+Unix1793402082.485483. Resultboot-ui-2312-result.json has
+boot_a_restore_pending=true; runner session14598 watches1200s and restores
+stock on FASTBOOT/Recovery return. Fresh logs must contain sweettrial=2312;
+kernel marks intentionally remain2311 because the kernel is identical.
+No runtime claim yet. Readonly analysis root remains mounted.
 
 ## Historical 2026-10-27 userland installation and trials
 
