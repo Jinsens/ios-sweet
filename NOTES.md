@@ -22,6 +22,18 @@ Fresh evidence: research/matisse/20261031-hs/ui2313-console.txt and
 dis-Fig{MediaServerStart,StartCaptureServers}.txt. Shared-cache slide0x8984000.
 PosterBoard crashed once (sig5, pc0x1ca0fc268); causal role unproven.
 Read-only analysis root remains /tmp/ios-sweet-20H392-analysis (disk7).
+2314 preparation: tools/sweet-media-flashlight.py validates exact20H392
+cache25 UUID/SHA256, then changes two instructions so FigStartCaptureServers
+starts flashlight only (first object=existing flashlight CFString, next=nil).
+Recorder XML becomes true at identical length; shader/camera paths stay out.
+Dry-run validates3 cache bytes+5 XML bytes; all3 configs share one inode.
+No device root writes yet. Live HFS journal start/end differ, so pulling
+16GiB live root for native replay and a preimage-checked differential update.
+Original boot_a remains restored, Recovery online. Prepared2314 image
+7069696B SHA2564202e13c009e55ca29fe6b30811375c9356ddc11bc3983541031740f73a547eb;
+identical kernel2311/ADT2312; only cmdline trial ID and PosterBoard sampler
+added. No kernel build or new CI. Do not import/execute run-ui-2314.py yet.
+
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
 Read this handoff before the historical entries below. 0x230f returned to

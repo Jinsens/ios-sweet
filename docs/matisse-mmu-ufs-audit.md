@@ -282,3 +282,32 @@ the next dependency, not whether mediaserverd is stalled or its flashlight
 server is disabled. Capture mediaserverd threads before changing that service.
 The first three framebuffer shots are still Apple logos; no visible UI.
 Original boot_a restored and full hash verified after208.11s forced return.
+
+### 0x2313: flashlight startup dependency (2026-10-31)
+
+The user manually returned to FASTBOOT at 157.15 seconds with Apple/black
+screen. Full stock boot_a was restored and independently SHA256 verified;
+boot_a_restore_pending=false. Recovery's subsequent Watchdog reason is
+not evidence of a spontaneous iOS crash. No visible UI is confirmed.
+
+Actual 20H392 disassembly shows MediaToolbox _FigMediaServerStart gates
+FigStartCaptureServers on StartRecorderServer. CMCaptureCore starts a list
+including FigPreloadShaders and FigFlashlightServerStart. The latter calls
+FigXPCServerStart for com.apple.coremedia.flashlight, the synchronous
+SpringBoard dependency. Mediaserverd's sampled main thread is in CFRunLoop.
+
+The existing recorder-off GPU workaround also suppresses flashlight startup.
+The next opt-in experiment uses tools/sweet-media-flashlight.py: exact
+cache25 UUID/SHA256 checks guard two ARM64 instruction changes, making the
+startup array contain only flashlight followed by nil. Offsets 0x36a08b4
+and 0x36a08bc change; the existing name CFString is 0x1dabc9560. The XML
+boolean becomes true without changing file size. All camera servers and
+shader prewarm remain skipped. This is diagnostic compatibility, not camera
+or flashlight hardware support, nor evidence of visible UI. No Apple binary
+is committed. Validation against pristine root passes.
+
+Recovery lacks HFS support, and live journal start/end differ. Before any
+root update: pull the current 16 GiB root, let native macOS HFS replay the
+journal, patch files in place preserving hardlinks/permissions, unmount and
+verify, then apply only a preimage-checked block delta to the offline device.
+Keep original and changed preimage blocks locally for rollback.
