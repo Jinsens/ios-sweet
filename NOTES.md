@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2312 restored; MG/lsd blocker cleared; SpringBoard new sync wait <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2313 RUNNING; boot_a restore pending; sampling mediaserverd <<<
 
 Read this handoff before the historical entries below. 0x230f returned to
 FASTBOOT at759.79s after the user's requested return. Full64MiB original
@@ -189,6 +189,11 @@ p_comm, so original full long names did not match). No next boot started.
 and embedded payload verified. Image7069696B SHA256
 e527e28648911d26db4e3457fc895fbc3d7c72817d6e824d52e1c8d41a6cedfe; expected full written hash
 30567ce223a60392919f0a808ec2efb784c0b31153cd310d6aa1bcb02f264be1. No kernel source/build/CI change.
+
+Trial0x2313 BOOT STARTED Unix1793402549.9406872; full written
+boot_a hash30567ce223a60392919f0a808ec2efb784c0b31153cd310d6aa1bcb02f264be1.
+Runner session58786 watches1200s; restore_pending=true. Do not import runner.
+Need fresh sweettrial=2313 console, mediaserverd sample and stock restore.
 
 ## Historical 2026-10-27 userland installation and trials
 
