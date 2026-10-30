@@ -311,3 +311,15 @@ root update: pull the current 16 GiB root, let native macOS HFS replay the
 journal, patch files in place preserving hardlinks/permissions, unmount and
 verify, then apply only a preimage-checked block delta to the offline device.
 Keep original and changed preimage blocks locally for rollback.
+
+0x2314 update: the current root was pulled, natively journal-replayed and
+patched; offline fsck_hfs -fn passed. A 573440-byte delta in 34 runs matched
+all device preimages and was fully readback verified. Numeric uid/gid,
+modes, hardlinks, data sizes and extents were checked. The actual patched
+disassembly confirms the nil terminator and flashlight first object.
+
+The user reported “出现锁屏、设置或主屏幕” for 0x2314. This is the first
+positive visible-UI observation in this matisse trial series. The exact
+screen is still being clarified, touch remains disabled, and fresh runtime
+logs have not yet been recovered. Original boot_a restoration is armed and
+pending FASTBOOT/Recovery return; do not call this fully verified yet.
