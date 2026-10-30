@@ -44,7 +44,20 @@ Legacy ignored decode-perf.py now explicitly invalidates old SCTLR/PAR
 and does not label missing PTEs as WB. Hardware trial still pending.
 Artifacts go in research/matisse/20261031-hs/. Preserve the user's unrelated
 dirty shim/build.sh, shim/shim.c, tools/sweet-marks.py and untracked0093.
-No new CI run yet. Continue UI only after storage validation.
+Code committedccf9716 and pushed to fork/codex/matisse-xnu-screen-log.
+gh workflow dispatch was attempted but returned HTTP422: Actions disabled
+on Jinsens/ios-sweet. No new CI run ID; local full build and tests passed.
+Verified ready image matisse-ui-hs-2310.img7069696B SHA256
+335e5c99139e20770020b85cb378257768a360176904fc49b54bdb65caa92b6b,
+stock ramdisk/signature and embedded gzip/Image/payload all match.
+0x2310 BOOT STARTED Unix1793400280.713899; full written boot_a hash
+cec6ec95337ad29466532cf893d249814f12f87cbb78d164d74d041588eb54a2.
+boot-ui-2310-result.json restore_pending=true; runner is watching for1200s
+and restores the entire original boot_a upon FASTBOOT/Recovery return.
+Boot args equal230f plus ufshs=1; input/USB remain off. Need screen
+observation and fresh2310 persistent logs. No HS/UI runtime claim yet.
+Runner run-ui-2310.py has top-level flashing;
+do not import it. Restore helper run-power.py remains safe to import.
 
 logd_helper samples now captured, shared-cache slide0x0f2b8000, main header
 0x1043a8000; t0 from467s pc0x1b5f3cbd4/lr0x1b5f3cbd0. Symbolication pending.
