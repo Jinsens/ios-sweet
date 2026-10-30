@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2310 restored; HS UFS works; first GUI swaps; UI still unconfirmed <<<
+## >>> ACTIVE 2026-10-31 (userland): 0x2311 RUNNING; boot_a restoration pending; HS validated in2310 <<<
 
 Read this handoff before the historical entries below. 0x230f returned to
 FASTBOOT at759.79s after the user's requested return. Full64MiB original
@@ -108,7 +108,15 @@ through existing persistent console. No new disk area/writer. These images
 do not prove physical-panel output. tools/sweet-fbimage.py only emits
 complete frames. Full local CLT build exit0,16724016B; seven targeted tests
 PASS (ASan/UBSan actual present, DSI ordering, HS error cases, assembly,
-resident sampling). No new CI; fork Actions remains disabled. Not booted yet.
+resident sampling). No new CI; fork Actions remains disabled.
+Kernel SHA2560abc76d94dfdace929bfb47d744d993039c35cefcf32327fc44251973b8162a2.
+Code commit62250ce, pushed to fork. Image7069696B SHA256
+641fb948bfb4f5a4e5b2d2a260c7d748c98347988d6c27756a610c5cfa244c4d;
+stock sections and payload verified. 0x2311 BOOT STARTED Unix1793401275.321538,
+full written boot_a hashd0908aefcb593d06b1a0eed161d70c09a7051751f573dbb290d524ffea65c9ce.
+boot-ui-2311-result.json restore_pending=true; runner session79300 watches
+1200s and restores on FASTBOOT/Recovery return. Never import run-ui-2311.py.
+Need fresh2311 marks, lsd stacks and FBIMG thumbnails; no current UI claim.
 
 ## Historical 2026-10-27 userland installation and trials
 
