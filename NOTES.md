@@ -100,6 +100,16 @@ from panel transfer. No further flashing until this evidence is understood.
 Readonly pristine root remounted at/tmp/ios-sweet-20H392-analysis for this
 second symbolication pass; detach when done.
 
+0116/build2311 prepared next: unchanged validated HS mode, sampler names
+SpringBoard,backboardd,lsd,installd,containermanagerd,runningboardd,
+mobileactivationd,launchd. Adds periodic DSP transfer counters and optional
+sweetfbshot=1: first3 presented framebuffer-RAM thumbnails80x178 grayscale
+through existing persistent console. No new disk area/writer. These images
+do not prove physical-panel output. tools/sweet-fbimage.py only emits
+complete frames. Full local CLT build exit0,16724016B; seven targeted tests
+PASS (ASan/UBSan actual present, DSI ordering, HS error cases, assembly,
+resident sampling). No new CI; fork Actions remains disabled. Not booted yet.
+
 ## Historical 2026-10-27 userland installation and trials
 
 User request: bring the online device through real iOS userland into UI.

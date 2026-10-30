@@ -1,0 +1,56 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -207,6 +207,9 @@
+ 		    "RWS"[i], p->calls, p->bytes, sweet_perf_us(p->prep), sweet_perf_us(p->hw),
+ 		    sweet_perf_us(p->post), sweet_perf_us(p->max), p->polls, p->sleeps, p->errors);
+ 	}
++	printf("DSP calls %u pushes %u busy_skips %u status 0x%x before 0x%x\n",
++	    sweet_disp_calls, sweet_disp_pushes, sweet_disp_busy_skips,
++	    sweet_disp_status, sweet_disp_status_before);
+ 	static bool probed;
+ 	if (!probed) {
+ 		probed = true;
+@@ -801,7 +804,7 @@
+ #define SWEET_MARK_MAX  160
+ 
+ /* Bumped for every locally built kernel that is flashed to the phone. */
+-#define SWEET_BUILD_ID 0x2310u
++#define SWEET_BUILD_ID 0x2311u
+ 
+ struct sweet_mark_rec {
+ 	uint32_t code;
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -410,6 +410,32 @@
+ 	 * timer already limits presentation to sweetfb_hz; console refreshes
+ 	 * stop at the first swap and cannot carry GUI frames to the panel. */
+ 	sweet_display_refresh(1);
++	/* Opt-in, bounded thumbnails of the framebuffer RAM after presentation.
++	 * These describe copied pixels, not proof that the physical panel showed
++	 * them. Hex rows fit the console line limit and use existing logging. */
++	static unsigned int shots;
++	int capture = 0;
++	if (shots < 3 && PE_parse_boot_argn("sweetfbshot", &capture, sizeof(capture)) && capture == 1) {
++		shots++;
++		const uint32_t tw = 80, th = 178, frame = get32(rec, 0x50);
++		static const char hex[] = "0123456789abcdef";
++		IOLog("FBIMG begin %u %u %u panel %u %u\n", frame, tw, th, fWidth, fHeight);
++		for (uint32_t y = 0; y < th; y++) {
++			char line[161];
++			uint32_t py = (uint32_t)((uint64_t)(2 * y + 1) * fHeight / (2 * th));
++			for (uint32_t x = 0; x < tw; x++) {
++				uint32_t px = (uint32_t)((uint64_t)(2 * x + 1) * fWidth / (2 * tw));
++				uint32_t pixel = *(volatile uint32_t *)(fPixels + (uint64_t)py * fRowBytes + px * 4);
++				uint32_t gray = (((pixel >> 16) & 255) * 77 +
++				    ((pixel >> 8) & 255) * 150 + (pixel & 255) * 29) >> 8;
++				line[x * 2] = hex[gray >> 4];
++				line[x * 2 + 1] = hex[gray & 15];
++			}
++			line[160] = 0;
++			IOLog("FBIMG row %u %u %s\n", frame, y, line);
++		}
++		IOLog("FBIMG end %u\n", frame);
++	}
+ }
+ 
+ bool
