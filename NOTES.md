@@ -59,9 +59,17 @@ observation and fresh2310 persistent logs. No HS/UI runtime claim yet.
 Runner run-ui-2310.py has top-level flashing;
 do not import it. Restore helper run-power.py remains safe to import.
 
-logd_helper samples now captured, shared-cache slide0x0f2b8000, main header
-0x1043a8000; t0 from467s pc0x1b5f3cbd4/lr0x1b5f3cbd0. Symbolication pending.
-SpringBoard/backboardd remain before UI; no GUI open/swap observed.
+logd_helper230f shared-cache slide0x0f2b8000, main header0x1043a8000.
+t0 from467s pc0x1b5f3cbd4 is dyld4::Atlas::Image::ml()+232, a Mach-O
+header load; stack is forEachSegment -> helper+0x5554 (return from
+_dyld_image_for_each_segment_info) -> SharedCache::forEachImage ->
+_dyld_shared_cache_for_each_image -> helper+0x5014 ->
+forEachInstalledCacheWithSystemPath -> _dyld_for_each_installed_shared_cache.
+This establishes cache-image harvesting, not its cause or an infinite loop.
+Raw symbol/disassembly evidence in20261031-hs/helper-* and logd-helper-*.
+Readonly pristine root mounted /tmp/ios-sweet-20H392-analysis (disk7) for
+symbolication; detach when done. SpringBoard/backboardd remain before UI;
+no GUI open/swap observed in230f. Current2310 result still pending.
 
 ## Historical 2026-10-27 userland installation and trials
 
