@@ -1,6 +1,36 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (input): 0x2317 FULL SCREEN + TOUCH + ALL3 KEYS user-confirmed; restore armed <<<
+## >>> ACTIVE 2026-10-31: 0x2317 native1440x3200 + TOUCH + ALL3 KEYS VERIFIED; stock boot_a RESTORED; Recovery online <<<
+
+
+CURRENT RESULT (supersedes RUNNING/pending notes below): user's request to
+fix resolution and enable touch/buttons is COMPLETE and hardware-confirmed.
+User observed full-screen1440x3200, working touch, power/volume+/volume-.
+Trial2317 fresh logs independently show MT6363 chip63, KP_EN1, all3 physical
+press/release -> HID events to backboardd, plus display on/off. Touch75 log
+records, key PMIF errors0, panic records0. Manual FASTBOOT218.26s; runner55131
+completed, full64MiB original boot_a restored and independently readback
+SHA2562931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1.
+boot-ui-2317-result.json restore_pending=false. Device is now Recovery.
+DO NOT rerun/import old trial runners. No active restore or hardware trial.
+
+Exact successful artifact: research/matisse/20261031-hs/
+matisse-ui-native-keys-2317.img (7073792B, SHA256
+a9e9a0ff876915e5d9258e451ee31967572bf435d0d10373e02366bcdcaeac4d).
+Kernel marks/build2316 (same kernel reused): e25c06b0...857269. Native ADT
+matisse-userland-native-keys-2317.adt adds ONLY344B verified/sweet-keys to
+working2315 native ADT; identity/display/touch unchanged. Root flashlight
+correction2314 remains installed; no root/GPT changes in this input task.
+
+Completed fixes:955694e native canvas;3210bda missing0094 local integration,
+0117 shared locked PMIF and keypad stride4,0099 clean-build context;
+379adbf payload rejects enabled keys with missing/invalid node. Latest
+successful trial handoff72a2f33.20 tests PASS, full local kernel build exit0,
+image+payload+symbols independently verified. Fork Actions dispatch HTTP422
+repository disabled, no new CI run. Success evidence is
+ui2317-user-observation.json / ui2317-key-focus.txt / ui2317-verification.json.
+Preserve unrelated dirty shim/build.sh,shim/shim.c,tools/sweet-marks.py and
+untracked0093. Any next work is a new requested feature, not unresolved input.
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
