@@ -225,6 +225,22 @@ def platform_adt(adt_blob, cmdline):
     root, _ = adt.parse(adt_blob)
     if b'xiaomi,matisse' not in (root.prop('compatible') or b'').split(b'\0'):
         return adt_blob
+    # Old userland ADTs may predate the MT6363 node even when a new kernel
+    # contains its driver. Reject those images instead of letting enabled keys
+    # silently fall through to the Qualcomm arbiter on a MediaTek board.
+    levels = [int(v, 0) for k, sep, v in (t.partition('=') for t in cmdline.split())
+              if k == 'sweetkeys' and sep]
+    if not levels or levels[-1] != 0:
+        keys = [c for c in root.children if c.name == 'sweet-keys']
+        expected = {'reg': struct.pack('<4Q', 0x1c015000, 0x900, 0x1c00e000, 0x1000),
+                    'spmi-sid': struct.pack('<I', 4),
+                    'power-bit': struct.pack('<I', 1),
+                    'volup-bit': struct.pack('<I', 3),
+                    'voldown-index': struct.pack('<I', 0)}
+        if (len(keys) != 1 or
+                b'mediatek,mt6363-keys' not in (keys[0].prop('compatible') or b'').split(b'\0') or
+                any(keys[0].prop(name) != value for name, value in expected.items())):
+            raise ValueError('enabled matisse keys require the verified /sweet-keys ADT node')
     native = [v for k, sep, v in (t.partition('=') for t in cmdline.split())
               if k == 'sweetfb_native' and sep]
     if not native or int(native[-1], 0) == 0:

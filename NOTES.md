@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (input): 0x2315 FULL SCREEN + TOUCH user-confirmed; 0x2316 KEYS TRIAL RUNNING; restore armed <<<
+## >>> ACTIVE 2026-10-31 (input): 0x2315 FULL SCREEN + TOUCH user-confirmed; 0x2316 keys failure explained; stock restored;2317 ready <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -176,6 +176,29 @@ reports state=active, so metadata alone does not establish usable Actions).
 No new CI run ID. Local full/final builds are the build evidence. User has
 been asked to test short power/volume presses and touch on the running2316;
 no reply received at this note. Original boot_a restore remains armed.
+
+2316 USER OBSERVATION: “全屏触摸正常，但有按键无响应”. Native display and
+touch remain user-confirmed; keys are NOT fully working. Asked which of
+power/volume-up/volume-down fail and requested manual FASTBOOT after short
+press tests for fresh log extraction and original boot restore. Runner
+session89729 remains owner; no new image or speculative hardware change.
+
+FINAL2316: user confirms all THREE buttons unresponsive; full-screen and
+touch remain good. Manual FASTBOOT at189.31s, runner89729 exits0; stock
+boot_a restored and independent Recovery hash2931647a...86b1, pending=false.
+Fresh console67 HID touch records, no panic; key path still Qualcomm fallback
+unsupported arbiter0x2. Root cause verified: actual inherited2315/2316 ADT
+has NO /sweet-keys (despite current mkadt generator including it); linked
+MT driver returns0 before PMIF. No MT key status/event exists this trial.
+Prepared2317 reuses exact kernel2316, marks stay2316; append ONLY verified
+/sweet-keys node344B to native2315 ADT. Removing it reconstructs old ADT
+exactly. Command line changes only trial ID2317; loader size updated using
+same frozen objects. mkpayload now rejects enabled matisse keys unless that
+exact verified node is present; regression covers missing/malformed node.
+2317 image7073792B SHA256a9e9a0ff876915e5d9258e451ee31967572bf435d0d10373e02366bcdcaeac4d.
+Expected written boot_a189255571d7d196b49acb1fc8eaeeb6e6180aec06c00cd5e1468219afb982a66.
+Independent image/payload/symbol/native-geometry check PASS. No2317 boot yet
+as of this entry; run-ui-2317.py prepared, never import it. Root unchanged.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 

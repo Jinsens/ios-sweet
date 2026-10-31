@@ -102,6 +102,23 @@ class BoardProfileTests(unittest.TestCase):
         sweet = adt.serialize(self.build())
         self.assertEqual(mkpayload.platform_adt(sweet, 'sweetfb_native=1'), sweet)
 
+    def test_enabled_keys_reject_stale_or_invalid_matisse_adt(self):
+        root = self.build(board='matisse')
+        key = child(root, 'sweet-keys')
+        root.children.remove(key)
+        blob = adt.serialize(root)
+        for cmd in ('', 'sweetkeys=1', 'sweetkeys=2 sweetfb_native=1'):
+            with self.assertRaisesRegex(ValueError, '/sweet-keys'):
+                mkpayload.platform_adt(blob, cmd)
+        self.assertEqual(mkpayload.platform_adt(blob, 'sweetkeys=0'), blob)
+        root.children.append(key)
+        fixed = adt.serialize(root)
+        self.assertEqual(mkpayload.platform_adt(fixed, 'sweetkeys=2'), fixed)
+        key.props = [(n, f, struct.pack('<I', 0) if n == 'spmi-sid' else v)
+                     for n, f, v in key.props]
+        with self.assertRaisesRegex(ValueError, '/sweet-keys'):
+            mkpayload.platform_adt(adt.serialize(root), 'sweetkeys=2')
+
     def test_matisse_payload_disables_qualcomm_drivers(self):
         blob = adt.serialize(self.build(board='matisse'))
         args = mkpayload.platform_cmdline(blob, 'debug=0xc serial=3 cpus=1')
