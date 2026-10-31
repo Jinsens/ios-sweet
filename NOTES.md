@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (input): 0x2315 FULL SCREEN + TOUCH user-confirmed; 0x2317 key-node trial RUNNING; restore armed <<<
+## >>> ACTIVE 2026-10-31 (input): 0x2317 FULL SCREEN + TOUCH + ALL3 KEYS user-confirmed; restore armed <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -208,6 +208,17 @@ FASTBOOT/Recovery return. boot-ui-2317-result.json restore_pending=true;
 never import/rerun run-ui-2317.py. Code379adbf pushed.20 tests PASS.
 Need user power/volup/voldown behavior and retained full-screen/touch, then
 fresh2317 logs; no key success claim yet. All prior boot_a restores verified.
+
+MILESTONE2317: direct user reply “电源和两个音量键均正常，触摸正常”.
+Native full-screen, touch response, power and both volume buttons are now
+USER-CONFIRMED working on actual hardware. Exact working image is
+matisse-ui-native-keys-2317.img SHA256
+a9e9a0ff876915e5d9258e451ee31967572bf435d0d10373e02366bcdcaeac4d;
+kernel2316 e25c06b0..., native1440x3200 ADT with verified/sweet-keys node.
+Do not confuse2316 failure (missing ADT node) with this successful2317 trial.
+Runner55131 still owns restoration; pending=true until FASTBOOT/Recovery
+return and independent hash/log readback. Need archive final key events and
+restore result. Success observation saved separately; runner owns resultJSON.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
