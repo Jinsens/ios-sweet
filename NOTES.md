@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (input): 0x2315 FULL SCREEN + TOUCH user-confirmed; 0x2316 keys failure explained; stock restored;2317 ready <<<
+## >>> ACTIVE 2026-10-31 (input): 0x2315 FULL SCREEN + TOUCH user-confirmed; 0x2317 key-node trial RUNNING; restore armed <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -199,6 +199,15 @@ exact verified node is present; regression covers missing/malformed node.
 Expected written boot_a189255571d7d196b49acb1fc8eaeeb6e6180aec06c00cd5e1468219afb982a66.
 Independent image/payload/symbol/native-geometry check PASS. No2317 boot yet
 as of this entry; run-ui-2317.py prepared, never import it. Root unchanged.
+
+0x2317 BOOT STARTED Unix1793405748.363124. Trial ID2317, exact kernel
+2316/marks2316. Full written boot_a readback verified SHA256
+189255571d7d196b49acb1fc8eaeeb6e6180aec06c00cd5e1468219afb982a66.
+Runner session55131 owns1200s monitor and full stock boot_a restore after
+FASTBOOT/Recovery return. boot-ui-2317-result.json restore_pending=true;
+never import/rerun run-ui-2317.py. Code379adbf pushed.20 tests PASS.
+Need user power/volup/voldown behavior and retained full-screen/touch, then
+fresh2317 logs; no key success claim yet. All prior boot_a restores verified.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
