@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (userland): 0x2315 native display + touch/keys RUNNING; restore armed <<<
+## >>> ACTIVE 2026-10-31 (input): 0x2315 FULL SCREEN + TOUCH user-confirmed; keys repair/rebuild in progress; stock restored <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -117,6 +117,46 @@ correcting resolution. Code955694e pushed; exact kernel2311 unchanged.
 Need actual native display and touch/keys user observation, then fresh2315
 marks/console and final stock hash verification. No current success claim
 for input/native mode. Prior2314 lock screen success and restore confirmed.
+
+MILESTONE2315: user explicitly reports “全屏且触摸有响应”. Physical
+native-screen coverage and touch response are therefore user-confirmed. No
+keys success claim. Prior agent found the2311 kernel omits the MT6363 keys
+driver despite sweetkeys=2; this continuation is verifying source/linkage
+and repairing it before rebuilding. Existing2315 runner PID38223 remains
+active with stock boot_a restoration armed; do not import/rerun it. Preserve
+the working2315 display/touch configuration and unrelated dirty files.
+
+FINAL2315: user manually returned to FASTBOOT at244.11s. Runner exited
+after restoring full64MiB stock boot_a and Recovery hash verification:
+2931647a56039722ea2585990b8ef3b1a2daf4c9b990231879f753049eaf86b1;
+restore_pending=false. Fresh console confirms AppleCLCD1440x3200 and both
+1440x3200 surfaces and HID touch down/up events. User separately confirms
+full-screen and responsive touch. Keys failure now observed in console:
+Qualcomm fallback unsupported arbiter version0x2; current local2311 tree
+omitted0094 source, hook and files entry. Kernel2316 build includes them
+plus0117 to use shared locked sweet_spmi reads (SID4 only0009/001e, no
+independent PMIF init writes), validate chip0x63, correct keypad stride4.
+Recovery live read confirms MT6363 chip0009=63, TOPSTATUS001e=1e idle.
+Full rebuild ongoing; 15 existing board/touch/UI/HS tests PASS. No new boot
+started or2316 hardware success claimed yet. No root/GPT changes.
+
+2316 READY: full local CLT build and final incremental build exit0; actual
+MT6363 init/thread/SPMI/HID symbols linked. Kernel16724112B SHA256
+e25c06b017016cc9deb984fc8635f963ebd00bc5b3f20ae96116673608857269.
+Code0117 shares locked PMIF, restricts new reads to SID4 0009/001e, checks
+chip63 and fixes keypad16-bit registers stride4 (vendor source verified).
+Also fixed0099 context to retain0094 files entry in clean patch replay;
+4 new ASan/UBSan key/allowlist/dispatch/clean-build tests +15 existing tests
+PASS. Current local key/SPMI sources match replayed patches (init comments
+aligned; no functional delta). Actions remains disabled on fork; gh run list
+last successful40127176212, no new CI run. Independent2316 image check PASS:
+7073792B SHA256b43e18cd4d28480c7d731ffa676f45c5b1a7d1d35ae09b1af4f472a42ade9b80;
+expected full written boot_a72fa34e30c41668e58b349e2e30e8839651591555c20a990088e00743fc8d88d.
+ADT exactly matches working native2315; touch flags unchanged. Frozen8dc3bce
+shim objects reused; old loader rebuilt byte-identically before changing only
+its EMBEDDED_XNU_BYTES for the96B larger kernel payload. Stock ramdisk and
+signature exact. Runner run-ui-2316.py prepared, NOT STARTED as of this entry;
+never import it. Recovery online, stock boot_a independently verified.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
