@@ -168,6 +168,15 @@ verified. Need user's actual power/volup/voldown response, then fresh2316
 console/marks and independent restored hash. No current key hardware success
 claim. Root flashlight correction unchanged; no GPT/other partition edits.
 
+2316 verification follow-up: exact final4 key/SPMI source files match full
+patch replay. Independent image/payload/symbol checks PASS again;19 tests
+PASS. gh workflow dispatch on50516f0 attempted and returned HTTP422:
+"Actions has been disabled for this repository" (workflow metadata still
+reports state=active, so metadata alone does not establish usable Actions).
+No new CI run ID. Local full/final builds are the build evidence. User has
+been asked to test short power/volume presses and touch on the running2316;
+no reply received at this note. Original boot_a restore remains armed.
+
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
 Read this handoff before the historical entries below. 0x230f returned to
