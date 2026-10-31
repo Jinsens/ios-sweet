@@ -1,6 +1,6 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ACTIVE 2026-10-31 (input): 0x2315 FULL SCREEN + TOUCH user-confirmed; keys repair/rebuild in progress; stock restored <<<
+## >>> ACTIVE 2026-10-31 (input): 0x2315 FULL SCREEN + TOUCH user-confirmed; 0x2316 KEYS TRIAL RUNNING; restore armed <<<
 
 Latest verified handoff: trial0x2313 returned FASTBOOT at157.15s. User
 confirms this was MANUAL and screen was Apple/black; no spontaneous crash
@@ -157,6 +157,16 @@ shim objects reused; old loader rebuilt byte-identically before changing only
 its EMBEDDED_XNU_BYTES for the96B larger kernel payload. Stock ramdisk and
 signature exact. Runner run-ui-2316.py prepared, NOT STARTED as of this entry;
 never import it. Recovery online, stock boot_a independently verified.
+
+0x2316 BOOT STARTED Unix1793405375.97475. Full written boot_a SHA256
+72fa34e30c41668e58b349e2e30e8839651591555c20a990088e00743fc8d88d verified
+before reboot. Code3210bda pushed to fork/codex/matisse-xnu-screen-log.
+Runner session89729 monitors1200s and restores full stock boot_a on manual
+FASTBOOT/Recovery return. boot-ui-2316-result.json restore_pending=true.
+NEVER import/rerun run-ui-2316.py. Previous2315 success/restoration remains
+verified. Need user's actual power/volup/voldown response, then fresh2316
+console/marks and independent restored hash. No current key hardware success
+claim. Root flashlight correction unchanged; no GPT/other partition edits.
 
 Earlier RUNNING/pending entries below are superseded by this handoff.
 
