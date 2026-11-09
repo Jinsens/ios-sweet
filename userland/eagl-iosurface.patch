@@ -1,6 +1,14 @@
 --- a/eagl.c
 +++ b/eagl.c
-@@ -650,6 +650,8 @@
+@@ -232,6 +232,7 @@
+ 	bool wrapped;                   /* the surface is memory of somebody's with a surface made around it */
+ 	bool alpha_first;               /* its pixels are opacity, blue, green, red in memory: see my_attachImage() */
+ 	bool painted;                   /* something has been drawn into it (it is a target in fact, not only in name) */
++	bool synced;                    /* the texture holds what the surface holds, as of `seed`: nothing to copy */
+ 	unsigned looked;                /* ... the frame in which that memory was last looked at, */
+ 	uint64_t sum;                   /* ... and what it added up to */
+ 	GLenum to, internal, format, type;
+@@ -650,6 +651,8 @@
  surface_changed(struct eagl *e, struct image *image)
  {
  	IOSurfaceRef surface = image->surface;
@@ -9,7 +17,7 @@
  	size_t size = IOSurfaceGetBytesPerRow(surface) * (size_t)(image->height - 1) +
  	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
  	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
-@@ -684,6 +686,30 @@
+@@ -684,6 +687,45 @@
  	bool alpha_first = image->alpha_first && !planar && pixel == 4;
  
  	if (image->shared) {
@@ -17,13 +25,27 @@
 +	}
 +	if (image->mirror) {
 +		/* Both directions stay on the GPU. Keep Mesa's private tiled render
-+		 * target for framebuffer fetch, and the shared linear surface for display. */
-+		GLint read = 0, draw = 0;
++		 * target for framebuffer fetch, and the shared linear surface for display.
++		 * The surface was filled from this texture at the end of the last frame
++		 * (target_to_surface()), so this way round is only needed when somebody else
++		 * has written to the surface since, which is what its seed says. Half of the
++		 * frame's copying goes away with it. */
++		GLint read = 0, draw = 0, have = 0, tall = 0;
 +		GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
++
++		if (image->synced && IOSurfaceGetSeed(surface) == image->seed) {
++			return;
++		}
 +		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
 +		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
-+		glTexImage2D(image->to, 0, (GLint)internal_format(image->internal, image->format),
-+		    image->width, image->height, 0, image->format, image->type, NULL);
++		/* Naming the texture again every frame throws away 18 MB of the GPU's memory
++		 * for a new, empty one; its size changes only with the surface. */
++		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x1000, &have);      /* (GL_TEXTURE_WIDTH, named further down) */
++		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, 0x1001, &tall);      /* (GL_TEXTURE_HEIGHT) */
++		if (have != image->width || tall != image->height) {
++			glTexImage2D(image->to, 0, (GLint)internal_format(image->internal, image->format),
++			    image->width, image->height, 0, image->format, image->type, NULL);
++		}
 +		if (!e->reader) glGenFramebuffers(1, &e->reader);
 +		if (!e->writer) glGenFramebuffers(1, &e->writer);
 +		glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
@@ -37,10 +59,11 @@
 +		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
 +		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
 +		image->seed = IOSurfaceGetSeed(surface);
++		image->synced = true;
  		return;
  	}
  	if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0) {
-@@ -763,6 +789,7 @@
+@@ -763,6 +805,7 @@
  	if (image->mirror != 0) {
  		GLint read = 0, draw = 0;
  
@@ -48,7 +71,7 @@
  		/* the frame into the surface's memory, by the GPU (blit_targets); upside down if it is drawn so */
  		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
  		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
-@@ -776,8 +803,10 @@
+@@ -776,13 +819,18 @@
  		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
  		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
  		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->mirror, 0);
@@ -59,3 +82,11 @@
  		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
  		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
  		if (IOSurfaceLock(surface, 0, NULL) == 0) {
+ 			IOSurfaceUnlock(surface, 0, NULL);
+ 		}
++		/* the two agree now: the way back is not needed until somebody else writes */
++		image->seed = IOSurfaceGetSeed(surface);
++		image->synced = true;
+ 		return;
+ 	}
+ 	if (image->shared) {
