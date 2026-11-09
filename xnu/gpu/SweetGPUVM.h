@@ -14,12 +14,22 @@ struct GPUBuffer {
     uint32_t flags;
 };
 struct GPUPageTable { IOBufferMemoryDescriptor *memory; uint64_t pa; volatile uint64_t *cpu; };
+/* A texture the compositor makes for one frame is 18.4 MB and is dropped
+ * again when the next frame replaces it. Allocating that from the page
+ * allocator and zeroing it through a write-combined mapping cost more than
+ * the frame it was for, so a BO's backing stays with the VM for the next BO
+ * of the same size. A VM belongs to one user client, so the memory never
+ * leaves the process that allocated it. */
+#define GPU_BO_CACHE 6u
+struct GPUCachedBuffer { IOBufferMemoryDescriptor *memory; uint64_t size; };
 struct GPUVM {
     GPUBuffer *bo;
     GPUPageTable *pt;
     unsigned tables, as_nr;
     uint64_t allocated;
     bool broken;
+    struct GPUCachedBuffer cache[GPU_BO_CACHE];
+    unsigned cacheNext;
     struct sweet_csf_runtime_group groups[SWEET_CSF_GROUPS];
 };
 static uint32_t gpu_as_used=1,gpu_group_used;
@@ -67,12 +77,25 @@ static volatile uint64_t *gpu_pte(GPUVM *v,uint64_t va,bool create)
     }
     return &table->cpu[(va>>12)&511];
 }
-static bool gpu_map_page(GPUVM *v,uint64_t va,uint64_t pa,uint32_t flags)
+static bool gpu_map_pte(GPUVM *v,uint64_t va,uint64_t pa,uint32_t flags)
 {
     if((va&4095)||(pa&4095)||va>=(1ull<<48)||!pa||pa>=(1ull<<40))return false;
     volatile uint64_t *pte=gpu_pte(v,va,true);if(!pte||*pte)return false;
     /* Vendor AttrIdx5 = noncacheable, AF, AP=RW. Execute and RO are explicit. */
     *pte=pa|0x457ull|((flags&1)?0x80:0)|((flags&2)?0x0060000000000000ull:0);
+    return true;
+}
+static bool gpu_map_page(GPUVM *v,uint64_t va,uint64_t pa,uint32_t flags)
+{
+    if(!gpu_map_pte(v,va,pa,flags))return false;
+    barrier(NULL);return true;
+}
+/* Map a whole physical run, with one barrier for it instead of one a page. */
+static bool gpu_map_run(GPUVM *v,uint64_t va,uint64_t pa,uint64_t bytes,uint32_t flags)
+{
+    for(uint64_t n=0;n<bytes;n+=4096) {
+        if(!gpu_map_pte(v,va+n,pa+n,flags))return false;
+    }
     barrier(NULL);return true;
 }
 static bool gpu_unmap_pages(GPUVM *v,uint64_t va,uint64_t size)
@@ -106,6 +129,48 @@ static GPUVM *gpu_vm_create(void)
 }
 static GPUBuffer *gpu_bo(GPUVM *v,uint32_t handle)
 {return v&&handle&&handle<=GPU_MAX_BO&&v->bo[handle-1].memory?&v->bo[handle-1]:NULL;}
+/* Backing for a BO of this size that this VM held before, or NULL. The pages
+ * are zeroed again: a client is entitled to a BO that starts empty, and the
+ * zeroing is a fraction of what finding the pages costs. */
+static IOBufferMemoryDescriptor *gpu_bo_cache_take(GPUVM *v,uint64_t size)
+{
+    for(unsigned i=0;i<GPU_BO_CACHE;i++) {
+        if(v->cache[i].memory&&v->cache[i].size==size) {
+            IOBufferMemoryDescriptor *m=v->cache[i].memory;
+            v->cache[i].memory=NULL;v->cache[i].size=0;
+            void *bytes=m->getBytesNoCopy();
+            if(bytes)bzero(bytes,size);
+            return m;
+        }
+    }
+    return NULL;
+}
+/* Keep the backing of a closed BO for the next one of its size. Takes the
+ * caller's reference when it says yes. */
+static bool gpu_bo_cache_keep(GPUVM *v,IOBufferMemoryDescriptor *m,uint64_t size)
+{
+    if(!m||size<(4ull<<20))return false;
+    for(unsigned i=0;i<GPU_BO_CACHE;i++) {
+        if(!v->cache[i].memory) {
+            v->cache[i].memory=m;v->cache[i].size=size;return true;
+        }
+    }
+    unsigned i=v->cacheNext++%GPU_BO_CACHE;
+    /* The one it replaces is 18 MB of wired pages: give the budget back. */
+    v->allocated-=v->cache[i].size;
+    OSSafeReleaseNULL(v->cache[i].memory);
+    v->cache[i].memory=m;v->cache[i].size=size;return true;
+}
+static void gpu_bo_cache_flush(GPUVM *v)
+{
+    for(unsigned i=0;i<GPU_BO_CACHE;i++) {
+        if(v->cache[i].memory) {
+            v->allocated-=v->cache[i].size;
+            OSSafeReleaseNULL(v->cache[i].memory);
+            v->cache[i].size=0;
+        }
+    }
+}
 static IOReturn gpu_bo_create(GPUVM *v,struct sweet_gpu_bo *r)
 {
     if(v->broken)return kIOReturnNotReady;
@@ -114,7 +179,9 @@ static IOReturn gpu_bo_create(GPUVM *v,struct sweet_gpu_bo *r)
     if(size>(1ull<<30)-v->allocated)return kIOReturnNoMemory;
     unsigned i=0;while(i<GPU_MAX_BO&&v->bo[i].memory)i++;
     if(i==GPU_MAX_BO)return kIOReturnNoResources;
-    IOBufferMemoryDescriptor *m=gpu_buffer_alloc(size);if(!m)return kIOReturnNoMemory;
+    IOBufferMemoryDescriptor *m=gpu_bo_cache_take(v,size);
+    if(!m)m=gpu_buffer_alloc(size);
+    if(!m)return kIOReturnNoMemory;
     v->bo[i].memory=m;v->bo[i].size=size;v->bo[i].flags=r->flags;v->allocated+=size;
     r->handle=i+1;r->size=size;return kIOReturnSuccess;
 }
@@ -178,12 +245,20 @@ static IOReturn gpu_vm_map(GPUVM *v,struct sweet_gpu_map *r)
         volatile uint64_t *p=gpu_pte(v,r->va+n,false);if(p&&*p)return kIOReturnBusy;
     }
     uint64_t done=0;
-    for(;done<r->size;done+=4096) {
+    bool mapped=true;
+    while(done<r->size) {
         IOByteCount len=0;
         uint64_t pa=b->memory->getPhysicalSegment(r->offset+done,&len,kIOMemoryMapperNone);
-        if(len<4096||!gpu_map_page(v,r->va+done,pa,r->flags))break;
+        if(!pa||len<4096){mapped=false;break;}
+        /* One call per physical run, not per page: an 18 MB BO is 4600
+         * pages, and asking the descriptor for each of them cost more than
+         * the mapping itself. */
+        if(len>r->size-done)len=r->size-done;
+        len&=~(uint64_t)4095;
+        if(!gpu_map_run(v,r->va+done,pa,len,r->flags)){mapped=false;break;}
+        done+=len;
     }
-    if(done!=r->size){gpu_unmap_pages(v,r->va,done);return kIOReturnNoMemory;}
+    if(!mapped){gpu_unmap_pages(v,r->va,done);return kIOReturnNoMemory;}
     b->va=r->va;b->offset=r->offset;b->mapped=r->size;
     if(sweet_csf_runtime_invalidate(&queue,&gpu_io,v->as_nr)){v->broken=true;return kIOReturnIOError;}
     return kIOReturnSuccess;
@@ -193,7 +268,13 @@ static IOReturn gpu_bo_close(GPUVM *v,uint32_t handle)
     GPUBuffer *b=gpu_bo(v,handle);if(!b)return kIOReturnNotFound;
     if(v->broken)return kIOReturnNotReady;
     if(b->mapped&&!gpu_unmap_pages(v,b->va,b->mapped))return kIOReturnIOError;
-    if(!b->surface)v->allocated-=b->size;
+    if(!b->surface) {
+        /* Its own backing: keep it for the next BO of this size instead of
+         * handing 18 MB back to the page allocator to be allocated and
+         * zeroed again a frame later. */
+        if(!gpu_bo_cache_keep(v,(IOBufferMemoryDescriptor *)b->memory,b->size))v->allocated-=b->size;
+        b->memory=NULL;
+    }
     OSSafeReleaseNULL(b->memory);OSSafeReleaseNULL(b->surface);bzero(b,sizeof(*b));return kIOReturnSuccess;
 }
 static IOReturn gpu_group_create(GPUVM *v,struct sweet_gpu_group *r)
@@ -296,6 +377,7 @@ static void gpu_vm_destroy(GPUVM *v)
         }
     }
     if(sweet_csf_runtime_bind(&queue,&gpu_io,v->as_nr,0))return;
+    gpu_bo_cache_flush(v);
     for(unsigned i=0;i<GPU_MAX_BO;i++) {
         OSSafeReleaseNULL(v->bo[i].memory);OSSafeReleaseNULL(v->bo[i].surface);
     }
