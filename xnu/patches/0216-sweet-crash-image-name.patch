@@ -1,0 +1,65 @@
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -834,6 +834,54 @@
+  */
+ void sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode);
+ static void sweet_crash_strings(const char *name);
++
++/*
++ * Which loaded image a crashing address belongs to. dyld publishes every
++ * image it mapped -- the shared cache's own images included -- as
++ * dyld_all_image_infos, so the name comes from the process itself rather
++ * than from a symbolication pass this phone cannot run. offset = pc - load
++ * address, the number a disassembler wants for that binary.
++ */
++static void
++sweet_crash_image(const char *name, uint64_t pc)
++{
++	task_t task = current_task();
++	uint64_t header[2] = { 0, 0 };          /* version, infoArrayCount */
++	uint64_t array = 0, best = 0, best_at = 0;
++	char path[128];
++	uint32_t count;
++
++	if (task_get_all_image_info_addr(task) == 0) {
++		return;
++	}
++	if (copyin((user_addr_t)task_get_all_image_info_addr(task), header, sizeof(header)) != 0) {
++		return;
++	}
++	count = (uint32_t)(header[0] >> 32);
++	if (copyin((user_addr_t)task_get_all_image_info_addr(task) + 8, &array, sizeof(array)) != 0 ||
++	    array == 0 || count == 0 || count > 4096) {
++		return;
++	}
++	for (uint32_t i = 0; i < count; i++) {
++		uint64_t entry[2];              /* imageLoadAddress, imageFilePath */
++		if (copyin((user_addr_t)(array + (uint64_t)i * 24), entry, sizeof(entry)) != 0) {
++			break;
++		}
++		if (entry[0] == 0 || entry[0] > pc) {
++			continue;
++		}
++		if (entry[0] >= best) {
++			best = entry[0];
++			best_at = entry[1];
++		}
++	}
++	if (best == 0 || best_at == 0 || copyin((user_addr_t)best_at, path, sizeof(path) - 1) != 0) {
++		return;
++	}
++	path[sizeof(path) - 1] = 0;
++	printf("CRASH %s image %s + 0x%llx\n", name, path, pc - best);
++}
++
+ void
+ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode)
+ {
+@@ -871,6 +919,7 @@
+ 		fp = frame[0];
+ 	}
+ 	printf("%s\n", line);
++	sweet_crash_image(name, get_saved_state_pc(ss));
+ 
+ 	if (sig == 11 || sig == 10) {
+ 		/* Which mapping the faulting address is in, or which two it falls between. */

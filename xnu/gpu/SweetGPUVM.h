@@ -22,6 +22,12 @@ struct GPUPageTable { IOBufferMemoryDescriptor *memory; uint64_t pa; volatile ui
  * leaves the process that allocated it. */
 #define GPU_BO_CACHE 6u
 struct GPUCachedBuffer { IOBufferMemoryDescriptor *memory; uint64_t size; };
+/* A walk down the page tables used to find each level's table by scanning
+ * v->pt[] for its physical address: 4600 pages of one BO meant 9200 scans,
+ * and mapping an 18.4 MB texture cost 3 ms. Remember the last few tables by
+ * address instead, which is what a run of neighbouring pages asks for. */
+#define GPU_PT_LOOKUP 16u
+struct GPUTableLookup { uint64_t pa; GPUPageTable *table; };
 struct GPUVM {
     GPUBuffer *bo;
     GPUPageTable *pt;
@@ -30,9 +36,39 @@ struct GPUVM {
     bool broken;
     struct GPUCachedBuffer cache[GPU_BO_CACHE];
     unsigned cacheNext;
+    struct GPUTableLookup lookup[GPU_PT_LOOKUP];
     struct sweet_csf_runtime_group groups[SWEET_CSF_GROUPS];
 };
 static uint32_t gpu_as_used=1,gpu_group_used;
+/* Where a frame's time goes: the compositor makes and drops an 18.4 MB BO
+ * every frame, and the work around that (import, map, unmap, close) is what
+ * is left of the per-frame cost once the allocation is cached. Reported as
+ * an average over 200 calls, so a cost that is small but repeated shows up. */
+#include <mach/mach_time.h>
+static uint64_t gpu_us(void)
+{
+    uint64_t ns=0;
+    absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
+    return ns/1000;
+}
+enum { GPU_STAT_IMPORT, GPU_STAT_MAP_PTE, GPU_STAT_MAP_FLUSH, GPU_STAT_UNMAP,
+       GPU_STAT_CLOSE, GPU_STAT_COUNT };
+static struct { uint64_t calls, total, max; } gpu_stat[GPU_STAT_COUNT];
+static const char *const gpu_stat_name[GPU_STAT_COUNT] = {
+    "surface import", "map ptes", "map flush", "unmap", "bo close" };
+static void gpu_note(unsigned which,uint64_t began)
+{
+    uint64_t now=gpu_us();
+    if(!began||!now||now<began)return;
+    uint64_t took=now-began;
+    gpu_stat[which].calls++;
+    gpu_stat[which].total+=took;
+    if(took>gpu_stat[which].max)gpu_stat[which].max=took;
+    if(gpu_stat[which].calls%200==0)
+        IOLog("SWEET GPU: %llu x %s avg %llu us max %llu us\n",
+            gpu_stat[which].calls,gpu_stat_name[which],
+            gpu_stat[which].total/gpu_stat[which].calls,gpu_stat[which].max);
+}
 static IOBufferMemoryDescriptor *gpu_buffer_alloc(uint64_t size)
 {
     gpu_checkpoint("buffer allocation begin",size);
@@ -57,6 +93,21 @@ static GPUPageTable *gpu_new_table(GPUVM *v)
     }
     t->cpu=(volatile uint64_t *)t->memory->getBytesNoCopy();v->tables++;return t;
 }
+/* The table a level's descriptor points at, remembered by its address. Page
+ * tables are never freed while the VM lives, so a hit cannot go stale. */
+static GPUPageTable *gpu_table(GPUVM *v,uint64_t pa)
+{
+    unsigned slot=(unsigned)((pa>>12)&(GPU_PT_LOOKUP-1));
+    if(v->lookup[slot].table&&v->lookup[slot].pa==pa)return v->lookup[slot].table;
+    for(unsigned i=1;i<v->tables;i++) {
+        if(v->pt[i].pa==pa) {
+            v->lookup[slot].pa=pa;v->lookup[slot].table=&v->pt[i];
+            return &v->pt[i];
+        }
+    }
+    v->lookup[slot].table=NULL;v->lookup[slot].pa=0;
+    return NULL;
+}
 static volatile uint64_t *gpu_pte(GPUVM *v,uint64_t va,bool create)
 {
     GPUPageTable *table=&v->pt[0];
@@ -69,9 +120,7 @@ static volatile uint64_t *gpu_pte(GPUVM *v,uint64_t va,bool create)
             barrier(NULL);*entry=next->pa|3;barrier(NULL);table=next;
         } else {
             if((descriptor&3)!=3)return NULL;
-            uint64_t pa=descriptor&0x0000fffffffff000ull;
-            table=NULL;
-            for(unsigned i=1;i<v->tables;i++)if(v->pt[i].pa==pa){table=&v->pt[i];break;}
+            table=gpu_table(v,descriptor&0x0000fffffffff000ull);
             if(!table)return NULL;
         }
     }
@@ -90,21 +139,43 @@ static bool gpu_map_page(GPUVM *v,uint64_t va,uint64_t pa,uint32_t flags)
     if(!gpu_map_pte(v,va,pa,flags))return false;
     barrier(NULL);return true;
 }
+/* Write a page map that the caller has already proved free. Reading the
+ * entry back first looks harmless and is not: page-table memory is mapped
+ * write-combined, so a read of it costs more than the write, and one 18.4 MB
+ * texture is 4600 of them (2481: 3.3 ms a map). */
+static bool gpu_write_pte(GPUVM *v,uint64_t va,uint64_t pa,uint32_t flags)
+{
+    volatile uint64_t *pte=gpu_pte(v,va,true);
+    if(!pte)return false;
+    *pte=pa|0x457ull|((flags&1)?0x80:0)|((flags&2)?0x0060000000000000ull:0);
+    return true;
+}
 /* Map a whole physical run, with one barrier for it instead of one a page. */
 static bool gpu_map_run(GPUVM *v,uint64_t va,uint64_t pa,uint64_t bytes,uint32_t flags)
 {
     for(uint64_t n=0;n<bytes;n+=4096) {
-        if(!gpu_map_pte(v,va+n,pa+n,flags))return false;
+        if(!gpu_write_pte(v,va+n,pa+n,flags))return false;
     }
     barrier(NULL);return true;
 }
+/* The caller is about to map this range: nobody else may have pages there. */
+static bool gpu_range_free(GPUVM *v,uint64_t va,uint64_t bytes)
+{
+    for(unsigned i=0;i<GPU_MAX_BO;i++) {
+        GPUBuffer *b=&v->bo[i];
+        if(b->memory&&b->mapped&&va<b->va+b->mapped&&b->va<va+bytes)return false;
+    }
+    return true;
+}
 static bool gpu_unmap_pages(GPUVM *v,uint64_t va,uint64_t size)
 {
+    uint64_t began=gpu_us();
     for(uint64_t n=0;n<size;n+=4096) {
         volatile uint64_t *pte=gpu_pte(v,va+n,false);if(pte)*pte=0;
     }
     barrier(NULL);
     if(sweet_csf_runtime_invalidate(&queue,&gpu_io,v->as_nr)){v->broken=true;return false;}
+    gpu_note(GPU_STAT_UNMAP,began);
     return true;
 }
 static GPUVM *gpu_vm_create(void)
@@ -188,6 +259,25 @@ static IOReturn gpu_bo_create(GPUVM *v,struct sweet_gpu_bo *r)
 /* Metadata queries do not create a BO. UINT32_MAX imports the owned,
  * uncached IOSurface backing; repeat imports return the same live handle.
  * Borrowed/cacheable memory stays on the explicit texture upload path. */
+/* Why a surface was not imported as the texture's memory: the bridge then
+ * copies 18.4 MB through the CPU instead, which is what is left of the
+ * per-frame attach cost. */
+enum { SURF_REFUSED_NOT_BUFFER, SURF_REFUSED_READ_ONLY, SURF_REFUSED_CACHE,
+       SURF_REFUSED_FORMAT, SURF_REFUSED_GEOMETRY, SURF_REFUSED_SIZE,
+       SURF_REFUSED_COUNT };
+static const char *const surf_refused_name[SURF_REFUSED_COUNT] = {
+    "not a buffer", "read-only", "cache", "format", "geometry", "size" };
+static uint32_t surf_refused[SURF_REFUSED_COUNT];
+static uint32_t surf_refused_total;
+static void gpu_surface_refused(unsigned why)
+{
+    if(why>=SURF_REFUSED_COUNT)return;
+    surf_refused[why]++;
+    if(++surf_refused_total%64)return;
+    IOLog("SWEET GPU: %u surfaces refused: notbuf=%u ro=%u cache=%u fmt=%u geom=%u size=%u\n",
+        surf_refused_total,surf_refused[0],surf_refused[1],surf_refused[2],
+        surf_refused[3],surf_refused[4],surf_refused[5]);
+}
 static IOReturn gpu_surface(GPUVM *v,struct sweet_gpu_surface *r)
 {
     if(v->broken)return kIOReturnNotReady;
@@ -196,17 +286,23 @@ static IOReturn gpu_surface(GPUVM *v,struct sweet_gpu_surface *r)
     SweetSurface *s=sweet_surface_copy(r->surface);
     if(!s)return kIOReturnNotFound;
     uint64_t size=s->memory?s->memory->getLength():0;
-    if(!OSDynamicCast(IOBufferMemoryDescriptor,s->memory)||s->memoryReadOnly||
-       s->mapCache!=kIOMapWriteCombineCache||s->pixelFormat!='BGRA'||s->planeCount||
-       s->bytesPerElement!=4||!s->width||!s->height||s->width>UINT32_MAX/4||
-       s->bytesPerRow<s->width*4||(s->bytesPerRow&63)||(s->offset&63)||
-       !size||(size&4095)||size>(256ull<<20)||
-       s->offset+(uint64_t)s->bytesPerRow*s->height>size) {
+    unsigned why=SURF_REFUSED_COUNT;
+    if(!OSDynamicCast(IOBufferMemoryDescriptor,s->memory))why=SURF_REFUSED_NOT_BUFFER;
+    else if(s->memoryReadOnly)why=SURF_REFUSED_READ_ONLY;
+    else if(s->mapCache!=kIOMapWriteCombineCache)why=SURF_REFUSED_CACHE;
+    else if(s->pixelFormat!='BGRA'||s->planeCount||s->bytesPerElement!=4)why=SURF_REFUSED_FORMAT;
+    else if(!s->width||!s->height||s->width>UINT32_MAX/4||s->bytesPerRow<s->width*4||
+            (s->bytesPerRow&63)||(s->offset&63))why=SURF_REFUSED_GEOMETRY;
+    else if(!size||(size&4095)||size>(256ull<<20)||
+            s->offset+(uint64_t)s->bytesPerRow*s->height>size)why=SURF_REFUSED_SIZE;
+    if(why!=SURF_REFUSED_COUNT) {
+        gpu_surface_refused(why);
         s->release();return kIOReturnUnsupported;
     }
     r->handle=0;r->size=size;r->offset=s->offset;r->row_bytes=s->bytesPerRow;
     r->width=s->width;r->height=s->height;r->pixel_format=s->pixelFormat;r->planes=0;
     if(import) {
+        uint64_t began=gpu_us();
         unsigned slot=GPU_MAX_BO;
         for(unsigned i=0;i<GPU_MAX_BO;i++) {
             if(v->bo[i].surface==s){r->handle=i+1;break;}
@@ -220,6 +316,7 @@ static IOReturn gpu_surface(GPUVM *v,struct sweet_gpu_surface *r)
             if(logged++<24)IOLog("SWEET GPU: surface import id=%u bo=%u %ux%u stride=%u bytes=%llu NC\n",
                 s->id,r->handle,r->width,r->height,r->row_bytes,size);
         }
+        gpu_note(GPU_STAT_IMPORT,began);
     }
     s->release();return kIOReturnSuccess;
 }
@@ -241,9 +338,8 @@ static IOReturn gpu_vm_map(GPUVM *v,struct sweet_gpu_map *r)
     GPUBuffer *b=gpu_bo(v,r->handle);
     if(!b||(r->flags&~7u)||b->mapped||r->offset>b->size||r->size>b->size-r->offset)
         return kIOReturnBadArgument;
-    for(uint64_t n=0;n<r->size;n+=4096) {
-        volatile uint64_t *p=gpu_pte(v,r->va+n,false);if(p&&*p)return kIOReturnBusy;
-    }
+    uint64_t began=gpu_us();
+    if(!gpu_range_free(v,r->va,r->size))return kIOReturnBusy;
     uint64_t done=0;
     bool mapped=true;
     while(done<r->size) {
@@ -260,13 +356,17 @@ static IOReturn gpu_vm_map(GPUVM *v,struct sweet_gpu_map *r)
     }
     if(!mapped){gpu_unmap_pages(v,r->va,done);return kIOReturnNoMemory;}
     b->va=r->va;b->offset=r->offset;b->mapped=r->size;
+    uint64_t ptes=gpu_us();
+    gpu_note(GPU_STAT_MAP_PTE,began);
     if(sweet_csf_runtime_invalidate(&queue,&gpu_io,v->as_nr)){v->broken=true;return kIOReturnIOError;}
+    gpu_note(GPU_STAT_MAP_FLUSH,ptes);
     return kIOReturnSuccess;
 }
 static IOReturn gpu_bo_close(GPUVM *v,uint32_t handle)
 {
     GPUBuffer *b=gpu_bo(v,handle);if(!b)return kIOReturnNotFound;
     if(v->broken)return kIOReturnNotReady;
+    uint64_t began=gpu_us();
     if(b->mapped&&!gpu_unmap_pages(v,b->va,b->mapped))return kIOReturnIOError;
     if(!b->surface) {
         /* Its own backing: keep it for the next BO of this size instead of
@@ -275,6 +375,7 @@ static IOReturn gpu_bo_close(GPUVM *v,uint32_t handle)
         if(!gpu_bo_cache_keep(v,(IOBufferMemoryDescriptor *)b->memory,b->size))v->allocated-=b->size;
         b->memory=NULL;
     }
+    gpu_note(GPU_STAT_CLOSE,began);
     OSSafeReleaseNULL(b->memory);OSSafeReleaseNULL(b->surface);bzero(b,sizeof(*b));return kIOReturnSuccess;
 }
 static IOReturn gpu_group_create(GPUVM *v,struct sweet_gpu_group *r)
