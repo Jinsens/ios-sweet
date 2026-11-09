@@ -48,11 +48,17 @@ therefore blocks all GPU clients for a whole batch (~18 submits/frame), and
 the CPU cannot prepare the next frame. 60fps needs an async submit with a
 separate wait, not another renderer switch.
 
-Next: kernel submit returns after enqueue; add a WAIT selector; transport
-waits at its existing fence/readback points; bridge keeps the blit and waits
-at frame end. Budget check: the18MB blit alone is10.8ms of the16.7ms frame,
-so async overlap alone may top out near40-50fps; cutting the blit cost is
-also required for a stable60.
+2451 status: the split is coded in xnu/gpu (ABI24 SUBMIT_ASYNC,25 WAIT;
+enqueue/wait split; gpu_lock released during WAIT) but is NOT committed and
+NOT in any kernel. tools/build-xnu-clt.sh prints "C++ SweetGPU.cpo" yet the
+resulting object still has only gpu_submit (no gpu_wait), and the linked
+kernel stays f220a6a5... with no "CSF enqueue" string. The 20:35 kernel2447
+build did compile SweetGPU, so the local pipeline regressed or is relinking a
+prebuilt object. Do not flash or trial until a local build changes the
+object. Next: reproduce the20:35 compile path or force a real C++ recompile,
+then wire the transport (defer sync_ops signal, WAIT inside
+drmSyncobjTimelineWait, wait before BO/group close). CI is off-limits per
+user.
 
 ## >>> PREVIOUS 2026-11-09: 2448 SHARED PIXELS VERIFIED; 2449 UI IMAGE READY <<<
 
