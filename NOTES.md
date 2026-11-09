@@ -1,5 +1,68 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-09: ASYNC SUBMIT IN KERNEL+MESA; PROBE STALLS ON DEVICE <<<
+## >>> ACTIVE 2026-11-10: FRAME COST 49->37 ms; 15.3->20-22 fps; NEXT IS THE PER-FRAME IOMMU MAPPING <<<
+
+Build: DEVELOPER_DIR=/Users/xiaohuasheng/Downloads/Xcode.app/Contents/Developer
+tools/build-xnu-local.sh xnu/out/local kernel. The tree xnu/out/local is the
+built source (SweetSurface.cpp / SweetFramebuffer.cpp / sweet_matisse_dsi.c live
+only there, not in xnu/patches); xnu/gpu/* is tracked and must be copied into it.
+kernel2477=73782e9e, image 105cb7f9...6772, boot_a restored2931647a.
+
+What the frame was spending, measured on the device (2475 console):
+
+    SWEET SURF: slow buffer 18432000 bytes alloc 12983 us zero 790 us
+    tl: slow glTexImage2D 22531 at 122580118, frame 294 (before its first draw)
+
+So the compositor makes a panel-sized IOSurface and an 18.4 MB texture every
+frame, and the cost was the page search, not the zeroing: 2.6-19.7 ms for a
+contiguous 18.4 MB surface, 22 ms for the texture. Both are dropped again when
+the next frame replaces them.
+
+2476/2477 keep them (commit 124d863): SweetSurface holds a freed buffer for the
+next surface of the same size made by the same task (the wired budget follows
+the buffer, not the surface); SweetGPU keeps a closed BO's backing per VM for
+the next BO of that size and zeroes it again (0.8 ms against 2.6-19.7 ms);
+gpu_vm_map asks the descriptor once per physical run instead of once per 4 KB
+page, with one dsb per run. 2475 was the same without the wired-budget fix and
+is only useful as the measurement above: after ~41 frames the budget was spent
+and surface creation began to fail (8 x 0xe00002bd).
+
+Results. Present no longer waits for the panel to finish receiving a frame:
+
+    2474  present 8835 us/frame, vsync tick avg 19.04 ms
+    2476  present   16.6 us/frame, vsync tick avg 17.64 ms
+    2477  present   16.7 us/frame, vsync tick avg 17.65 ms
+
+Frame cadence, busiest 10 s window of each run (the tail of a run is idle and
+not comparable - 2476 read 35.7 fps and 2477 22.7 fps there, same work):
+
+    2474  153 frames = 15.3 fps   frame cost 29688 us + 19551 attach
+    2476  219 frames = 21.9 fps   frame cost 28110 us +  9628 attach
+    2477  200 frames = 20.0 fps   frame cost 27708 us +  9599 attach
+
+So ~31-43% more frames, attach halved, present effectively free. `send` prints
+0/0 now by design: a transfer is only measured when the next one finds it still
+running, i.e. only the late ones.
+
+Do not claim 60 fps. The per-frame cost is still 37 ms and the compositor is
+saturated at that. What is left, in order of size:
+
+1. attach ~9.6 ms/frame. Allocation is cached now, so this is the work around
+   it: every frame brings a new surface id, so there is a new import, a new
+   VM_BIND of 18.4 MB (4600 PTEs) and an unmap, each ending in
+   sweet_csf_runtime_invalidate() = LOCK + INVALIDATE_ALL + UNLOCK on the AS,
+   each of which waits for the address space to go idle. That serialises the
+   CPU with the GPU once per frame. Next: stop invalidating a range that was
+   never mapped, or keep the AS locked across a frame's map/unmap pair.
+2. GPU wait 2.5 ms/frame (glFinish) and 0.3 ms submitting; 80-95 draws a frame.
+3. The rest is CoreAnimation's own CPU work inside the frame, not GL calls.
+
+Also unresolved from 2474: 33-43 of ~210 surfaces per run are not shareable
+(size/format), so they are copied instead (14 in 2477); the widest texture
+varies between runs (1440x3200 vs 1832x3200), so runs are only comparable by
+work done, not by wall-clock fps. PosterBoard still traps, wallpaper still
+absent, icon/text correctness still needs the user's eyes.
+
+## (superseded) 2026-11-09: ASYNC SUBMIT IN KERNEL+MESA; PROBE STALLS ON DEVICE <<<
 
 Build: tools/build-xnu-local.sh works when DEVELOPER_DIR points at the Xcode
 that exists here: DEVELOPER_DIR=/Users/xiaohuasheng/Downloads/Xcode.app/Contents/Developer
