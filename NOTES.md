@@ -1,5 +1,41 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-09: 2449 DESKTOP BOOTED (SPRINGBOARD + 60Hz GPU); POSTERBOARD TRAP <<<
+## >>> ACTIVE 2026-11-09: ASYNC SUBMIT IN KERNEL+MESA; PROBE STALLS ON DEVICE <<<
+
+Build: tools/build-xnu-local.sh works when DEVELOPER_DIR points at the Xcode
+that exists here: DEVELOPER_DIR=/Users/xiaohuasheng/Downloads/Xcode.app/Contents/Developer
+(tools/build-xnu-clt.sh does link a kernel but its CLT toolchain produced a
+stale SweetGPU object for a day; prefer the Xcode path).
+
+Why the async work looked "not built" for hours: externalMethod guarded the
+dispatch with selector<=SWEET_GPU_SURFACE(23), so the new 24/25 cases were
+unreachable and clang removed them - the object stayed byte-identical. The
+guard now ends at SWEET_GPU_WAIT. kernel2451=2841ec2b, kernel2453=4bd1fa04.
+
+Kernel: SUBMIT_ASYNC(24) enqueues and rings the doorbell; WAIT(25) polls the
+fence already written. WAIT unlocks gpu_lock while it polls, only a reported
+fault marks the group failed, and it re-rings the doorbell at poll2000/20000/
+200000 in case the first ring landed while the firmware was busy.
+
+Mesa transport (userland/sweet-panthor-drm.c): gpuasync=1 turns GROUP_SUBMIT
+into enqueue + queued fence; waits happen at syncobj wait, wait-before-submit
+syncs, BO map/close, VM unmap, group/heap destroy, surface import. The queue is
+kept under24 entries so the32-slot ring never reports full. SYNCOBJ_TRANSFER
+copies unsignalled fences (records the source point in fwd[]) - requiring
+completion made every batch fail with "panfrost_batch_submit failed: -1".
+
+Device state: root is live-root-gpu2453.dmg (aa34bb50 -> 96ebadf2 after the
+trace lib), boot_a restored2931647a. Probe 2453 (kernel2453 + gpuasync=1):
+enqueue and wait both succeed, "CSF wait ... rc=0 after=<seq> extract=<ins>
+polls=1" for seq1/2, then the probe stops producing output after the third
+enqueue and the runner watchdog returns at107s. The kernel console stops at
+the same point, which points at a kernel-side stall rather than a Mesa error;
+not yet localized. The traced lib (fprintf to stderr) produced no TRACE lines,
+so stderr is not reaching the console ring after that point - next step is a
+file-backed trace under /private/var plus a snapshot to read it.
+
+Do not claim 60fps or working async UI yet.
+
+## (superseded) 2449 DESKTOP BOOTED (SPRINGBOARD + 60Hz GPU); POSTERBOARD TRAP
 
 2449 normal launchd boots to SpringBoard on kernel2447 with the2448 Mesa. The
 system stayed alive past the runner330s window, so no autorecovery return; user
