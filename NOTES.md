@@ -1,5 +1,33 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-09: 2448 SHARED PIXELS VERIFIED; 2449 UI IMAGE READY <<<
+## >>> ACTIVE 2026-11-09: 2449 DESKTOP BOOTED (SPRINGBOARD + 60Hz GPU); POSTERBOARD TRAP <<<
+
+2449 normal launchd boots to SpringBoard on kernel2447 with the2448 Mesa. The
+system stayed alive past the runner330s window, so no autorecovery return; user
+brought it to Recovery manually and boot_a is fully restored2931647a...86b1.
+Root unchanged84cd1456...015f6eb; journal complete, restore_pending=false.
+
+backboardd: Mali-G710(Panfrost),237 frames from t95.099s to121.042s,4->94
+draws/frame, median43.0ms; last20 intervals36-48ms (~21-28fps);4330 CSF
+submits,0 failures,0 copyouts,1 picture/frame drawn in place. SpringBoard/AKS
+reports no passcode and unlocked. Note: UI frame lines are
+"|backboardd| redwood-gl: f N at T s: ...", not the probe's SWEET GLES form.
+
+PosterBoard launches then dies with SIGTRAP sig5 code0x600000001
+pc=lr=0x1c77c4268 (bt 0x1c77ca304 0x1c77b0c5c 0x1c77b0644 0x1c7832204 ...).
+Wallpaper is still absent. It is NOT disabled and NOT in disabled.plist: the
+job runs and crashes. AGXAccelerator matches return none, so a Metal-dependent
+wallpaper path is the leading hypothesis, not yet proven. Visual correctness
+of icons/text still needs the user's eyes; do not claim wallpaper or pixel
+correctness is fixed.
+
+Runner caveat: shim2449-ui-run-once.py treats no Recovery within330s as a
+stall and writes the stock prefix, which forced a manual recovery while the UI
+was healthy. Next UI runner must allow a longer/manual stop first.
+
+Next: user visual check; symbolize PosterBoard pc/bt before changing code;
+then icon/text defects and wallpaper.
+
+## >>> PREVIOUS 2026-11-09: 2448 SHARED PIXELS VERIFIED; 2449 UI IMAGE READY <<<
 
 2448 PASS on device with the verified kernel2447 (3aa3b098...4524bd3). Root
 delta 637/637 blocks written with exact readback, root84cd1456...015f6eb;

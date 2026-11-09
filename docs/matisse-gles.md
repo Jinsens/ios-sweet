@@ -36,6 +36,22 @@ selector 21/`e00002ca`），resident 累计 submits=17、failures=0。证据
 `shim2448-share/gpu-normal/after-console.txt`。这只证明共享表面读写与拆除正确，
 不证明系统 UI 的帧率或画面缺块已经解决。
 
+2449 把同一路径接回正常 launchd：SpringBoard 成功启动，backboardd 从 t=95.099s
+连续渲染 237 帧到 t=121.042s，每帧 4–94 次绘制，帧间隔中位数 43.0ms，尾段
+36–48ms（约 21–28 fps）。4,330 次 CSF 提交零失败，每帧 1 张画面原地绘制、
+0 次拷出；这比 2446 的 107ms 中位数和 85ms 拷出明显改善，但仍未达到 60Hz，
+且这是日志采样而非完整体验帧率。
+
+桌面能起来，不等于画面已经正确：PosterBoard 启动后以 SIGTRAP 退出
+（sig5 code 0x600000001，pc=lr=0x1c77c4268），壁纸仍缺失；它不是被
+disabled.plist 禁用，而是运行后崩溃。AGXAccelerator 匹配返回 none，
+因此“壁纸走 Metal、当前只有 GLES”是待验证的首要假设，不能当作结论。
+图标／文字缺块是否仍存在，需要用户目视确认。
+
+2449 的 runner 也有教训：它把 330 秒内未回 Recovery 当成卡死并写回 stock 前缀，
+而这次 UI 一直健康存活，结果需要人工进 Recovery 才完成恢复。下一版 UI runner
+必须先允许更长或人工停止，不能把“没回来”直接当故障。
+
 此页下文保留早期 2427 等轮次的历史，不能用它们判断当前后端是否为硬件。
 
 
