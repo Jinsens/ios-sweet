@@ -12,6 +12,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/sysctl.h>
 #include "xf86drm.h"
 #include "drm-uapi/panthor_drm.h"
 #include "sweet_gpu_user.h"
@@ -31,6 +32,16 @@ static uint32_t surfaces[OBJECTS];
 static struct {unsigned count;uint32_t bo[65];} heaps[HEAPS];
 static uint64_t heap_va=UINT64_C(1)<<47;
 static unsigned vm_alive;
+/* Async submission (boot-arg gpuasync=1). A submit only rings the doorbell;
+ * its fence is waited for where the client actually waits (syncobj wait or a
+ * wait-before-submit sync) and wherever a resource's lifetime needs the GPU
+ * to have finished. The synchronous path stays the default. */
+#define PEND 64u
+#define PEND_HANDLES 4u
+struct pending {uint32_t group,sequence,insert,count,handle[PEND_HANDLES];uint64_t point[PEND_HANDLES];};
+static struct pending pend[PEND];
+static unsigned pend_head,pend_tail,pend_count;
+static int async_submit;
 static int error(int e){errno=e;return -1;}
 static int call(unsigned selector,void *r,size_t size)
 {
@@ -58,7 +69,11 @@ int drmOpenWithType(const char *name,const char *busid,int type)
             pthread_mutex_unlock(&lock);return error(ENODEV);
         }
         device=open("/dev/null",O_RDWR|O_CLOEXEC);
-        fprintf(stderr,"SweetGPU Panthor: GPU=%08x regs=%u scoreboards=%u\n",info.gpu[0],info.cs[2],info.cs[3]);
+        char arguments[1024];size_t asize=sizeof(arguments);
+        if(!sysctlbyname("kern.bootargs",arguments,&asize,NULL,0))
+            async_submit=strstr(arguments,"gpuasync=1")!=NULL;
+        fprintf(stderr,"SweetGPU Panthor: GPU=%08x regs=%u scoreboards=%u%s\n",info.gpu[0],info.cs[2],info.cs[3],
+            async_submit?" async":" sync");
     }
     int fd=device>=0?dup(device):-1;pthread_mutex_unlock(&lock);return fd;
 }
@@ -72,6 +87,55 @@ int drmGetCap(int fd,uint64_t cap,uint64_t *value)
 {(void)fd;*value=cap==DRM_CAP_SYNCOBJ||cap==DRM_CAP_SYNCOBJ_TIMELINE;return 0;}
 static int signalled(uint32_t handle,uint64_t point)
 {return handle&&handle<OBJECTS&&syncs[handle].used&&syncs[handle].signalled&&syncs[handle].point>=point;}
+static void pend_push(uint32_t group,uint32_t sequence,uint32_t insert,
+    const struct drm_panthor_obj_array *a)
+{
+    if(pend_count==PEND)return;
+    struct pending *p=&pend[pend_tail];
+    memset(p,0,sizeof(*p));p->group=group;p->sequence=sequence;p->insert=insert;
+    for(unsigned i=0;a&&i<a->count&&p->count<PEND_HANDLES;i++) {
+        const struct drm_panthor_sync_op *s=(const void *)(uintptr_t)(a->array+(uint64_t)a->stride*i);
+        if((s->flags>>31)!=1||!s->handle||s->handle>=OBJECTS)continue;
+        p->handle[p->count]=s->handle;p->point[p->count]=(s->flags&1)?s->timeline_value:0;p->count++;
+    }
+    pend_tail=(pend_tail+1)%PEND;pend_count++;
+}
+/* Waits for the oldest queued fence. The kernel releases gpu_lock while it
+ * polls, so other clients can enqueue during the wait; the transport mutex is
+ * only held by callers that already own it. */
+static int pend_wait_head(void)
+{
+    if(!pend_count)return 0;
+    struct pending *p=&pend[pend_head];
+    struct sweet_gpu_wait w={.group=p->group,.sequence=p->sequence,.insert=p->insert,.timeout_ms=5000};
+    if(call(SWEET_GPU_WAIT,&w,sizeof(w)))return -1;
+    for(unsigned i=0;i<p->count;i++) {
+        if(p->point[i]>syncs[p->handle[i]].point)syncs[p->handle[i]].point=p->point[i];
+        syncs[p->handle[i]].signalled=1;
+    }
+    pend_head=(pend_head+1)%PEND;pend_count--;
+    pthread_cond_broadcast(&changed);
+    return 0;
+}
+static int pend_drain_all(void)
+{
+    while(pend_count)if(pend_wait_head())return -1;
+    return 0;
+}
+/* Drain the FIFO up to and including the entry that signals handle. Work is
+ * in-order per group, so everything ahead of it has to be waited for too. */
+static int pend_drain(uint32_t handle)
+{
+    if(!async_submit||!pend_count||signalled(handle,0))return 0;
+    unsigned guard=pend_count;
+    while(pend_count&&guard--) {
+        unsigned hit=0;
+        for(unsigned i=0;i<pend[pend_head].count;i++)if(pend[pend_head].handle[i]==handle)hit=1;
+        if(pend_wait_head())return -1;
+        if(hit)return 0;
+    }
+    return 0;
+}
 static int sync_ops(struct drm_panthor_obj_array a,int signal)
 {
     if(a.count&&!a.array)return error(EINVAL);
@@ -82,7 +146,7 @@ static int sync_ops(struct drm_panthor_obj_array a,int signal)
         if(!s->handle||s->handle>=OBJECTS||!syncs[s->handle].used||(s->flags&0x7ffffffeu))return error(EINVAL);
         uint64_t point=(s->flags&1)?s->timeline_value:0;
         if(signal){if(point>syncs[s->handle].point)syncs[s->handle].point=point;syncs[s->handle].signalled=1;}
-        else if(!signalled(s->handle,point))return error(ETIME);
+        else {if(pend_drain(s->handle))return -1;if(!signalled(s->handle,point))return error(ETIME);}
     }
     if(signal)pthread_cond_broadcast(&changed);return 0;
 }
@@ -90,6 +154,8 @@ static void *map_bo(uint32_t handle,uint64_t bytes)
 {
     if(!handle||handle>=OBJECTS)return MAP_FAILED;
     if(maps[handle].address){maps[handle].refs++;return (void *)(uintptr_t)maps[handle].address;}
+    /* A CPU mapping may read memory the GPU is still writing. */
+    if(pend_drain_all())return MAP_FAILED;
     mach_vm_address_t address=0;mach_vm_size_t size=bytes;
     kern_return_t rc=IOConnectMapMemory64(connection,handle,mach_task_self(),&address,&size,kIOMapAnywhere);
     if(rc||size<bytes)return MAP_FAILED;
@@ -104,6 +170,8 @@ static void unmap_bo(uint32_t handle)
 }
 static int close_bo(uint32_t handle)
 {
+    /* The backing BO must not disappear while the GPU still reads it. */
+    if(pend_drain_all())return error(EBUSY);
     struct sweet_gpu_group r={handle,0};int rc=call(SWEET_GPU_BO_CLOSE,&r,sizeof(r));
     if(!rc&&handle<OBJECTS)surfaces[handle]=0;
     return rc;
@@ -163,6 +231,7 @@ static int ioctl_locked(unsigned long request,void *arg)
         for(unsigned i=0;i<r->ops.count;i++) {
             struct drm_panthor_vm_bind_op *o=(void *)(uintptr_t)(r->ops.array+(uint64_t)i*r->ops.stride);
             if(sync_ops(o->syncs,0))return -1;
+            if((o->flags>>28)==2&&pend_drain_all())return -1;
             if((o->flags>>28)!=2) {
                 struct sweet_gpu_map m={o->bo_handle,o->flags,o->bo_offset,o->va,o->size};
                 if(call(SWEET_GPU_VM_MAP,&m,sizeof(m)))return -1;
@@ -179,6 +248,7 @@ static int ioctl_locked(unsigned long request,void *arg)
     }
     if(request==DRM_IOCTL_PANTHOR_GROUP_DESTROY) {
         struct drm_panthor_group_destroy *r=arg;struct sweet_gpu_group g={r->group_handle,0};
+        if(pend_drain_all())return -1;
         return call(SWEET_GPU_GROUP_CLOSE,&g,sizeof(g));
     }
     if(request==DRM_IOCTL_PANTHOR_GROUP_GET_STATE) {
@@ -187,10 +257,20 @@ static int ioctl_locked(unsigned long request,void *arg)
     if(request==DRM_IOCTL_PANTHOR_GROUP_SUBMIT) {
         struct drm_panthor_group_submit *r=arg;
         if(r->queue_submits.stride!=sizeof(struct drm_panthor_queue_submit)||r->queue_submits.count>1024)return error(EINVAL);
+        /* The command ring holds 32 submissions. Keep the queue shallow so an
+         * async enqueue never finds the ring full and reports -62. */
+        if(async_submit)while(pend_count>=24)if(pend_wait_head())return -1;
         for(unsigned i=0;i<r->queue_submits.count;i++) {
             struct drm_panthor_queue_submit *q=(void *)(uintptr_t)(r->queue_submits.array+(uint64_t)i*r->queue_submits.stride);
             if(q->queue_index||sync_ops(q->syncs,0))return error(EINVAL);
             struct sweet_gpu_submit s={r->group_handle,q->stream_size,q->stream_addr,0};
+            if(q->stream_size&&async_submit) {
+                if(call(SWEET_GPU_SUBMIT_ASYNC,&s,sizeof(s))) {
+                    if(pend_drain_all()||call(SWEET_GPU_SUBMIT_ASYNC,&s,sizeof(s))){failed=1;return -1;}
+                }
+                pend_push(r->group_handle,(uint32_t)s.sequence,0,&q->syncs);
+                continue;
+            }
             if(q->stream_size&&call(SWEET_GPU_SUBMIT,&s,sizeof(s))){failed=1;return -1;}
             if(sync_ops(q->syncs,1))return -1;
         }
@@ -211,7 +291,9 @@ static int ioctl_locked(unsigned long request,void *arg)
     }
     if(request==DRM_IOCTL_PANTHOR_TILER_HEAP_DESTROY) {
         unsigned h=((struct drm_panthor_tiler_heap_destroy *)arg)->handle;
-        if(!h||h>=HEAPS)return error(EINVAL);destroy_heap(h);return 0;
+        if(!h||h>=HEAPS)return error(EINVAL);
+        if(pend_drain_all())return -1;
+        destroy_heap(h);return 0;
     }
     fprintf(stderr,"SweetGPU unsupported DRM request=%lx\n",request);return error(ENOTSUP);
 }
@@ -249,6 +331,10 @@ int drmSyncobjReset(int fd,const uint32_t *h,uint32_t n)
 int drmSyncobjTimelineWait(int fd,uint32_t *h,uint64_t *points,unsigned n,int64_t timeout,unsigned flags,uint32_t *first)
 {
     (void)fd;if(!n)return error(EINVAL);pthread_mutex_lock(&lock);
+    /* WAIT_AVAILABLE asks whether the fence exists, not whether it completed:
+     * the transport attaches it at submit time, so it always does. */
+    if(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE){pthread_mutex_unlock(&lock);return 0;}
+    for(unsigned i=0;i<n;i++)if(pend_drain(h[i])){pthread_mutex_unlock(&lock);return -1;}
     for(;;) {
         unsigned done=0;
         for(unsigned i=0;i<n;i++)if(signalled(h[i],points?points[i]:0)) {
@@ -268,6 +354,7 @@ int drmSyncobjWait(int fd,uint32_t *h,unsigned n,int64_t timeout,unsigned flags,
 int drmSyncobjTransfer(int fd,uint32_t dst,uint64_t dp,uint32_t src,uint64_t sp,uint32_t flags)
 {
     (void)fd;(void)flags;pthread_mutex_lock(&lock);
+    if(pend_drain(src)){pthread_mutex_unlock(&lock);return -1;}
     if(!signalled(src,sp)||!dst||dst>=OBJECTS||!syncs[dst].used){pthread_mutex_unlock(&lock);return error(EINVAL);}
     if(dp>syncs[dst].point)syncs[dst].point=dp;syncs[dst].signalled=1;
     pthread_cond_broadcast(&changed);pthread_mutex_unlock(&lock);return 0;
@@ -293,6 +380,7 @@ int redwood_drm_surface(int fd,struct redwood_drm_surface *s)
     _Static_assert(sizeof(*s)==sizeof(struct sweet_gpu_surface),"surface ABI");
     struct sweet_gpu_surface r={.surface=s->surface};
     pthread_mutex_lock(&lock);
+    if(pend_drain_all()){pthread_mutex_unlock(&lock);return -1;}
     if(!r.surface&&s->handle<OBJECTS)r.surface=surfaces[s->handle];
     int rc=r.surface?call(SWEET_GPU_SURFACE,&r,sizeof(r)):error(EINVAL);
     if(!rc)memcpy(s,&r,sizeof(r));
