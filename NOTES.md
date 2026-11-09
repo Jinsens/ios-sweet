@@ -1,5 +1,29 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-09: 2447 SYNC FAILURE IDENTIFIED; 2448 SHARED PROBE PREPARING <<<
+## >>> ACTIVE 2026-11-09: 2448 SHARED PIXELS VERIFIED; 2449 UI IMAGE READY <<<
+
+2448 PASS on device with the verified kernel2447 (3aa3b098...4524bd3). Root
+delta 637/637 blocks written with exact readback, root84cd1456...015f6eb;
+full boot_a restored/verified2931647a...86b1; journal complete,
+restore_pending=false. Evidence shared2448-verified.json and
+shim2448-share/gpu-normal/after-console.txt.
+
+Shared IOSurface:3 import/free/reimport rounds,12/12 CPU pixels exact
+(scissor17,23-47,51; corner1439,3199; BGRA order),readback=none. Second EAGL
+group close rc=0 (2445 selector21/e00002ca gone). Resident submits17,
+failures0. Mesa still logs11 "export failed" lines: bo_export remains
+unsupported by design and the failure is non-fatal; batches still submit.
+Baseline GLES pixels and EAGL API3 also PASS.
+
+2449 UI image built with SAME kernel2447:ca042fcb...50732e0,26734592B,
+normal launchd,60Hz,glcopy0/glwait1/glframes1/glslow20000. NOT booted.
+Registered build id0x2449 in tools/matisse-shim-gpu-image.py (17 membership/
+choices updates);2448 image untouched. Next: prepare2449 one-shot runner,boot,
+measure frame timing and icon/text flicker. Wallpaper posterd/PosterBoard
+cause still unresolved: current disabled.plist has no such entry; user is
+checking configs left by older tests. Do not claim UI/FPS improvement before
+fresh2449 logs and user observation.
+
+## >>> PREVIOUS 2026-11-09: 2447 SYNC FAILURE IDENTIFIED; 2448 SHARED PROBE PREPARING <<<
 
 2447 completed with fresh trial/kernel2447; baseline G710 GLES pixels and EAGL
 context teardown PASS. Shared IOSurface import succeeded, but Mesa then called

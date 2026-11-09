@@ -10,7 +10,7 @@
 其中 CPU 读回／拷出中位数 85.022 ms，另有表面附着前处理 33.339 ms。
 这些是日志采样的阶段时间，不能直接当作完整会话 FPS。
 
-2447 新增硬件共享表面验证（结果见 NOTES.md 最新交接）：
+2447 新增硬件共享表面验证，2448 首次通过。设计如下：
 
 - SweetGPU selector 23 查询或导入现有 IOSurface，复用存活 BO，并保留表面生命周期。
 - 只导入自有、单平面、64 字节对齐 BGRA 缓冲；所有 CPU 映射与 GPU 页表均使用
@@ -21,6 +21,20 @@
 - 保留完成同步；不通过禁用等待或伪造 fence 来提高统计帧率。
 - 探针在关闭第二个 EAGL 上下文后，重复导入三次并直接检查共享 CPU 地址中的
   12 个 GPU 写入像素。检查过程中不使用 glReadPixels 生成这些像素。
+
+2447 的共享绘制实际未提交：Mesa 为导入 BO 取隐式 fence 时调用了不支持的
+Linux dma-buf export，批次在提交前终止，首个 CPU 像素检查失败。2448 让导入
+BO 复用 SweetGPU 同步时间线：创建即 signaled，SUBMIT 返回即硬件 fence 完成，
+失败提交不会被当成已完成工作。`bo_export` 仍不支持，控制台里的
+`MESA: error: export failed` 是这条已知路径的非致命告警，不再阻断提交。
+
+2448 实测通过：3 轮导入／释放／重导入，12/12 个 CPU 像素与期望完全一致，
+覆盖 `17,23–47,51` 裁剪区、整屏角点 `1439,3199` 与 BGRA 通道顺序；检查过程
+不使用 glReadPixels 制造结果。第二个 EAGL 组关闭返回 rc=0（不再出现 2445 的
+selector 21/`e00002ca`），resident 累计 submits=17、failures=0。证据
+`research/matisse/20261109-resident-gpu/shared2448-verified.json`；原始日志在
+`shim2448-share/gpu-normal/after-console.txt`。这只证明共享表面读写与拆除正确，
+不证明系统 UI 的帧率或画面缺块已经解决。
 
 此页下文保留早期 2427 等轮次的历史，不能用它们判断当前后端是否为硬件。
 
