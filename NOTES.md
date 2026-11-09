@@ -24,8 +24,22 @@ Runner caveat: shim2449-ui-run-once.py treats no Recovery within330s as a
 stall and writes the stock prefix, which forced a manual recovery while the UI
 was healthy. Next UI runner must allow a longer/manual stop first.
 
-Next: user visual check; symbolize PosterBoard pc/bt before changing code;
-then icon/text defects and wallpaper.
+2450 tried glblit=0 glfetch=0 (draw straight into the display surface, no
+per-frame blit). Attach time fell to0us, but presentation broke:2939 GL
+frames in52.1s with only16 logged swaps (counter63) and771 frames of<=2
+draws; CA spun without presenting. User pressed power at147s; autorecovery
+reached fastboot at175.09s; boot_a restored2931647a...86b1. Negative result:
+the full-surface blit is load-bearing for presentation, not only correctness.
+
+Measured limit:2449 frames are20ms GL (10.8ms attach/blit,2ms wait) but43ms
+apart;2450 without the blit runs unpaced at2ms intervals. The throttle is the
+synchronous SweetGPU submit (sweet_csf_runtime_submit polls for completion on
+every submit, ~18 submits/frame) plus the18MB blit. Do not ship glblit=0
+without a pacing fix.
+
+Next: choose between async submit (kernel ABI: submit returns, separate wait;
+fixes CPU/GPU serialization) and present-path investigation (why the swap
+counter is far below GL frames). Do not retry glblit=0 alone.
 
 ## >>> PREVIOUS 2026-11-09: 2448 SHARED PIXELS VERIFIED; 2449 UI IMAGE READY <<<
 

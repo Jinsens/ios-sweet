@@ -52,6 +52,19 @@ disabled.plist 禁用，而是运行后崩溃。AGXAccelerator 匹配返回 none
 而这次 UI 一直健康存活，结果需要人工进 Recovery 才完成恢复。下一版 UI runner
 必须先允许更长或人工停止，不能把“没回来”直接当故障。
 
+2450 试了 `glblit=0 glfetch=0`：画面直接画进共享表面，试图省掉每帧 18MB 的
+整屏 blit。attach 时间确实降到 0，但呈现随之崩掉——52.1 秒里记录了 2,939 次
+GL 帧，却只有 16 条 swap 日志（计数 63），其中 771 帧只有 ≤2 次绘制；compositor
+在空转而不呈现。用户在 147 秒按下电源键，autorecovery 于 175 秒把设备送回
+fastboot。负结果：整屏 blit 不只是为了 framebuffer fetch 的正确性，也承担了
+呈现节流，不能单独去掉。
+
+这也把瓶颈量化了：2449 的一帧约 20ms GL（10.8ms attach/blit、2ms 等待），却
+相隔 43ms；2450 去掉 blit 后以 2ms 间隔空转。真正的串行点是 SweetGPU 的同步
+提交（`sweet_csf_runtime_submit` 每次提交都轮询到完成，约 18 次/帧）加上
+18MB blit。下一步要么改异步提交（submit 立即返回、单独 wait），要么先查清
+present 路径为什么 swap 计数远低于 GL 帧数；不要只去掉 blit 就上线。
+
 此页下文保留早期 2427 等轮次的历史，不能用它们判断当前后端是否为硬件。
 
 
