@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -48,13 +49,32 @@ static int async_submit;
 struct forwarded {uint32_t src;uint64_t point,value;};
 static struct forwarded fwd[OBJECTS];
 static int error(int e){errno=e;return -1;}
-/* Temporary bring-up trace: the probe is PID 1, so a lost frame leaves no
- * other evidence than the last call it entered. */
+/* Bring-up trace. The probe is PID 1 and the kernel console stops when it
+ * wedges, so the trace goes to a file on the read-write root that a later
+ * snapshot can read back. */
+static void ping(unsigned long long tag);
 static int trace_on;
-static void tr(const char *what,long a,long b)
+static FILE *trace_file;
+static void tr_open(void)
+{
+    static const char *paths[]={"/private/var/tmp/sweet-async.log","/private/tmp/sweet-async.log","/tmp/sweet-async.log",NULL};
+    for(unsigned i=0;paths[i]&&!trace_file;i++)trace_file=fopen(paths[i],"a");
+    if(trace_file){setvbuf(trace_file,NULL,_IOLBF,0);fprintf(trace_file,"--- open ---\n");}
+}
+static void ping(unsigned long long tag)
+{
+    if(!connection)return;
+    struct sweet_gpu_ping p={tag,0};size_t n=sizeof(p);
+    IOConnectCallStructMethod(connection,SWEET_GPU_PING,&p,sizeof(p),&p,&n);
+}
+static void tr(const char *fmt,...)
 {
     static unsigned n;
-    if(trace_on&&n++<400)fprintf(stderr,"SWEET TRACE %s %ld %ld\n",what,a,b);
+    if(!trace_on||n++>4000)return;
+    if(!trace_file)tr_open();
+    char line[160];va_list ap;va_start(ap,fmt);
+    vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
+    if(trace_file){fprintf(trace_file,"%s\n",line);fflush(trace_file);}
 }
 static int call(unsigned selector,void *r,size_t size)
 {
@@ -122,7 +142,9 @@ static int pend_wait_head(void)
     if(!pend_count)return 0;
     struct pending *p=&pend[pend_head];
     struct sweet_gpu_wait w={.group=p->group,.sequence=p->sequence,.insert=p->insert,.timeout_ms=5000};
-    if(call(SWEET_GPU_WAIT,&w,sizeof(w)))return -1;
+    tr("wait seq=%u begin",(unsigned)p->sequence);
+    if(call(SWEET_GPU_WAIT,&w,sizeof(w))){tr("wait seq=%u failed %d",(unsigned)p->sequence,errno);return -1;}
+    tr("wait seq=%u done",(unsigned)p->sequence);
     for(unsigned i=0;i<p->count;i++) {
         if(p->point[i]>syncs[p->handle[i]].point)syncs[p->handle[i]].point=p->point[i];
         syncs[p->handle[i]].signalled=1;
@@ -144,11 +166,30 @@ static void resolve(uint32_t handle)
 {
     if(!handle||handle>=OBJECTS||!fwd[handle].src)return;
     uint32_t src=fwd[handle].src;uint64_t point=fwd[handle].point,value=fwd[handle].value;
-    if(pend_drain(src))return;
-    if(signalled(src,point)) {
-        if(value>syncs[handle].point)syncs[handle].point=value;
-        syncs[handle].signalled=1;fwd[handle].src=0;
+    if(!signalled(src,point))return;
+    if(value>syncs[handle].point)syncs[handle].point=value;
+    syncs[handle].signalled=1;fwd[handle].src=0;
+}
+/* Wait until handle is signalled at point, following one forwarding hop.
+ * Draining only while the *requested* point is unreached: an older, already
+ * signalled point on the same handle must not end the wait. */
+static int fence_wait(uint32_t handle,uint64_t point)
+{
+    if(!async_submit)return 0;
+    for(unsigned k=0;k<4096;k++) {
+        resolve(handle);
+        if(signalled(handle,point))return 0;
+        if(fwd[handle].src) {
+            if(pend_drain(fwd[handle].src))return -1;
+            resolve(handle);
+            if(signalled(handle,point))return 0;
+            if(!pend_count)return 0;
+            continue;
+        }
+        if(!pend_count)return 0;
+        if(pend_wait_head())return -1;
     }
+    return 0;
 }
 static int pend_drain_all(void)
 {
@@ -159,14 +200,9 @@ static int pend_drain_all(void)
  * in-order per group, so everything ahead of it has to be waited for too. */
 static int pend_drain(uint32_t handle)
 {
-    if(!async_submit||!pend_count||signalled(handle,0))return 0;
-    unsigned guard=pend_count;
-    while(pend_count&&guard--) {
-        unsigned hit=0;
-        for(unsigned i=0;i<pend[pend_head].count;i++)if(pend[pend_head].handle[i]==handle)hit=1;
-        if(pend_wait_head())return -1;
-        if(hit)return 0;
-    }
+    if(!async_submit)return 0;
+    unsigned guard=pend_count+1;
+    while(pend_count&&!signalled(handle,0)&&guard--)if(pend_wait_head())return -1;
     return 0;
 }
 static int sync_ops(struct drm_panthor_obj_array a,int signal)
@@ -179,7 +215,7 @@ static int sync_ops(struct drm_panthor_obj_array a,int signal)
         if(!s->handle||s->handle>=OBJECTS||!syncs[s->handle].used||(s->flags&0x7ffffffeu))return error(EINVAL);
         uint64_t point=(s->flags&1)?s->timeline_value:0;
         if(signal){if(point>syncs[s->handle].point)syncs[s->handle].point=point;syncs[s->handle].signalled=1;}
-        else {resolve(s->handle);if(pend_drain(s->handle))return -1;if(!signalled(s->handle,point))return error(ETIME);}
+        else {if(fence_wait(s->handle,point))return -1;if(!signalled(s->handle,point))return error(ETIME);}
     }
     if(signal)pthread_cond_broadcast(&changed);return 0;
 }
@@ -187,7 +223,7 @@ static void *map_bo(uint32_t handle,uint64_t bytes)
 {
     if(!handle||handle>=OBJECTS)return MAP_FAILED;
     if(maps[handle].address){maps[handle].refs++;return (void *)(uintptr_t)maps[handle].address;}
-    tr("map",(long)handle,(long)bytes);
+    tr("map bo=%u bytes=%llu",handle,(unsigned long long)bytes);ping(4);
     /* A CPU mapping may read memory the GPU is still writing. */
     if(pend_drain_all())return MAP_FAILED;
     mach_vm_address_t address=0;mach_vm_size_t size=bytes;
@@ -299,9 +335,12 @@ static int ioctl_locked(unsigned long request,void *arg)
             if(q->queue_index||sync_ops(q->syncs,0))return error(EINVAL);
             struct sweet_gpu_submit s={r->group_handle,q->stream_size,q->stream_addr,0};
             if(q->stream_size&&async_submit) {
+                tr("submit group=%u bytes=%u",r->group_handle,q->stream_size);
                 if(call(SWEET_GPU_SUBMIT_ASYNC,&s,sizeof(s))) {
+                    tr("submit failed rc=%d",errno);
                     if(pend_drain_all()||call(SWEET_GPU_SUBMIT_ASYNC,&s,sizeof(s))){failed=1;return -1;}
                 }
+                ping(1000+(unsigned long long)s.sequence);
                 pend_push(r->group_handle,(uint32_t)s.sequence,0,&q->syncs);
                 continue;
             }
@@ -333,9 +372,9 @@ static int ioctl_locked(unsigned long request,void *arg)
 }
 int drmIoctl(int fd,unsigned long request,void *arg)
 {
-    (void)fd;tr("ioctl",(long)(request&0xff),0);
+    (void)fd;tr("ioctl %lx",request);
     pthread_mutex_lock(&lock);int rc=ioctl_locked(request,arg);pthread_mutex_unlock(&lock);
-    tr("ioctl-ret",(long)(request&0xff),rc);return rc;
+    tr("  ret %lx %d",request,rc);return rc;
 }
 int drmCommandWrite(int fd,unsigned long index,const void *data,unsigned long size)
 {(void)fd;(void)index;(void)data;(void)size;return error(ENOTSUP);}
@@ -368,11 +407,12 @@ int drmSyncobjReset(int fd,const uint32_t *h,uint32_t n)
 }
 int drmSyncobjTimelineWait(int fd,uint32_t *h,uint64_t *points,unsigned n,int64_t timeout,unsigned flags,uint32_t *first)
 {
-    (void)fd;if(!n)return error(EINVAL);tr("sync-wait",(long)h[0],(long)points[0]);pthread_mutex_lock(&lock);
+    (void)fd;if(!n)return error(EINVAL);tr("sync-wait h=%u p=%llu",h[0],(unsigned long long)(points?points[0]:0));ping(3);pthread_mutex_lock(&lock);
     /* WAIT_AVAILABLE asks whether the fence exists, not whether it completed:
      * the transport attaches it at submit time, so it always does. */
     if(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE){pthread_mutex_unlock(&lock);return 0;}
-    for(unsigned i=0;i<n;i++){resolve(h[i]);if(pend_drain(h[i])){pthread_mutex_unlock(&lock);return -1;}}
+    for(unsigned i=0;i<n;i++)
+        if(fence_wait(h[i],points?points[i]:0)){pthread_mutex_unlock(&lock);return -1;}
     for(;;) {
         unsigned done=0;
         for(unsigned i=0;i<n;i++)if(signalled(h[i],points?points[i]:0)) {
@@ -391,9 +431,9 @@ int drmSyncobjWait(int fd,uint32_t *h,unsigned n,int64_t timeout,unsigned flags,
 {return drmSyncobjTimelineWait(fd,h,NULL,n,timeout,flags,first);}
 int drmSyncobjTransfer(int fd,uint32_t dst,uint64_t dp,uint32_t src,uint64_t sp,uint32_t flags)
 {
-    (void)fd;(void)flags;tr("transfer",(long)src,(long)sp);pthread_mutex_lock(&lock);
+    (void)fd;(void)flags;tr("transfer src=%u sp=%llu dst=%u",src,(unsigned long long)sp,dst);ping(2);pthread_mutex_lock(&lock);
     if(!dst||dst>=OBJECTS||!syncs[dst].used||!src||src>=OBJECTS){pthread_mutex_unlock(&lock);return error(EINVAL);}
-    resolve(src);if(pend_drain(src)){pthread_mutex_unlock(&lock);return -1;}
+    if(fence_wait(src,sp)){pthread_mutex_unlock(&lock);return -1;}
     if(signalled(src,sp)) {
         if(dp>syncs[dst].point)syncs[dst].point=dp;syncs[dst].signalled=1;fwd[dst].src=0;
     } else if(pend_contains(src)||fwd[src].src) {

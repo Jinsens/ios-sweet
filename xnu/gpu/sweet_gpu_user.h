@@ -11,7 +11,9 @@ enum {
     /* 24/25: split submission for CPU/GPU overlap. SUBMIT keeps its
      * synchronous contract; SUBMIT_ASYNC returns after the doorbell and WAIT
      * polls the fence that enqueue already wrote. */
-    SWEET_GPU_SUBMIT_ASYNC, SWEET_GPU_WAIT
+    SWEET_GPU_SUBMIT_ASYNC, SWEET_GPU_WAIT,
+    /* 26: bring-up marker, logs a tag so a userland stall can be localised. */
+    SWEET_GPU_PING
 };
 struct sweet_gpu_info { uint32_t version, gpu[26], cs[6]; };
 struct sweet_gpu_bo { uint64_t size; uint32_t handle, flags; };
@@ -22,6 +24,7 @@ struct sweet_gpu_submit { uint32_t group, bytes; uint64_t stream, sequence; };
 /* sequence is the value returned by SUBMIT_ASYNC; insert=0 accepts any
  * extract pointer (the fence alone proves the stream was consumed). */
 struct sweet_gpu_wait { uint32_t group, timeout_ms; uint64_t sequence; uint32_t insert, pad; };
+struct sweet_gpu_ping { uint64_t tag, value; };
 struct sweet_gpu_surface {
     /* handle=0: query layout only; UINT32_MAX: import/reuse backing BO. */
     uint32_t surface, handle;

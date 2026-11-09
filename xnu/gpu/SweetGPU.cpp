@@ -110,7 +110,11 @@ IOReturn SweetGPUUserClient::clientClose(void){terminate();return kIOReturnSucce
 IOReturn SweetGPUUserClient::externalMethod(uint32_t selector,IOExternalMethodArguments *a,
     IOExternalMethodDispatch *,OSObject *,void *)
 {
-    if(selector>=SWEET_GPU_INFO&&selector<=SWEET_GPU_WAIT) {
+    {   /* bring-up: which call arrives, and in what order */
+        static unsigned calls;
+        if(calls<200) { calls++; IOLog("SWEET GPU: method %u\n",selector); }
+    }
+    if(selector>=SWEET_GPU_INFO&&selector<=SWEET_GPU_PING) {
         if(!vm||!a||a->scalarInputCount||a->structureInputDescriptor||a->structureOutputDescriptor)
             return kIOReturnBadArgument;
         if(selector==SWEET_GPU_INFO) {
@@ -127,10 +131,11 @@ IOReturn SweetGPUUserClient::externalMethod(uint32_t selector,IOExternalMethodAr
             IOLockUnlock(gpu_lock);
             memcpy(a->structureOutput,&info,sizeof(info));a->structureOutputSize=sizeof(info);return kIOReturnSuccess;
         }
-        union {sweet_gpu_bo bo;sweet_gpu_map map;sweet_gpu_group group;sweet_gpu_submit submit;sweet_gpu_surface surface;sweet_gpu_wait wait;} r;
+        union {sweet_gpu_bo bo;sweet_gpu_map map;sweet_gpu_group group;sweet_gpu_submit submit;sweet_gpu_surface surface;sweet_gpu_wait wait;sweet_gpu_ping ping;} r;
         size_t size=selector==SWEET_GPU_SURFACE?sizeof(r.surface):selector==SWEET_GPU_VM_MAP?sizeof(r.map):
             (selector==SWEET_GPU_SUBMIT||selector==SWEET_GPU_SUBMIT_ASYNC)?sizeof(r.submit):
-            selector==SWEET_GPU_WAIT?sizeof(r.wait):(selector==SWEET_GPU_BO_CREATE?sizeof(r.bo):sizeof(r.group));
+            selector==SWEET_GPU_WAIT?sizeof(r.wait):selector==SWEET_GPU_PING?sizeof(r.ping):
+            (selector==SWEET_GPU_BO_CREATE?sizeof(r.bo):sizeof(r.group));
         if(!a->structureInput||a->structureInputSize!=size||!a->structureOutput||a->structureOutputSize<size)
             return kIOReturnBadArgument;
         memcpy(&r,a->structureInput,size);IOLockLock(gpu_lock);
@@ -148,6 +153,7 @@ IOReturn SweetGPUUserClient::externalMethod(uint32_t selector,IOExternalMethodAr
              * calls are allowed to make progress while the GPU finishes. */
             IOLockUnlock(gpu_lock);rc=gpu_wait(vm,&r.wait);IOLockLock(gpu_lock);break;
         case SWEET_GPU_SURFACE:rc=gpu_surface(vm,&r.surface);break;
+        case SWEET_GPU_PING:IOLog("SWEET GPU: ping %llu\n",(unsigned long long)r.ping.tag);rc=kIOReturnSuccess;break;
         }
         memcpy(a->structureOutput,&r,size);a->structureOutputSize=size;IOLockUnlock(gpu_lock);return rc;
     }
