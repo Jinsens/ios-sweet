@@ -114,7 +114,7 @@ int sweet_csf_runtime_start(const struct sweet_csf_queue_config *c,const struct 
     }
     return 0;
 }
-int sweet_csf_runtime_submit(const struct sweet_csf_queue_config *c,const struct sweet_gpu_io *io,
+int sweet_csf_runtime_enqueue(const struct sweet_csf_queue_config *c,const struct sweet_gpu_io *io,
     struct sweet_csf_runtime_group *g,uint64_t stream,uint32_t bytes,struct sweet_csf_queue_report *r)
 {
     if(!r)return -60;
@@ -142,8 +142,19 @@ int sweet_csf_runtime_submit(const struct sweet_csf_queue_config *c,const struct
      * need the user doorbell selected in CS_CONFIG, as in Panthor's
      * queue_submit: an unchanged CS_REQ does not wake an idle stream. */
     write32(io,c->gpu+0x80000+(uint64_t)(g->slot+1)*0x10000,1);
-    r->stage=4;
-    uint64_t start=io->ticks(io->context),budget=io->frequency*c->timeout_ms/1000;
+    r->stage=4;r->error=0;
+    return 0;
+}
+/* Wait for a fence value already enqueued. The caller must serialise the
+ * group; the fence is monotonic, so an older sequence may be waited for after
+ * newer work was queued without comparing against the newest extract. */
+int sweet_csf_runtime_wait(const struct sweet_csf_queue_config *c,const struct sweet_gpu_io *io,
+    struct sweet_csf_runtime_group *g,uint32_t sequence,uint32_t expected_insert,
+    uint32_t timeout_ms,struct sweet_csf_queue_report *r)
+{
+    if(!r)return -60;
+    if(!valid(c,io)||!g||!g->active||g->failed||!sequence){r->error=-60;return -60;}
+    uint64_t start=io->ticks(io->context),budget=io->frequency*timeout_ms/1000;
     r->error=-63;
     for(unsigned i=0;i<10000000;i++) {
         io->barrier(io->context);r->polls++;
@@ -158,13 +169,21 @@ int sweet_csf_runtime_submit(const struct sweet_csf_queue_config *c,const struct
         if(r->fault||r->fatal||(r->mmu_raw&0xffff)||r->as_fault||read32(io,g->memory_pa+0x3004)) {
             r->error=-64;break;
         }
-        if(r->after==seq&&extract==g->insert) {
+        if(r->after>=sequence&&(!expected_insert||extract>=expected_insert)) {
             r->stage=7;r->error=0;break;
         }
         if(io->ticks(io->context)-start>=budget)break;
     }
     if(r->error)g->failed=1;
     return r->error;
+}
+int sweet_csf_runtime_submit(const struct sweet_csf_queue_config *c,const struct sweet_gpu_io *io,
+    struct sweet_csf_runtime_group *g,uint64_t stream,uint32_t bytes,struct sweet_csf_queue_report *r)
+{
+    int rc=sweet_csf_runtime_enqueue(c,io,g,stream,bytes,r);
+    if(rc)return rc;
+    uint32_t seq=g->sequence,insert=(uint32_t)g->insert;
+    return sweet_csf_runtime_wait(c,io,g,seq,insert,c->timeout_ms,r);
 }
 int sweet_csf_runtime_stop(const struct sweet_csf_queue_config *c,const struct sweet_gpu_io *io,
     struct sweet_csf_runtime_group *g)

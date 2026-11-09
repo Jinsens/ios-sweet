@@ -23,6 +23,15 @@ int sweet_csf_runtime_start(const struct sweet_csf_queue_config *,
 int sweet_csf_runtime_submit(const struct sweet_csf_queue_config *,
     const struct sweet_gpu_io *, struct sweet_csf_runtime_group *,
     uint64_t stream, uint32_t bytes, struct sweet_csf_queue_report *);
+/* Split submission: enqueue returns once the doorbell is rung, wait polls the
+ * fence already written by enqueue. The caller serialises each group. */
+int sweet_csf_runtime_enqueue(const struct sweet_csf_queue_config *,
+    const struct sweet_gpu_io *, struct sweet_csf_runtime_group *,
+    uint64_t stream, uint32_t bytes, struct sweet_csf_queue_report *);
+int sweet_csf_runtime_wait(const struct sweet_csf_queue_config *,
+    const struct sweet_gpu_io *, struct sweet_csf_runtime_group *,
+    uint32_t sequence, uint32_t expected_insert, uint32_t timeout_ms,
+    struct sweet_csf_queue_report *);
 int sweet_csf_runtime_stop(const struct sweet_csf_queue_config *,
     const struct sweet_gpu_io *, struct sweet_csf_runtime_group *);
 #endif

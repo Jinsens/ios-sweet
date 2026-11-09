@@ -250,6 +250,38 @@ static IOReturn gpu_submit(GPUVM *v,struct sweet_gpu_submit *r)
             last_report.as_fault,last_report.before,last_report.after);
     return rc?kIOReturnIOError:kIOReturnSuccess;
 }
+static IOReturn gpu_submit_async(GPUVM *v,struct sweet_gpu_submit *r)
+{
+    if(v->broken||!r->group||r->group>SWEET_CSF_GROUPS)return kIOReturnNotReady;
+    bool found=false;
+    for(unsigned i=0;i<GPU_MAX_BO;i++) {
+        GPUBuffer *b=&v->bo[i];
+        if(b->memory&&r->stream>=b->va&&r->bytes<=b->mapped&&
+           r->stream-b->va<=b->mapped-r->bytes){found=true;break;}
+    }
+    if(!found)return kIOReturnBadArgument;
+    int rc=sweet_csf_runtime_enqueue(&queue,&gpu_io,&v->groups[r->group-1],r->stream,r->bytes,&last_report);
+    submits++;
+    if(rc){v->broken=true;failures++;}
+    r->sequence=v->groups[r->group-1].sequence;
+    if(rc||r->sequence<=3||(r->sequence%100)==0)
+        IOLog("SWEET GPU: CSF enqueue as=%u group=%u seq=%llu rc=%d insert=%u\n",
+            v->as_nr,r->group,r->sequence,rc,last_report.insert);
+    return rc?kIOReturnIOError:kIOReturnSuccess;
+}
+static IOReturn gpu_wait(GPUVM *v,struct sweet_gpu_wait *w)
+{
+    if(v->broken||!w->group||w->group>SWEET_CSF_GROUPS)return kIOReturnNotReady;
+    struct sweet_csf_runtime_group *g=&v->groups[w->group-1];
+    if(!g->active)return kIOReturnNotReady;
+    int rc=sweet_csf_runtime_wait(&queue,&gpu_io,g,(uint32_t)w->sequence,w->insert,
+        w->timeout_ms?w->timeout_ms:queue.timeout_ms,&last_report);
+    if(rc)
+        IOLog("SWEET GPU: CSF wait as=%u group=%u seq=%llu rc=%d extract=%u/%u fault=%x fatal=%x\n",
+            v->as_nr,w->group,(unsigned long long)w->sequence,rc,last_report.extract,last_report.insert,
+            last_report.fault,last_report.fatal);
+    return rc==-63?kIOReturnTimeout:rc?kIOReturnIOError:kIOReturnSuccess;
+}
 static void gpu_vm_destroy(GPUVM *v)
 {
     if(!v)return;

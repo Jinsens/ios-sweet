@@ -110,7 +110,7 @@ IOReturn SweetGPUUserClient::clientClose(void){terminate();return kIOReturnSucce
 IOReturn SweetGPUUserClient::externalMethod(uint32_t selector,IOExternalMethodArguments *a,
     IOExternalMethodDispatch *,OSObject *,void *)
 {
-    if(selector>=SWEET_GPU_INFO&&selector<=SWEET_GPU_SURFACE) {
+    if(selector>=SWEET_GPU_INFO&&selector<=SWEET_GPU_WAIT) {
         if(!vm||!a||a->scalarInputCount||a->structureInputDescriptor||a->structureOutputDescriptor)
             return kIOReturnBadArgument;
         if(selector==SWEET_GPU_INFO) {
@@ -127,9 +127,10 @@ IOReturn SweetGPUUserClient::externalMethod(uint32_t selector,IOExternalMethodAr
             IOLockUnlock(gpu_lock);
             memcpy(a->structureOutput,&info,sizeof(info));a->structureOutputSize=sizeof(info);return kIOReturnSuccess;
         }
-        union {sweet_gpu_bo bo;sweet_gpu_map map;sweet_gpu_group group;sweet_gpu_submit submit;sweet_gpu_surface surface;} r;
-        size_t size=selector==SWEET_GPU_SURFACE?sizeof(r.surface):selector==SWEET_GPU_VM_MAP?sizeof(r.map):selector==SWEET_GPU_SUBMIT?sizeof(r.submit):
-            (selector==SWEET_GPU_BO_CREATE?sizeof(r.bo):sizeof(r.group));
+        union {sweet_gpu_bo bo;sweet_gpu_map map;sweet_gpu_group group;sweet_gpu_submit submit;sweet_gpu_surface surface;sweet_gpu_wait wait;} r;
+        size_t size=selector==SWEET_GPU_SURFACE?sizeof(r.surface):selector==SWEET_GPU_VM_MAP?sizeof(r.map):
+            (selector==SWEET_GPU_SUBMIT||selector==SWEET_GPU_SUBMIT_ASYNC)?sizeof(r.submit):
+            selector==SWEET_GPU_WAIT?sizeof(r.wait):(selector==SWEET_GPU_BO_CREATE?sizeof(r.bo):sizeof(r.group));
         if(!a->structureInput||a->structureInputSize!=size||!a->structureOutput||a->structureOutputSize<size)
             return kIOReturnBadArgument;
         memcpy(&r,a->structureInput,size);IOLockLock(gpu_lock);
@@ -141,6 +142,11 @@ IOReturn SweetGPUUserClient::externalMethod(uint32_t selector,IOExternalMethodAr
         case SWEET_GPU_GROUP_CREATE:rc=gpu_group_create(vm,&r.group);break;
         case SWEET_GPU_GROUP_CLOSE:rc=gpu_group_close(vm,r.group.handle);break;
         case SWEET_GPU_SUBMIT:rc=gpu_submit(vm,&r.submit);break;
+        case SWEET_GPU_SUBMIT_ASYNC:rc=gpu_submit_async(vm,&r.submit);break;
+        case SWEET_GPU_WAIT:
+            /* The poll must not hold gpu_lock: other clients' BO and surface
+             * calls are allowed to make progress while the GPU finishes. */
+            IOLockUnlock(gpu_lock);rc=gpu_wait(vm,&r.wait);IOLockLock(gpu_lock);break;
         case SWEET_GPU_SURFACE:rc=gpu_surface(vm,&r.surface);break;
         }
         memcpy(a->structureOutput,&r,size);a->structureOutputSize=size;IOLockUnlock(gpu_lock);return rc;
