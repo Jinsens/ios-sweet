@@ -37,9 +37,22 @@ synchronous SweetGPU submit (sweet_csf_runtime_submit polls for completion on
 every submit, ~18 submits/frame) plus the18MB blit. Do not ship glblit=0
 without a pacing fix.
 
-Next: choose between async submit (kernel ABI: submit returns, separate wait;
-fixes CPU/GPU serialization) and present-path investigation (why the swap
-counter is far below GL frames). Do not retry glblit=0 alone.
+2450 also proves the direct path is not a speed win: median5 draws and10
+triangles per logged frame versus40 draws/134 triangles in2449. Most of its
+2939 frames drew almost nothing, so its "56fps" was empty frames, not UI.
+Confirmed: keep the blit.
+
+The serialization is structural: SweetGPU's user client holds gpu_lock while
+gpu_submit() polls sweet_csf_runtime_submit() to completion. Every submit
+therefore blocks all GPU clients for a whole batch (~18 submits/frame), and
+the CPU cannot prepare the next frame. 60fps needs an async submit with a
+separate wait, not another renderer switch.
+
+Next: kernel submit returns after enqueue; add a WAIT selector; transport
+waits at its existing fence/readback points; bridge keeps the blit and waits
+at frame end. Budget check: the18MB blit alone is10.8ms of the16.7ms frame,
+so async overlap alone may top out near40-50fps; cutting the blit cost is
+also required for a stable60.
 
 ## >>> PREVIOUS 2026-11-09: 2448 SHARED PIXELS VERIFIED; 2449 UI IMAGE READY <<<
 
