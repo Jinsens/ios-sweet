@@ -157,6 +157,11 @@ int sweet_csf_runtime_wait(const struct sweet_csf_queue_config *c,const struct s
     uint64_t start=io->ticks(io->context),budget=io->frequency*timeout_ms/1000;
     r->error=-63;
     for(unsigned i=0;i<10000000;i++) {
+        /* A doorbell rung while the firmware was busy can be dropped; ring it
+         * again early and a few more times rather than waiting on a fence the
+         * firmware never saw. The write is idempotent. */
+        if(i==2000||i==20000||i==200000)
+            write32(io,c->gpu+0x80000+(uint64_t)(g->slot+1)*0x10000,1);
         io->barrier(io->context);r->polls++;
         r->csg_req=read32(io,g->input);r->csg_ack=read32(io,g->output);
         r->cs_req=read32(io,g->cs_input);r->cs_ack=read32(io,g->cs_output);
@@ -174,7 +179,9 @@ int sweet_csf_runtime_wait(const struct sweet_csf_queue_config *c,const struct s
         }
         if(io->ticks(io->context)-start>=budget)break;
     }
-    if(r->error)g->failed=1;
+    /* A timeout means the fence did not arrive in time; only a reported fault
+     * proves the group unusable. Keeping the group lets the caller retry. */
+    if(r->error==-64)g->failed=1;
     return r->error;
 }
 int sweet_csf_runtime_submit(const struct sweet_csf_queue_config *c,const struct sweet_gpu_io *io,

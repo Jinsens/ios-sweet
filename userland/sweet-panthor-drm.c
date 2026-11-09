@@ -42,7 +42,20 @@ struct pending {uint32_t group,sequence,insert,count,handle[PEND_HANDLES];uint64
 static struct pending pend[PEND];
 static unsigned pend_head,pend_tail,pend_count;
 static int async_submit;
+/* SYNCOBJ_TRANSFER copies a fence, it does not wait for it. An unsignalled
+ * transfer records the source point here; the destination becomes signalled
+ * when that source point is reached. */
+struct forwarded {uint32_t src;uint64_t point,value;};
+static struct forwarded fwd[OBJECTS];
 static int error(int e){errno=e;return -1;}
+/* Temporary bring-up trace: the probe is PID 1, so a lost frame leaves no
+ * other evidence than the last call it entered. */
+static int trace_on;
+static void tr(const char *what,long a,long b)
+{
+    static unsigned n;
+    if(trace_on&&n++<400)fprintf(stderr,"SWEET TRACE %s %ld %ld\n",what,a,b);
+}
 static int call(unsigned selector,void *r,size_t size)
 {
     size_t returned=size;
@@ -72,6 +85,7 @@ int drmOpenWithType(const char *name,const char *busid,int type)
         char arguments[1024];size_t asize=sizeof(arguments);
         if(!sysctlbyname("kern.bootargs",arguments,&asize,NULL,0))
             async_submit=strstr(arguments,"gpuasync=1")!=NULL;
+        trace_on=async_submit;
         fprintf(stderr,"SweetGPU Panthor: GPU=%08x regs=%u scoreboards=%u%s\n",info.gpu[0],info.cs[2],info.cs[3],
             async_submit?" async":" sync");
     }
@@ -117,6 +131,25 @@ static int pend_wait_head(void)
     pthread_cond_broadcast(&changed);
     return 0;
 }
+static int pend_drain(uint32_t handle);
+static int pend_contains(uint32_t handle)
+{
+    for(unsigned n=0;n<pend_count;n++) {
+        struct pending *p=&pend[(pend_head+n)%PEND];
+        for(unsigned i=0;i<p->count;i++)if(p->handle[i]==handle)return 1;
+    }
+    return 0;
+}
+static void resolve(uint32_t handle)
+{
+    if(!handle||handle>=OBJECTS||!fwd[handle].src)return;
+    uint32_t src=fwd[handle].src;uint64_t point=fwd[handle].point,value=fwd[handle].value;
+    if(pend_drain(src))return;
+    if(signalled(src,point)) {
+        if(value>syncs[handle].point)syncs[handle].point=value;
+        syncs[handle].signalled=1;fwd[handle].src=0;
+    }
+}
 static int pend_drain_all(void)
 {
     while(pend_count)if(pend_wait_head())return -1;
@@ -146,7 +179,7 @@ static int sync_ops(struct drm_panthor_obj_array a,int signal)
         if(!s->handle||s->handle>=OBJECTS||!syncs[s->handle].used||(s->flags&0x7ffffffeu))return error(EINVAL);
         uint64_t point=(s->flags&1)?s->timeline_value:0;
         if(signal){if(point>syncs[s->handle].point)syncs[s->handle].point=point;syncs[s->handle].signalled=1;}
-        else {if(pend_drain(s->handle))return -1;if(!signalled(s->handle,point))return error(ETIME);}
+        else {resolve(s->handle);if(pend_drain(s->handle))return -1;if(!signalled(s->handle,point))return error(ETIME);}
     }
     if(signal)pthread_cond_broadcast(&changed);return 0;
 }
@@ -154,6 +187,7 @@ static void *map_bo(uint32_t handle,uint64_t bytes)
 {
     if(!handle||handle>=OBJECTS)return MAP_FAILED;
     if(maps[handle].address){maps[handle].refs++;return (void *)(uintptr_t)maps[handle].address;}
+    tr("map",(long)handle,(long)bytes);
     /* A CPU mapping may read memory the GPU is still writing. */
     if(pend_drain_all())return MAP_FAILED;
     mach_vm_address_t address=0;mach_vm_size_t size=bytes;
@@ -298,7 +332,11 @@ static int ioctl_locked(unsigned long request,void *arg)
     fprintf(stderr,"SweetGPU unsupported DRM request=%lx\n",request);return error(ENOTSUP);
 }
 int drmIoctl(int fd,unsigned long request,void *arg)
-{(void)fd;pthread_mutex_lock(&lock);int rc=ioctl_locked(request,arg);pthread_mutex_unlock(&lock);return rc;}
+{
+    (void)fd;tr("ioctl",(long)(request&0xff),0);
+    pthread_mutex_lock(&lock);int rc=ioctl_locked(request,arg);pthread_mutex_unlock(&lock);
+    tr("ioctl-ret",(long)(request&0xff),rc);return rc;
+}
 int drmCommandWrite(int fd,unsigned long index,const void *data,unsigned long size)
 {(void)fd;(void)index;(void)data;(void)size;return error(ENOTSUP);}
 int drmCommandWriteRead(int fd,unsigned long index,void *data,unsigned long size)
@@ -330,11 +368,11 @@ int drmSyncobjReset(int fd,const uint32_t *h,uint32_t n)
 }
 int drmSyncobjTimelineWait(int fd,uint32_t *h,uint64_t *points,unsigned n,int64_t timeout,unsigned flags,uint32_t *first)
 {
-    (void)fd;if(!n)return error(EINVAL);pthread_mutex_lock(&lock);
+    (void)fd;if(!n)return error(EINVAL);tr("sync-wait",(long)h[0],(long)points[0]);pthread_mutex_lock(&lock);
     /* WAIT_AVAILABLE asks whether the fence exists, not whether it completed:
      * the transport attaches it at submit time, so it always does. */
     if(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE){pthread_mutex_unlock(&lock);return 0;}
-    for(unsigned i=0;i<n;i++)if(pend_drain(h[i])){pthread_mutex_unlock(&lock);return -1;}
+    for(unsigned i=0;i<n;i++){resolve(h[i]);if(pend_drain(h[i])){pthread_mutex_unlock(&lock);return -1;}}
     for(;;) {
         unsigned done=0;
         for(unsigned i=0;i<n;i++)if(signalled(h[i],points?points[i]:0)) {
@@ -353,10 +391,15 @@ int drmSyncobjWait(int fd,uint32_t *h,unsigned n,int64_t timeout,unsigned flags,
 {return drmSyncobjTimelineWait(fd,h,NULL,n,timeout,flags,first);}
 int drmSyncobjTransfer(int fd,uint32_t dst,uint64_t dp,uint32_t src,uint64_t sp,uint32_t flags)
 {
-    (void)fd;(void)flags;pthread_mutex_lock(&lock);
-    if(pend_drain(src)){pthread_mutex_unlock(&lock);return -1;}
-    if(!signalled(src,sp)||!dst||dst>=OBJECTS||!syncs[dst].used){pthread_mutex_unlock(&lock);return error(EINVAL);}
-    if(dp>syncs[dst].point)syncs[dst].point=dp;syncs[dst].signalled=1;
+    (void)fd;(void)flags;tr("transfer",(long)src,(long)sp);pthread_mutex_lock(&lock);
+    if(!dst||dst>=OBJECTS||!syncs[dst].used||!src||src>=OBJECTS){pthread_mutex_unlock(&lock);return error(EINVAL);}
+    resolve(src);if(pend_drain(src)){pthread_mutex_unlock(&lock);return -1;}
+    if(signalled(src,sp)) {
+        if(dp>syncs[dst].point)syncs[dst].point=dp;syncs[dst].signalled=1;fwd[dst].src=0;
+    } else if(pend_contains(src)||fwd[src].src) {
+        /* The fence exists but has not completed: carry the dependency. */
+        fwd[dst]=(struct forwarded){src,sp,dp};syncs[dst].signalled=0;
+    } else {pthread_mutex_unlock(&lock);return error(EINVAL);}
     pthread_cond_broadcast(&changed);pthread_mutex_unlock(&lock);return 0;
 }
 /* Shared IOSurface and cross-process fences are a separate transport; never

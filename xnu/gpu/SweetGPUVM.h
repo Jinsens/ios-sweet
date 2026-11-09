@@ -276,10 +276,13 @@ static IOReturn gpu_wait(GPUVM *v,struct sweet_gpu_wait *w)
     if(!g->active)return kIOReturnNotReady;
     int rc=sweet_csf_runtime_wait(&queue,&gpu_io,g,(uint32_t)w->sequence,w->insert,
         w->timeout_ms?w->timeout_ms:queue.timeout_ms,&last_report);
-    if(rc)
-        IOLog("SWEET GPU: CSF wait as=%u group=%u seq=%llu rc=%d extract=%u/%u fault=%x fatal=%x\n",
-            v->as_nr,w->group,(unsigned long long)w->sequence,rc,last_report.extract,last_report.insert,
-            last_report.fault,last_report.fatal);
+    static unsigned waits_logged;
+    if(rc||waits_logged<8) {
+        if(!rc)waits_logged++;
+        IOLog("SWEET GPU: CSF wait as=%u group=%u seq=%llu rc=%d after=%u extract=%u polls=%u fault=%x fatal=%x\n",
+            v->as_nr,w->group,(unsigned long long)w->sequence,rc,last_report.after,last_report.extract,
+            last_report.polls,last_report.fault,last_report.fatal);
+    }
     return rc==-63?kIOReturnTimeout:rc?kIOReturnIOError:kIOReturnSuccess;
 }
 static void gpu_vm_destroy(GPUVM *v)
