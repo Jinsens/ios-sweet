@@ -1,11 +1,60 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-10: FRAME COST 49->37 ms; 15.3->20-22 fps; NEXT IS THE PER-FRAME IOMMU MAPPING <<<
+## >>> ACTIVE 2026-11-10: WALLPAPER CAUSE FOUND (NOT METAL); FRAME 49->37 ms, 15.3->20-22 fps <<<
+
+### The missing wallpaper is an assertion in PosterBoard, not the missing GPU
+
+The kernel now names the image a crash address belongs to (patch 0216,
+dyld_all_image_infos), and the device writes .ips reports to
+/private/var/mobile/Library/Logs/CrashReporter. Both agree:
+
+    CRASH PosterBoard image /System/Library/PrivateFrameworks/PosterBoard.framework/PosterBoard + 0x1d268
+    thread: BSXPCCnx:com.apple.posterboardservices.services
+    -[PBFPosterExtensionDataStore _stateLock_setupSwitcherConfigurationForFirstTime] + 2040
+
+Disassembled from the device's own dyld cache
+(/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld, 3.1 GB
+in 44 pieces; /tmp/dscopy is a writable copy ipsw can use):
+
+    0x1c1778178  adrp/ldr  "!_stateLock_switcherConfiguration"
+                 "Invalid condition not satisfying: %@"
+
+So it is an NSAssert failure, EXC_BREAKPOINT/brk, reached from
+prewarmWithCompletion: -> _stateLock_updateExtensions:... ->
+_stateLock_setupSwitcherConfigurationForFirstTime. The path is: fetch the
+poster configurations, find none, so create the default switcher
+configuration - and assert that one is not already there. It is.
+
+PosterBoard does NOT touch the GPU before dying: sweetiolog=PosterBoard shows
+only IODeviceTree:/product, /arm-io/disp0, an AppleCLCD match and
+AppleKeyStore, then the trap. There is no AGXAccelerator or IOAccelerator
+match. The earlier "wallpaper needs Metal" note was a hypothesis and this
+disproves it for this crash; Metal may still block rendering afterwards.
+
+State of the store on the device (live-root-gpu2473.dmg):
+/private/var/mobile/Library/Application Support/PRBPosterExtensionDataStore/59
+contains only empty Extensions/ and GalleryCache/, and
+Preferences/com.apple.PosterBoard.plist holds only locale and
+SnapshotsBuildVersion. So the non-nil _stateLock_switcherConfiguration is made
+during this launch, which points at _stateLock_updateExtensions: creating an
+empty one because it found no poster extension to register, not at a corrupt
+store on disk.
+
+Next, in order of cost:
+1. Find out whether any poster extension is registered with pkd/LS. lsd and pkd
+   do start (console shows "exec lsd/pkd") but say nothing. The bundles are on
+   the root (PhotosPosterProvider, CollectionsPoster, GradientPoster,
+   LegacyPoster, ...), so this is a registration question, not a missing file.
+2. If they are not registered, that is the same class of problem as widgets and
+   would explain a lot more than the wallpaper.
+3. Only then ask whether rendering a poster needs Metal.
+
+### Frame cost
 
 Build: DEVELOPER_DIR=/Users/xiaohuasheng/Downloads/Xcode.app/Contents/Developer
 tools/build-xnu-local.sh xnu/out/local kernel. The tree xnu/out/local is the
 built source (SweetSurface.cpp / SweetFramebuffer.cpp / sweet_matisse_dsi.c live
 only there, not in xnu/patches); xnu/gpu/* is tracked and must be copied into it.
-kernel2477=73782e9e, image 105cb7f9...6772, boot_a restored2931647a.
+kernel2482=5b3cbb3e, boot_a restored2931647a.
 
 What the frame was spending, measured on the device (2475 console):
 
@@ -43,24 +92,39 @@ So ~31-43% more frames, attach halved, present effectively free. `send` prints
 0/0 now by design: a transfer is only measured when the next one finds it still
 running, i.e. only the late ones.
 
-Do not claim 60 fps. The per-frame cost is still 37 ms and the compositor is
-saturated at that. What is left, in order of size:
+2480 measured the per-call cost of the GPU VM path (SWEET GPU lines, average
+over 200 calls), and the answer was not the one this file predicted:
 
-1. attach ~9.6 ms/frame. Allocation is cached now, so this is the work around
-   it: every frame brings a new surface id, so there is a new import, a new
-   VM_BIND of 18.4 MB (4600 PTEs) and an unmap, each ending in
-   sweet_csf_runtime_invalidate() = LOCK + INVALIDATE_ALL + UNLOCK on the AS,
-   each of which waits for the address space to go idle. That serialises the
-   CPU with the GPU once per frame. Next: stop invalidating a range that was
-   never mapped, or keep the AS locked across a frame's map/unmap pair.
-2. GPU wait 2.5 ms/frame (glFinish) and 0.3 ms submitting; 80-95 draws a frame.
-3. The rest is CoreAnimation's own CPU work inside the frame, not GL calls.
+    map ptes      2674-3105 us  (max 11761)     <- the whole attach cost
+    unmap         1511-1876 us  (max  4408)
+    map flush        7 us       (max 31)        <- the AS invalidate, not it
+    bo close         0 us
+    surface import  15 us
 
-Also unresolved from 2474: 33-43 of ~210 surfaces per run are not shareable
-(size/format), so they are copied instead (14 in 2477); the widest texture
-varies between runs (1440x3200 vs 1832x3200), so runs are only comparable by
-work done, not by wall-clock fps. PosterBoard still traps, wallpaper still
-absent, icon/text correctness still needs the user's eyes.
+The address-space invalidation that was called the serialisation point costs
+7 us. The cost is the 4600 page-table entries one texture needs, and the reason
+they are slow is that page-table memory is mapped write-combined: reading an
+entry costs more than writing it, and the map path read every entry twice.
+2481 (table lookup by address) changed nothing: 3.3 ms. 2482 stopped reading:
+the occupancy probe walks the BO table, the write path writes blind. Map went
+2674-3339 -> 1511 us, and the busiest 10 s window 23.2 -> 24.6 fps with no
+surface import refused. unmap stayed at 1860 us because it never read anything;
+what is left on both paths is the write itself.
+
+Next for the frame, in order:
+1. 1511 + 1860 us a frame is 4600 uncached 8-byte stores twice. Either map the
+   page tables cacheable and clean them (dc civac) before the MMU walks them,
+   or use 2 MB block descriptors for the contiguous part of a BO. Both are in
+   gpu_new_table/gpu_map_run and both need a trial that checks for GPU faults,
+   so do them one at a time.
+2. GPU wait 2.5 ms/frame (glFinish), 0.3 ms submitting, 80-95 draws a frame.
+3. Then CoreAnimation's own CPU work inside the frame.
+
+The 33 "had to be copied" surfaces seen in 2476/2477 are a separate matter:
+2480 counted no import refusals at all, so those copies come from the userland
+side deciding not to share, not from the kernel refusing the import.
+Do not claim 60 fps. Runs are comparable by work done, not wall-clock fps: the
+widest texture varies (1440x3200 vs 1832x3200) and the tail of a run is idle.
 
 ## (superseded) 2026-11-09: ASYNC SUBMIT IN KERNEL+MESA; PROBE STALLS ON DEVICE <<<
 
