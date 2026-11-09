@@ -1,5 +1,5 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-10: WALLPAPER CAUSE FOUND (NOT METAL); FRAME 49->37 ms, 15.3->20-22 fps <<<
+## >>> ACTIVE 2026-11-10: NO APP EXTENSION IS REGISTERED (WALLPAPER+WIDGETS ARE ONE BUG); RENDERING IS GPU, NOT SOFTWARE; FRAME 49->37 ms, 15.3->24.6 fps <<<
 
 ### The missing wallpaper is an assertion in PosterBoard, not the missing GPU
 
@@ -39,14 +39,84 @@ during this launch, which points at _stateLock_updateExtensions: creating an
 empty one because it found no poster extension to register, not at a corrupt
 store on disk.
 
-Next, in order of cost:
-1. Find out whether any poster extension is registered with pkd/LS. lsd and pkd
-   do start (console shows "exec lsd/pkd") but say nothing. The bundles are on
-   the root (PhotosPosterProvider, CollectionsPoster, GradientPoster,
-   LegacyPoster, ...), so this is a registration question, not a missing file.
-2. If they are not registered, that is the same class of problem as widgets and
-   would explain a lot more than the wallpaper.
-3. Only then ask whether rendering a poster needs Metal.
+### ANSWERED: no app extension is registered at all - wallpaper and widgets are one bug
+
+Measured on the device root (live-root-gpu2473.dmg), not inferred:
+
+    /Applications/*.app                140 bundles, 140 in lsd's database
+    /Applications/**/*.appex           131 bundles,   2 in lsd's database
+    .../Containers/Data/PluginKitPlugin   1 container in the whole boot
+                                          (com.apple.AuthenticationServicesUI.
+                                           AccountAuthenticationModificationExtensionHelper)
+
+The database is
+/private/var/mobile/Containers/Data/InternalDaemon/B4392D64-.../Library/Caches/
+com.apple.LaunchServices-4035-v2.csstore (3.5 MB; a SystemDataOnly twin next to
+it holds the same). 140/140 app ids are in it and 2/131 extension ids are, so
+lsd registered the apps and almost no plugins. pkd is running (launchd.log:
+"Successfully spawned pkd[189] because ipc (mach)", no exit after it) and its
+container is empty: it never wrote a discovery result.
+
+Why each appex is dropped, from the device's own log store
+(/private/var/db/diagnostics/Persist/*.tracev3, strings only - this build's
+entries carry a shared-UUID the host log tool cannot decode):
+
+    "Appex bundle at %@ with id %@ ... NSExtensionPointIdentifier key in the
+     NSExtension dictionary in its Info.plist that does not correspond to a
+     known extension point."
+    +[MILaunchServicesDatabaseGatherer enumerateAppExtensionsInParentID:...]
+    -[MIPluginKitBundle overlaidInfoPlistWithError:]
+
+Disassembly of -[MIPluginKitBundle overlaidInfoPlistWithError:] (0x1b11d4acc,
+InstalledContentLibrary) shows the gate: it asks
+-[MIPluginKitBundle extensionPointOverlay] -> extensionCacheEntryWithError:
+(0x1b11d4134); when that is nil the gatherer logs the message above and skips
+the bundle. Extension points are LaunchServices records registered through
+_LSDModifyClient registerExtensionPoint:platform:declaringURL:withInfo:. Of the
+29 point identifiers used by /Applications extensions, 4 appear in the
+database; com.apple.posterkit.provider and com.apple.widgetkit-extension do not.
+
+So: no poster providers -> PosterBoard builds a default switcher configuration
+with zero of them and trips the assert above. Same for widgetkit-extension, so
+widgets are dead by the same cause. The wallpaper was never a Metal problem.
+
+Not yet answered: what should have registered those point records. Candidates,
+cheapest first:
+1. A cache/file the hand-built root does not have. /System/Library/ExtensionKit/
+   ExtensionPoints holds only 6 .appexpt bundles and the IPSW's system volume
+   has the same 6, so a stock device does not get them from there either; the
+   App cryptex (087-86715-047.dmg, mounted at /Volumes/AppCryptex) is Safari
+   only and has no .appexpt.
+2. A daemon that registers its own point at launch (PosterKit for
+   posterkit.provider, ChronoCore/chronod for widgetkit-extension) that is not
+   running here, or dies first.
+3. lsd's database itself being rebuilt in a way that never seeds the points.
+   Deleting the csstore and letting lsd rebuild is the cheap test, but the root
+   image lives on userdata (rd=ufsroot0), so it is an image write, not a
+   kernel one.
+
+### Software rendering: none, checked on the device (2483)
+
+2483 is 2482 with gltrace=200-260 gltrace_place=1, which makes the bridge
+describe every texture it fills from an IOSurface in those frames. Over 60
+frames and 1017 draws there is exactly one:
+
+    gl-at: frame 217: texture 603 filled from surface 239 (pixel format 0,
+    180 x 179, 720 bytes a row ...): 128880 bytes
+
+A 180x179 layer, not a frame. Everything else is the GPU: the context reports
+"OpenGL ES 3.1 Mesa 25.0.7; Mali-G710 (Panfrost)" (so Panfrost on the Mali, not
+llvmpipe), the varying-radius blur is a fragment shader (vblur_*), the frame
+line says "0 textures refilled from IOSurfaces (0 KB)" and "0 pictures copied
+out", and the panel path says "copies 0 copy 0 us" with presents in 17 us.
+Draws land in offscreen textures (CA renders layers to FBOs) and the composite
+is drawn straight into the surface the panel scans out.
+
+What does cost is the CPU side of the GL calls themselves: frame 220 during an
+animation is 1048 calls / 202 draws in 49717 us with 2353 us of it waiting for
+the GPU and 331 us handing commands on, i.e. ~45 us a call. That, not software
+rasterisation, is the next thing to look at (glslow=US names the calls, or
+compare 202 draws against the same scene with glcensus=1).
 
 ### Frame cost
 
