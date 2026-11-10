@@ -128,6 +128,17 @@ public:
 	uint64_t      fStatSamePhys;  /* ... the same memory under a new id */
 	uint32_t      fProbe;         /* sweetfbprobe: steps of the panel fetch test */
 	uint64_t      fStatCopyUs, fStatTried, fStatRefused, fStatPresentUs;
+	/* The display link is a schedule, not a chain of "sleep a frame":
+	 * each tick is due at a fixed absolute time, so the timer's own
+	 * lateness does not accumulate into the period. That lateness is
+	 * what made the vsync 17.6 ms instead of the panel's 16.667, and a
+	 * rate that is 5% off sweeps the moment the compositor presents
+	 * across the whole panel every second - the bar that flashes once
+	 * and goes. fVsyncUs is the panel's own frame; fPhaseUs shifts the
+	 * whole schedule once, to slide the presentation phase. */
+	uint64_t      fNextDue;
+	uint32_t      fVsyncUs;
+	int32_t       fPhaseUs;
 	int32_t       fStatReason;    /* why the last direct scanout was refused */
 
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -220,7 +231,12 @@ AppleCLCD::start(IOService *provider)
 	(void)PE_parse_boot_argn("sweetfb_teon", &sweet_disp_te_on, sizeof(sweet_disp_te_on));
 	(void)PE_parse_boot_argn("sweetfb_sline", &sweet_disp_sline, sizeof(sweet_disp_sline));
 	(void)PE_parse_boot_argn("sweetfb_teint", &sweet_disp_te_int, sizeof(sweet_disp_te_int));
+	(void)PE_parse_boot_argn("sweetfb_lead", &sweet_disp_lead_us, sizeof(sweet_disp_lead_us));
+	(void)PE_parse_boot_argn("sweetfb_hold_us", &sweet_disp_hold_us, sizeof(sweet_disp_hold_us));
 	(void)PE_parse_boot_argn("sweetfbprobe", &fProbe, sizeof(fProbe));
+	fVsyncUs = SWEET_FB_VSYNC_US;
+	(void)PE_parse_boot_argn("sweetfb_vsync_us", &fVsyncUs, sizeof(fVsyncUs));
+	(void)PE_parse_boot_argn("sweetfb_phase_us", &fPhaseUs, sizeof(fPhaseUs));
 
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	setProperty("external", false);
@@ -236,6 +252,41 @@ AppleCLCD::free()
 {
 	OSSafeReleaseNULL(fShown);
 	IOService::free();
+}
+
+/* Arm the next tick at its absolute due time: due += one panel frame, then
+ * sleep until then. A timer that fires late does not push the schedule, it
+ * only shortens the next sleep - so the rate stays on the panel's frame and
+ * the presentation phase stays put. */
+static void
+sweet_vsync_arm(AppleCLCD *fb, IOTimerEventSource *sender)
+{
+	uint64_t now = mach_absolute_time();
+	uint64_t perNs = (uint64_t)fb->fVsyncUs * 1000ull;
+	uint64_t perAbs = 0, nowNs = 0, dueNs = 0;
+	int64_t deltaUs;
+
+	nanoseconds_to_absolutetime(perNs, &perAbs);
+	if (fb->fNextDue == 0) {
+		fb->fNextDue = now;
+		if (fb->fPhaseUs > 0) {
+			uint64_t off = 0;
+
+			nanoseconds_to_absolutetime((uint64_t)fb->fPhaseUs * 1000ull,
+			    &off);
+			fb->fNextDue += off;
+		}
+	}
+	fb->fNextDue += perAbs;
+	absolutetime_to_nanoseconds(fb->fNextDue, &dueNs);
+	absolutetime_to_nanoseconds(now, &nowNs);
+	deltaUs = ((int64_t)dueNs - (int64_t)nowNs) / 1000;
+	if (deltaUs < 300) {
+		/* Too late to keep this slot: re-base instead of bursting. */
+		fb->fNextDue = now + perAbs;
+		deltaUs = (int64_t)fb->fVsyncUs;
+	}
+	sender->setTimeoutUS((uint32_t)deltaUs);
 }
 
 void
@@ -289,7 +340,15 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			absolutetime_to_nanoseconds(sweet_disp_wait_ticks, &waitUs);
 			waitUs = waitUs / 1000 / sweet_disp_waits;
 		}
-		uint64_t holdUs = 0;
+		uint64_t holdUs = 0, scanPeriodUs = 0, preUs = 0;
+		if (sweet_disp_scan_period != 0) {
+			absolutetime_to_nanoseconds(sweet_disp_scan_period, &scanPeriodUs);
+			scanPeriodUs = scanPeriodUs / 1000;
+		}
+		if (sweet_disp_pre_busy != 0) {
+			absolutetime_to_nanoseconds(sweet_disp_pre_ticks, &preUs);
+			preUs = preUs / 1000 / sweet_disp_pre_busy;
+		}
 		if (sweet_disp_hold_frames != 0) {
 			absolutetime_to_nanoseconds(sweet_disp_hold_ticks, &holdUs);
 			holdUs = holdUs / 1000 / sweet_disp_hold_frames;
@@ -317,17 +376,42 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		IOLog("SWEET FB: underrun %u; te edges %u lows %u; dcs %u teoff %d teext %d\n",
 		    sweet_disp_underruns, sweet_disp_te_edges, sweet_disp_te_lows,
 		    sweet_disp_dcs, sweet_disp_te_off, sweet_disp_te_ext);
-		IOLog("SWEET FB: scanline 0x%x 0x%x 0x%x 0x%x 0x%x teon %d sline %d teint %d\n",
+		{
+			uint64_t tePeriodUs = 0, teSyncUs = 0;
+
+			if (sweet_disp_te_period != 0) {
+				absolutetime_to_nanoseconds(sweet_disp_te_period,
+				    &tePeriodUs);
+				tePeriodUs = tePeriodUs / 1000;
+			}
+			if (sweet_disp_te_sync_hits != 0) {
+				absolutetime_to_nanoseconds(sweet_disp_te_sync_ticks,
+				    &teSyncUs);
+				teSyncUs = teSyncUs / 1000 / sweet_disp_te_sync_hits;
+			}
+			IOLog("SWEET FB: te period %llu us align %d hits %u miss %u wait %llu us\n",
+			    tePeriodUs, sweet_disp_te_align,
+			    sweet_disp_te_sync_hits, sweet_disp_te_sync_missed,
+			    teSyncUs);
+		}
+		IOLog("SWEET FB: scanline 0x%x 0x%x 0x%x 0x%x 0x%x ok %d max %u wraps %u period %llu us\n",
 		    sweet_disp_scan[0], sweet_disp_scan[1], sweet_disp_scan[2],
-		    sweet_disp_scan[3], sweet_disp_scan[4], sweet_disp_te_on,
-		    sweet_disp_sline, sweet_disp_te_int);
+		    sweet_disp_scan[3], sweet_disp_scan[4], sweet_disp_scan_ok,
+		    sweet_disp_scan_max, sweet_disp_scan_wraps, scanPeriodUs);
+		IOLog("SWEET FB: phase n %u avg %u min %u max %u last %u; pre busy %u idle %u %llu us\n",
+		    sweet_disp_phase_n,
+		    sweet_disp_phase_n ? (uint32_t)(sweet_disp_phase_sum / sweet_disp_phase_n) : 0,
+		    sweet_disp_phase_min, sweet_disp_phase_max, sweet_disp_scan_line,
+		    sweet_disp_pre_busy, sweet_disp_pre_idle,
+		    sweet_disp_pre_busy ? preUs : 0);
 		IOLog("SWEET FB: con_ctrl 0x%x txrx 0x%x cmdqsize 0x%x cmdq0 0x%x\n",
 		    sweet_disp_cmdq[0], sweet_disp_cmdq[1], sweet_disp_cmdq[2],
 		    sweet_disp_cmdq[3]);
-		IOLog("SWEET FB: mutex stops %u running %u last %u; hold %d frames %u %llu us\n",
+		IOLog("SWEET FB: mutex stops %u running %u last %u; hold %d frames %u %llu us hold_us %u trunc %u shadow %d/%d\n",
 		    sweet_disp_mutex_stops, sweet_disp_mutex_running,
 		    sweet_disp_mutex_last, sweet_disp_hold, sweet_disp_hold_frames,
-		    holdUs);
+		    holdUs, sweet_disp_hold_us, sweet_disp_hold_trunc,
+		    sweet_disp_shadow, sweet_disp_shadow_on);
 		fb->fStatTicks = 0; fb->fStatSum = 0; fb->fStatMax = 0;
 		fb->fStatSwaps = fb->fStatPresents = fb->fStatScans = fb->fStatCopies = 0;
 		fb->fStatCopyUs = 0; fb->fStatTried = fb->fStatRefused = 0;
@@ -364,7 +448,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			}
 			sweet_display_refresh(1);
 		}
-		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+		sweet_vsync_arm(fb, sender);
 		return;
 	}
 	/* sweetfbprobe=1: is the panel reading the surface all the time, or only
@@ -413,19 +497,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	 * link: the compositor paces itself by these notifications, so the next
 	 * tick is armed from where this one was due, not from when the work
 	 * finished. */
-	{
-		uint64_t spentNs = 0;
-		uint32_t next = SWEET_FB_VSYNC_US;
-
-		absolutetime_to_nanoseconds(mach_absolute_time() - now, &spentNs);
-		uint64_t spentUs = spentNs / 1000;
-		if (spentUs + 1000 < next) {
-			next -= (uint32_t)spentUs;
-		} else {
-			next = 1000;
-		}
-		sender->setTimeoutUS(next);
-	}
+	sweet_vsync_arm(fb, sender);
 }
 
 void

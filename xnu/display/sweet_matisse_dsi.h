@@ -96,6 +96,13 @@ extern uint64_t sweet_disp_frame_wait_max;
 extern uint32_t sweet_disp_underruns;
 extern uint32_t sweet_disp_te_edges;
 extern uint32_t sweet_disp_te_lows;
+/* The panel's own frame, measured from the DSIM's TE status latch: the bit
+ * has to be written back before each wait or it never looks like an edge. */
+extern uint64_t sweet_disp_te_period;
+extern uint32_t sweet_disp_te_sync_hits;
+extern uint32_t sweet_disp_te_sync_missed;
+extern uint64_t sweet_disp_te_sync_ticks;
+extern int sweet_disp_te_align;
 extern uint32_t sweet_disp_dcs;
 /* sweetfb_teoff=1 sends DCS 0x34 once, turning the panel's tear line off. */
 extern int sweet_disp_te_off;
@@ -105,6 +112,25 @@ extern int sweet_disp_te_ext;
 extern int sweet_disp_te_on;
 extern int sweet_disp_sline;
 extern uint32_t sweet_disp_scan[5];
+/* DCS 0x45 (get scan line): the panel's own answer for which row it is
+ * showing. sweet_disp_scan_ok is set when the value climbs and wraps like a
+ * scan line, sweet_disp_scan_period then holds one frame in ticks. The phase
+ * counters say where the panel was each time the compositor presented. */
+extern uint32_t sweet_disp_scan_line;
+extern uint32_t sweet_disp_scan_max;
+extern uint32_t sweet_disp_scan_wraps;
+extern uint64_t sweet_disp_scan_period;
+extern uint32_t sweet_disp_scan_ok;
+extern uint32_t sweet_disp_phase_n;
+extern uint32_t sweet_disp_phase_min;
+extern uint32_t sweet_disp_phase_max;
+extern uint64_t sweet_disp_phase_sum;
+/* Presents where the mutex alone had already started a transfer before the
+ * DSI strobe was written - i.e. where the strobe starts a second one. */
+extern uint32_t sweet_disp_lead_us;
+extern uint32_t sweet_disp_pre_busy;
+extern uint32_t sweet_disp_pre_idle;
+extern uint64_t sweet_disp_pre_ticks;
 /* sweetfb_teint=1 enables the DSIM TE interrupt before sampling it. */
 extern int sweet_disp_te_int;
 extern uint32_t sweet_disp_mutex_stops;
@@ -112,6 +138,12 @@ extern uint32_t sweet_disp_mutex_running;
 extern uint32_t sweet_disp_mutex_last;
 /* sweetfb_hold=1 keeps the frame source stopped between presents. */
 extern int sweet_disp_hold;
+/* sweetfb_shadow=1 takes the overlay out of LK's bypass mode so the layer
+ * address lands at the next frame boundary instead of at once. */
+extern int sweet_disp_shadow;
+extern uint32_t sweet_disp_shadow_on;
+extern uint32_t sweet_disp_hold_us;
+extern uint32_t sweet_disp_hold_trunc;
 extern uint32_t sweet_disp_hold_frames;
 extern uint64_t sweet_disp_hold_ticks;
 extern uint32_t sweet_disp_status;

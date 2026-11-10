@@ -1,6 +1,62 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 ## >>> ACTIVE 2026-11-10: 32 fps; TEAR = ONE FRAME PER PRESENT, STATIC CLEAN, MOTION FLASHES. NO USABLE TEAR LINE (2500-2505) <<<
 
+### 2506-2512: the vsync was 5.5 % slow; what is left is the panel
+
+Five trials after 2505, in order. The first one is a real fix; the next four
+narrow what is left down to the panel itself.
+
+**2507 - the frame rate was wrong and is now exact.** The vsync was armed as
+"sleep 16.667 ms minus the time this callback took", which is a schedule, not
+a clock: measured `600 vsyncs 10556231 us` = 17.59 ms a frame, 5.5 % slow of
+the panel's 60 Hz. Every present therefore walked across the panel and the
+tear line swept with it. `sweet_vsync_arm()` now keeps an absolute due time
+(`due += 16667 us`, re-based only when more than a millisecond late), and the
+same counter reads `600 vsyncs 10000194 us` = 16.667 ms, run after run.
+User after 2507: "闪烁明显好转" - the sweeping stopped.
+
+**2508 - not a cut tail.** `sweetfb_hold_us=12000` (was 9500) with a `trunc`
+counter that fires when the DSIM is still busy when the source is stopped:
+`hold_us 12000 trunc 0` over 1336 presents, and the bars unchanged, at 12 fps.
+So the stop is not cutting frames, and DSI_BUSY never reports a transfer at
+all. (2501's 138 ms copy and 2500's `underrun 0` already pointed this way.)
+
+**2510 - the overlay was in LK's bypass mode.** `OVL_EN` reads `0xe00001`:
+bit22 is DISP_OVL_BYPASS_SHADOW, which LK sets so its own writes land at
+once. The vendor's mt6983 OVL has `need_bypass_shadow = false`, i.e. a stock
+kernel runs with the shadow bank and the mutex copies it in at SOF. init now
+snapshots the live OVL configuration, clears bit22, writes the snapshot back
+into the shadow bank, and the present path is then a single address write -
+`present 2894 us / 296` = 10 us a present against 9.8 ms before, no stop, no
+strobe, no hold. **The bars did not change.** So they are not an address that
+lands mid-fetch.
+
+**2511 - TE is a latch, but not a boundary.** 2498/2500 read `INTSTA` bit2 in
+a tight loop and declared it a level. It is an interrupt latch: write it back
+and it re-asserts. 2511 cleared and waited 12 times: `te edges 12`, and every
+interval was under the 8.3 ms lower bound, so no panel frame period could be
+measured (`te period 0`). It behaves like a level that re-latches, not a
+per-frame edge. With no TE there is no boundary to start a frame on.
+
+**2512 - the panel is what is left.** `sweetfb_copy=1` makes the panel read
+the kernel's own buffer: the compositor's surface is never scanned, and the
+copy is written while the frame source is stopped. Bars unchanged (7 fps, but
+the shape of the artifact the same). Take the four together and only one
+explanation is left: this DDIC shows a new frame as it arrives, into the same
+GRAM it is scanning, so a frame that takes 8.8 ms of a 16.7 ms panel frame
+always replaces the picture half way down. That is not something the host can
+fix - it needs the panel to double-buffer its GRAM and swap at TE, and the
+tear line on this unit does not give us an edge. Do not spend more trials on
+the display path; the levers left are panel-side.
+
+**Corrections recorded so they are not repeated.** 2507 was built with
+`DSI_CMDQ0` at 0x200; the vendor's `mt6983_dsi_driver_data` has
+`.reg_cmdq0_ofs = 0xd00` (0x200 is the VM command block) and 2502-2504 did
+reach the panel through 0xd00. Reverted. Also `disp_dcs()` sent every command
+as data type 0x05 even when it carried a parameter; a DCS short write with a
+parameter is 0x15, and 2504's panel that stopped taking frames after 0x35 is
+most likely that byte being read as a second command. Not retried since.
+
 ### The processor clock was never set - now it is
 
 MT6983 has a performance domain per cluster (mt6983.dts

@@ -14,4 +14,9 @@ They are not carried by a patch yet: `patches/0083`, `0095`, `0098` and
 scanout path, the frame-source stop, the counters) lives only in this
 directory. A CI kernel therefore does not have the current driver.
 
-Last synced from the build tree at trial 2496 (2026-11-10).
+Last synced from the build tree at trial 2512 (2026-11-10). Since 2496 this
+also carries the corrected DSIM command queue offset (0xd00, per the vendor's
+mt6983 table), the DCS 0x45 scan-line read, the 300 us lead between MUTEX_EN
+and DSI_START, the absolute-deadline 60 Hz vsync schedule (`sweet_vsync_arm`),
+the OVL shadow-bank switch (`sweetfb_shadow`, LK leaves BYPASS_SHADOW on), the
+TE status-latch probe, and `sweetfb_hold_us` with its `trunc` counter.

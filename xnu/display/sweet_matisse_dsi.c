@@ -46,6 +46,10 @@
 
 #define DISP_OVL0_2L		0x4000u
 #define OVL_EN			(DISP_OVL0_2L + 0x0cu)
+/* mtk_disp_ovl.c DISP_OVL_BYPASS_SHADOW, bit22 of OVL_EN: with the bit set
+ * the module takes every write at once; with it clear it reads the shadow
+ * bank that the mutex copies in at the start of a frame. */
+#define OVL_BYPASS_SHADOW	(1u << 22)
 #define OVL_INTSTA		(DISP_OVL0_2L + 0x08u)
 /* mtk_disp_ovl.c INTEN_FLD_FME_CPL_INTEN: the overlay finished the frame it
  * was fetching. This, not DSI_BUSY, says when a fetch is over. */
@@ -75,6 +79,12 @@
 #define DSI_PHY_LCCON		(DISP_DSI0 + 0x104u)
 #define DSI_MEM_CONTI		(DISP_DSI0 + 0x90u)
 #define DSI_CMDQ_SIZE		(DISP_DSI0 + 0x60u)
+/* 0xd00: mt6983_dsi_driver_data in the vendor tree has .reg_cmdq0_ofs = 0xd00
+ * and .reg_vm_cmd_con_ofs = 0x200, so 0x200 is the VM command block, not the
+ * DCS queue. (2507 was built with 0x200 on the opposite reading; it sent no
+ * DCS, so nothing depended on it.) The 2502-2504 write did reach the panel
+ * through 0xd00 - it moved the tear line once - which is why that offset is
+ * the one kept. What those probes could not do was read an answer back. */
 #define DSI_CMDQ0		(DISP_DSI0 + 0xd00u)
 #define DSI_RX_DATA0		(DISP_DSI0 + 0x74u)
 #define CMDQ_SIZE_SEL		(1u << 15)
@@ -130,6 +140,11 @@ int sweet_disp_frame_sync;              /* move the overlay at a frame boundary 
  * frame. Not the default: if this panel needs a stream to stay lit, this
  * is what would leave it dark, so it is a trial lever and not the path. */
 int sweet_disp_hold = 1;
+/* Use the overlay's shadow bank instead of LK's bypass (sweetfb_shadow=1):
+ * the layer address then lands at the next frame boundary, the mutex can
+ * keep running, and nothing has to be stopped around a present. */
+int sweet_disp_shadow = 1;
+uint32_t sweet_disp_shadow_on;          /* the switch actually happened */
 /* sweetfb_teoff=1 sends DCS 0x34 (tearing effect line off) once, so the
  * panel is free to take a frame when it is complete instead of waiting for
  * a line we cannot read. */
@@ -152,6 +167,38 @@ int sweet_disp_sline;
  * latch at all, which is what "te edges 0" would look like. */
 int sweet_disp_te_int;
 uint32_t sweet_disp_scan[5];
+/* What DCS 0x45 (get scan line) says. A value that climbs and wraps once a
+ * frame is the panel's own clock: the transfer can start on the wrap instead
+ * of at whatever phase the compositor happened to present. */
+uint32_t sweet_disp_scan_line;          /* last value read */
+uint32_t sweet_disp_scan_max;           /* highest line seen */
+uint32_t sweet_disp_scan_wraps;         /* frame boundaries counted */
+uint64_t sweet_disp_scan_period;        /* ticks between two of them */
+uint32_t sweet_disp_scan_ok;            /* the value behaves like a scan line */
+uint32_t sweet_disp_phase_n;            /* presents sampled for their phase */
+uint32_t sweet_disp_phase_min;
+uint32_t sweet_disp_phase_max;
+uint64_t sweet_disp_phase_sum;
+/* Whether the mutex alone had already started a transfer when the strobe was
+ * written: if it had, the strobe starts a second one over the top of the
+ * first, and the panel sees a frame that restarts half way down. */
+/* How long the frame source is given to fill the DSC/DSIM before the DSI
+ * strobe goes out (sweetfb_lead, microseconds). At 0 the strobe arrives
+ * before the pipeline has a line to send; 2506 showed that 300 us of head
+ * start is what turned "the whole upper half flashes" into an occasional
+ * band, so this is the lever for the rest of it. */
+uint32_t sweet_disp_lead_us = 300;
+uint32_t sweet_disp_pre_busy;
+uint32_t sweet_disp_pre_idle;
+uint64_t sweet_disp_pre_ticks;
+/* How long the frame source is left running after the strobe before it is
+ * stopped again (sweetfb_hold_us, microseconds). 9500 came from a measured
+ * 8.8 ms frame with a margin; if a frame actually takes longer, stopping at
+ * 9500 cuts its tail and the rows below the cut keep the previous frame -
+ * a fixed band that only shows while the picture moves. hold_trunc counts
+ * the presents that ended with the DSIM still busy, which is that cut. */
+uint32_t sweet_disp_hold_us = 9500;
+uint32_t sweet_disp_hold_trunc;
 uint32_t sweet_disp_hold_frames;
 uint64_t sweet_disp_hold_ticks;
 uint32_t sweet_disp_frame_seen;         /* boundaries waited for */
@@ -174,6 +221,11 @@ static int disp_busy;
 uint32_t sweet_disp_underruns;
 uint32_t sweet_disp_te_edges;
 uint32_t sweet_disp_te_lows;
+uint64_t sweet_disp_te_period;          /* one panel frame, measured */
+uint32_t sweet_disp_te_sync_hits;
+uint32_t sweet_disp_te_sync_missed;
+uint64_t sweet_disp_te_sync_ticks;
+int sweet_disp_te_align = 1;            /* start a frame on the panel's TE */
 uint32_t sweet_disp_dcs;
 uint32_t sweet_disp_mutex_stops;
 uint32_t sweet_disp_mutex_running;
@@ -278,8 +330,8 @@ disp_mutex(uint32_t on)
 static void
 disp_hold_frame(uint64_t began)
 {
-	uint64_t due = began + disp_frequency() / 50;           /* 20 ms cap */
-	uint64_t done = began + disp_frequency() * 19 / 2000;   /* 9.5 ms */
+	uint64_t done = began + disp_frequency() * sweet_disp_hold_us / 1000000;
+	uint64_t due = done + disp_frequency() / 100;           /* +10 ms cap */
 	uint32_t status;
 	uint64_t now;
 
@@ -287,40 +339,77 @@ disp_hold_frame(uint64_t began)
 		status = disp_read(DSI_INTSTA);
 		now = disp_counter();
 	} while (now < done || ((status & DSI_INT_BUSY) && now < due));
+	if (status & DSI_INT_BUSY) {
+		sweet_disp_hold_trunc++;
+	}
 	sweet_disp_hold_ticks += now - began;
 	sweet_disp_hold_frames++;
 	disp_mutex(0);
 }
 
 
-/* One DCS read: the same command queue with the bus-turnaround bit set, the
- * answer read back out of RX_DATA0. */
+/* One DCS read out of the DSIM's own command queue: the vendor encodes it as
+ * type 0x06 (DCS read, no parameter) with BTA in the config byte, and the
+ * answer lands in the RX FIFO as a MIPI packet - type, length high, length
+ * low, then the payload (mtk_dsi_recv_cnt() reads the FIFO with readb).
+ *
+ * Two things made the earlier attempts read nothing: the ready bit was
+ * already set from a previous answer, so every poll passed at once and every
+ * read returned the same stale word, and the queue was written at 0xd00
+ * instead of 0x200 so no command was ever sent. */
 static int
-disp_dcs_read(uint32_t cmd, uint32_t *value)
+disp_dcs_read(uint32_t cmd, uint32_t *raw, uint32_t *payload)
 {
-	uint64_t limit = disp_counter() + disp_frequency() / 20;	/* 50 ms */
-	uint32_t status;
+	uint64_t limit;
+	uint32_t status, w, type;
+	volatile uint8_t *rx = (volatile uint8_t *)(disp_base + DSI_RX_DATA0);
 
+	disp_write(DSI_INTSTA, DSI_INT_RD_RDY | DSI_INT_CMD_DONE);
+	limit = disp_counter() + disp_frequency() / 200;   /* 5 ms */
+	while ((disp_read(DSI_INTSTA) & DSI_INT_RD_RDY) &&
+	    disp_counter() < limit) {
+		__asm__ volatile("yield");
+	}
 	disp_write(DSI_CMDQ0, (cmd << 16) | (0x06u << 8) | 0x04u);
 	disp_write(DSI_CMDQ_SIZE, 1u | CMDQ_SIZE_SEL);
-	disp_write(DSI_INTSTA, DSI_INT_CMD_DONE | DSI_INT_RD_RDY);
 	disp_write(DSI_START, 0);
 	disp_write(DSI_START, 1);
+	limit = disp_counter() + disp_frequency() / 50;    /* 20 ms */
 	do {
 		status = disp_read(DSI_INTSTA);
 	} while ((status & DSI_INT_RD_RDY) == 0 && disp_counter() < limit);
-	disp_write(DSI_INTSTA, DSI_INT_RD_RDY);
 	if ((status & DSI_INT_RD_RDY) == 0) {
+		disp_write(DSI_INTSTA, DSI_INT_RD_RDY);
 		return -1;
 	}
-	*value = disp_read(DSI_RX_DATA0);
+	w = disp_read(DSI_RX_DATA0);
+	type = rx[0];
+	if (raw != NULL) {
+		*raw = w;
+	}
+	if (payload != NULL) {
+		/* DCS long read 0x1c, generic long read 0x1a, and the two short
+		 * forms all carry their bytes from offset 3. */
+		if (type == 0x1cu || type == 0x1au || type == 0x22u ||
+		    type == 0x21u) {
+			*payload = ((uint32_t)rx[3] << 8) | (uint32_t)rx[4];
+		} else {
+			*payload = 0xffffffffu;
+		}
+	}
+	disp_write(DSI_INTSTA, DSI_INT_RD_RDY | DSI_INT_CMD_DONE);
 	return 0;
 }
 
 /* One DCS short write out of the DSIM's own command queue (mtk_dsi_cmdq:
  * CONFIG|DATA_ID in the first word, the payload bytes above it, size in
  * words plus the size-select bit). Used to talk to the panel itself rather
- * than to the pipeline. */
+ * than to the pipeline.
+ *
+ * The data type is not decoration: 0x05 is "short write, no parameter" and
+ * 0x15 is "short write, one parameter". 2504 sent 0x35 with a parameter
+ * under type 0x05, and the panel stopped taking frames - the parameter byte
+ * was read as a second command. Everything with a value goes out as 0x15. */
 static int
 disp_dcs(uint32_t cmd, uint32_t value, int has_value)
 {
@@ -328,7 +417,7 @@ disp_dcs(uint32_t cmd, uint32_t value, int has_value)
 	uint32_t status;
 
 	disp_write(DSI_CMDQ0, (has_value ? (value << 24) : 0) | (cmd << 16) |
-	    (0x05u << 8));
+	    ((has_value ? 0x15u : 0x05u) << 8));
 	disp_write(DSI_CMDQ_SIZE, 1u | CMDQ_SIZE_SEL);
 	disp_write(DSI_INTSTA, DSI_INT_CMD_DONE);
 	disp_write(DSI_START, 0);
@@ -354,6 +443,73 @@ disp_point(uint64_t phys, uint32_t pitch)
 		secondary_write(OVL_L0_PITCH, pitch);
 	}
 	disp_cur_phys = phys;
+}
+
+/* Wait for one panel frame boundary out of the DSIM's TE status.
+ *
+ * The bit is an interrupt latch, not a level: it goes high on the tearing
+ * effect and stays high until it is written back. 2498 and 2500 read it in a
+ * tight loop without clearing it, so it looked like a permanently asserted
+ * level and every wait on it was declared useless. Clear it first and it
+ * becomes one edge per panel frame - which is the boundary a frame start can
+ * be aligned to. */
+static int
+disp_te_wait(uint64_t ticks)
+{
+	uint64_t end = disp_counter() + ticks;
+
+	disp_write(DSI_INTSTA, DSI_INT_TE_RDY);
+	while ((disp_read(DSI_INTSTA) & DSI_INT_TE_RDY) == 0) {
+		if (disp_counter() > end) {
+			return -1;
+		}
+		__asm__ volatile("yield");
+	}
+	disp_write(DSI_INTSTA, DSI_INT_TE_RDY);
+	return 0;
+}
+
+/* LK leaves DISP_OVL_BYPASS_SHADOW (OVL_EN bit22) set, so every register
+ * write reaches the module at once - including a layer address written while
+ * the overlay is half way through a frame, which is the band. With the bit
+ * clear the module reads its shadow bank, and the mutex copies that bank in
+ * at the start of each frame, so an address written between two frames takes
+ * effect at the next one and nothing has to be stopped.
+ *
+ * The shadow bank was never written while the bypass was on, so the live
+ * configuration is snapshotted first and written back after the switch;
+ * otherwise the first frame would come from whatever the bank held. */
+static void
+ovl_shadow_enable(uintptr_t base)
+{
+	uint32_t cfg[0x40], layer[0x20];
+	uint32_t i, off;
+
+	for (i = 0; i < 0x40; i++) {
+		off = i * 4u;
+		/* INTSTA (0x08) clears on write, TRIG/RST (0x10/0x14) act on
+		 * write: not part of the configuration. */
+		if (off == 0x08u || off == 0x10u || off == 0x14u) {
+			cfg[i] = 0;
+			continue;
+		}
+		cfg[i] = *(volatile uint32_t *)(base + off);
+	}
+	for (i = 0; i < 0x20; i++) {
+		layer[i] = *(volatile uint32_t *)(base + 0xf00u + i * 4u);
+	}
+
+	*(volatile uint32_t *)(base + 0x0cu) =
+	    cfg[0x0c / 4] & ~OVL_BYPASS_SHADOW;
+	for (i = 0; i < 0x40; i++) {
+		off = i * 4u;
+		if (off == 0x0cu || off == 0x08u || off == 0x10u || off == 0x14u)
+			continue;
+		*(volatile uint32_t *)(base + off) = cfg[i];
+	}
+	for (i = 0; i < 0x20; i++) {
+		*(volatile uint32_t *)(base + 0xf00u + i * 4u) = layer[i];
+	}
 }
 
 void
@@ -382,6 +538,10 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
 	    sizeof(sweet_disp_sline));
 	(void)PE_parse_boot_argn("sweetfb_teint", &sweet_disp_te_int,
 	    sizeof(sweet_disp_te_int));
+	(void)PE_parse_boot_argn("sweetfb_lead", &sweet_disp_lead_us,
+	    sizeof(sweet_disp_lead_us));
+	(void)PE_parse_boot_argn("sweetfb_shadow", &sweet_disp_shadow,
+	    sizeof(sweet_disp_shadow));
 	disp_ready = 0;
 	disp_secondary_base = 0;
 	sweet_disp_trace[0] = 1;
@@ -502,6 +662,27 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
 	disp_write(DSI_PHY_LCCON, disp_read(DSI_PHY_LCCON) |
 	    DSI_PHY_LC_HS_TX_EN);
 	disp_write(DSI_CON_CTRL, disp_con_ctrl);
+
+	/* Take the overlay out of LK's bypass mode while nothing is being
+	 * fetched, so the first frame after this comes from the shadow bank
+	 * we just filled. */
+	if (sweet_disp_shadow && (ovl_en & OVL_BYPASS_SHADOW)) {
+		uint64_t limit = disp_counter() + disp_frequency() / 50;
+		uint32_t st;
+
+		disp_write(MUTEX_EN, 0);
+		if (disp_secondary_base) {
+			secondary_write(MUTEX_EN, 0);
+		}
+		do {
+			st = disp_read(DSI_INTSTA);
+		} while ((st & DSI_INT_BUSY) && disp_counter() < limit);
+		ovl_shadow_enable(disp_base + DISP_OVL0_2L);
+		if (disp_secondary_base) {
+			ovl_shadow_enable(disp_secondary_base + DISP_OVL0_2L);
+		}
+		sweet_disp_shadow_on = 1;
+	}
 	if (sweet_disp_te_ext) {
 		disp_write(DSI_TXRX_CTRL, disp_read(DSI_TXRX_CTRL) |
 		    (1u << 9) | (1u << 10));
@@ -511,23 +692,35 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
 	disp_last = 0;
 	disp_ready = 1;
 	if (sweet_disp_te_int) {
-		uint64_t until = disp_counter() + disp_frequency() / 5; /* 200 ms */
-		uint32_t prev;
+		uint64_t last = 0, sum = 0;
+		uint32_t n = 0, i;
 
 		disp_write(DSI_INTEN, disp_read(DSI_INTEN) | DSI_INT_TE_RDY);
-		prev = disp_read(DSI_INTSTA);
-		while (disp_counter() < until) {
-			uint32_t cur = disp_read(DSI_INTSTA);
+		for (i = 0; i < 12; i++) {
+			uint64_t now;
 
-			if ((prev & DSI_INT_TE_RDY) && !(cur & DSI_INT_TE_RDY)) {
-				sweet_disp_te_lows++;
+			if (disp_te_wait(disp_frequency() / 50) != 0) {
+				sweet_disp_te_missed++;
+				break;
 			}
-			if (!(prev & DSI_INT_TE_RDY) && (cur & DSI_INT_TE_RDY)) {
-				sweet_disp_te_edges++;
+			now = disp_counter();
+			sweet_disp_te_edges++;
+			if (last != 0) {
+				sum += now - last;
+				n++;
 			}
-			prev = cur;
+			last = now;
 		}
-		disp_write(DSI_INTSTA, DSI_INT_TE_RDY);
+		if (n >= 2) {
+			uint64_t period = sum / n;
+
+			/* 30 Hz to 120 Hz is the range a panel frame can be;
+			 * anything else is not the panel's own boundary. */
+			if (period > disp_frequency() / 120 &&
+			    period < disp_frequency() / 30) {
+				sweet_disp_te_period = period;
+			}
+		}
 	}
 	if (sweet_disp_te_on) {
 		uint64_t until = disp_counter() + disp_frequency() / 5; /* 200 ms */
@@ -549,11 +742,62 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
 		}
 	}
 	if (sweet_disp_sline) {
-		for (int i = 0; i < 5; i++) {
+		/* Only while the bus is quiet: a command written into the queue
+		 * in the middle of a frame transfer corrupts that frame. */
+		uint64_t idle = disp_counter() + disp_frequency() / 50;
+		uint32_t st = disp_read(DSI_INTSTA);
+
+		while ((st & DSI_INT_BUSY) && disp_counter() < idle) {
+			__asm__ volatile("yield");
+			st = disp_read(DSI_INTSTA);
+		}
+		if (st & DSI_INT_BUSY) {
+			sweet_disp_scan_ok = 2;   /* never got a quiet bus */
+		}
+	}
+	if (sweet_disp_sline && sweet_disp_scan_ok == 0) {
+		/* Ask the panel where it is scanning, until the answer wraps:
+		 * that wrap is the frame boundary, and starting the transfer
+		 * on it is what keeps a new frame from landing half way down
+		 * the one the panel is already showing. */
+		uint32_t prev = 0, maxl = 0, wraps = 0, ok = 0;
+		uint64_t end = disp_counter() + disp_frequency() / 20;  /* 50 ms */
+		uint64_t first = 0, last = 0;
+
+		while (disp_counter() < end && wraps < 3) {
 			uint32_t v = 0;
 
-			if (disp_dcs_read(0x45u, &v) == 0) {
-				sweet_disp_scan[i] = v;
+			if (disp_dcs_read(0x45u, &sweet_disp_scan[ok < 5 ? ok : 4],
+			    &v) != 0 || v == 0xffffffffu) {
+				break;          /* no answer, or not a read response */
+			}
+			if (ok == 0 || v > maxl) {
+				maxl = v;
+			}
+			if (ok != 0 && v + 32u < prev) {
+				uint64_t at = disp_counter();
+
+				if (first == 0) {
+					first = at;
+				}
+				last = at;
+				wraps++;
+			}
+			prev = v;
+			sweet_disp_scan_line = v;
+			ok++;
+		}
+		sweet_disp_scan_max = maxl;
+		sweet_disp_scan_wraps = wraps;
+		if (wraps >= 2 && last > first) {
+			uint64_t period = (last - first) / (wraps - 1);
+
+			/* Anything between 30 and 120 Hz is a plausible
+			 * panel; outside that the value is not a scan line. */
+			if (period > disp_frequency() / 200 &&
+			    period < disp_frequency() / 20) {
+				sweet_disp_scan_period = period;
+				sweet_disp_scan_ok = 1;
 			}
 		}
 	}
@@ -684,6 +928,36 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 	if (__atomic_test_and_set(&disp_busy, __ATOMIC_ACQUIRE)) {
 		return -1;
 	}
+	/* Shadow path (sweetfb_shadow, default): the overlay reads its new
+	 * address from the shadow bank at the next start of frame, so the
+	 * fetch never has to be stopped and the panel keeps a continuous
+	 * stream - no half-written frame can reach it. */
+	if (sweet_disp_shadow_on) {
+		if (sweet_disp_te_period != 0 && sweet_disp_te_align) {
+			uint64_t edge = disp_counter();
+
+			if (disp_te_wait(disp_frequency() / 50) == 0) {
+				sweet_disp_te_sync_hits++;
+				sweet_disp_te_sync_ticks += disp_counter() - edge;
+			} else {
+				sweet_disp_te_sync_missed++;
+			}
+		}
+		disp_point(phys, pitch);
+		if ((disp_read(MUTEX_EN) & 1u) == 0) {
+			disp_write(MUTEX_EN, 1);
+			if (disp_secondary_base) {
+				secondary_write(MUTEX_EN, 1);
+			}
+			disp_write(DSI_START, 0);
+			disp_write(DSI_START, 1);
+			sweet_disp_pushes++;
+		}
+		sweet_disp_gui_flips++;
+		disp_gui = 1;
+		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
+		return 0;
+	}
 	now = disp_counter();
 	limit = now + disp_frequency() / 50;	/* 20 ms, as refresh() */
 	/* Nothing may start a frame from here to the trigger below. The
@@ -799,6 +1073,25 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 			sweet_disp_frame_missed++;
 		}
 	}
+	if (sweet_disp_scan_ok) {
+		/* Where the panel is when the compositor hands over a frame:
+		 * if these numbers are spread across the whole frame, the
+		 * transfer starts at a random phase every time and the tear
+		 * line can only be where the panel happened to be. */
+		uint32_t v = 0;
+
+		if (disp_dcs_read(0x45u, NULL, &v) == 0 && v < 0x10000u) {
+			sweet_disp_scan_line = v;
+			sweet_disp_phase_sum += v;
+			if (sweet_disp_phase_n == 0 || v < sweet_disp_phase_min) {
+				sweet_disp_phase_min = v;
+			}
+			if (v > sweet_disp_phase_max) {
+				sweet_disp_phase_max = v;
+			}
+			sweet_disp_phase_n++;
+		}
+	}
 	__asm__ volatile("dsb sy" ::: "memory");
 	disp_point(phys, pitch);
 	/* The overlays latch their address at the trigger; a write that did not
@@ -812,6 +1105,21 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 		return -3;		/* the overlay did not take the address */
 	}
 
+	/* The address is in place and nothing has fetched it yet. If the
+	 * panel's tear line answered at init, start the frame on its next
+	 * boundary instead of wherever the compositor happened to present:
+	 * that is the difference between a frame landing inside the panel's
+	 * scan and one landing where the panel expects a new one. */
+	if (sweet_disp_te_period != 0 && sweet_disp_te_align) {
+		uint64_t edge = disp_counter();
+
+		if (disp_te_wait(disp_frequency() / 50) == 0) {
+			sweet_disp_te_sync_hits++;
+			sweet_disp_te_sync_ticks += disp_counter() - edge;
+		} else {
+			sweet_disp_te_sync_missed++;
+		}
+	}
 	/* The address is in place and nothing has fetched it yet: let the
 	 * mutex run again and start one frame from it. */
 	disp_write(MUTEX_EN, 0);
@@ -821,6 +1129,28 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 	disp_write(MUTEX_EN, 1);
 	if (disp_secondary_base) {
 		secondary_write(MUTEX_EN, 1);
+	}
+	{
+		/* Does the mutex start a frame on its own? Watch the busy bit
+		 * for 300 us before the strobe below: if it goes up, the
+		 * strobe starts a second transfer over the first one. */
+		uint64_t lead = (uint64_t)sweet_disp_lead_us *
+		    (disp_frequency() / 1000000u);
+		uint64_t until = disp_counter() + lead;
+		uint64_t began = disp_counter();
+		uint32_t s2 = disp_read(DSI_INTSTA);
+
+		while ((s2 & DSI_INT_BUSY) == 0 && lead != 0 &&
+		    disp_counter() < until) {
+			__asm__ volatile("yield");
+			s2 = disp_read(DSI_INTSTA);
+		}
+		if (s2 & DSI_INT_BUSY) {
+			sweet_disp_pre_busy++;
+			sweet_disp_pre_ticks += disp_counter() - began;
+		} else {
+			sweet_disp_pre_idle++;
+		}
 	}
 	/* Started right after the panel's own frame boundary (see above). The
 	 * transfer is not waited for: the compositor can draw the next frame
