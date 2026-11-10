@@ -93,13 +93,27 @@ extern uint64_t sweet_disp_frame_wait_max;
  * many times the frame source had to be stopped for that. A non-zero first
  * count is what the 2494 probe showed from the other side: the mutex keeps
  * triggering frames on its own. */
+extern uint32_t sweet_disp_underruns;
+extern uint32_t sweet_disp_te_edges;
+extern uint32_t sweet_disp_te_lows;
+extern uint32_t sweet_disp_dcs;
+/* sweetfb_teoff=1 sends DCS 0x34 once, turning the panel's tear line off. */
+extern int sweet_disp_te_off;
+/* sweetfb_teext=1 enables the DSIM's external TE input. */
+extern int sweet_disp_te_ext;
+/* sweetfb_teon=1 sends DCS 0x35 once; sweetfb_sline=1 samples DCS 0x45. */
+extern int sweet_disp_te_on;
+extern int sweet_disp_sline;
+extern uint32_t sweet_disp_scan[5];
+/* sweetfb_teint=1 enables the DSIM TE interrupt before sampling it. */
+extern int sweet_disp_te_int;
 extern uint32_t sweet_disp_mutex_stops;
 extern uint32_t sweet_disp_mutex_running;
 extern uint32_t sweet_disp_mutex_last;
 /* sweetfb_hold=1 keeps the frame source stopped between presents. */
 extern int sweet_disp_hold;
 extern uint32_t sweet_disp_hold_frames;
-extern uint32_t sweet_disp_hold_missed;
+extern uint64_t sweet_disp_hold_ticks;
 extern uint32_t sweet_disp_status;
 extern uint32_t sweet_disp_status_before;
 extern uint32_t sweet_disp_cmdq[4];

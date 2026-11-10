@@ -215,6 +215,11 @@ AppleCLCD::start(IOService *provider)
 	(void)PE_parse_boot_argn("sweetfbtesync", &sweet_disp_te_sync, sizeof(sweet_disp_te_sync));
 	(void)PE_parse_boot_argn("sweetfbwait", &sweet_disp_wait_done, sizeof(sweet_disp_wait_done));
 	(void)PE_parse_boot_argn("sweetfb_hold", &sweet_disp_hold, sizeof(sweet_disp_hold));
+	(void)PE_parse_boot_argn("sweetfb_teoff", &sweet_disp_te_off, sizeof(sweet_disp_te_off));
+	(void)PE_parse_boot_argn("sweetfb_teext", &sweet_disp_te_ext, sizeof(sweet_disp_te_ext));
+	(void)PE_parse_boot_argn("sweetfb_teon", &sweet_disp_te_on, sizeof(sweet_disp_te_on));
+	(void)PE_parse_boot_argn("sweetfb_sline", &sweet_disp_sline, sizeof(sweet_disp_sline));
+	(void)PE_parse_boot_argn("sweetfb_teint", &sweet_disp_te_int, sizeof(sweet_disp_te_int));
 	(void)PE_parse_boot_argn("sweetfbprobe", &fProbe, sizeof(fProbe));
 
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
@@ -284,6 +289,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			absolutetime_to_nanoseconds(sweet_disp_wait_ticks, &waitUs);
 			waitUs = waitUs / 1000 / sweet_disp_waits;
 		}
+		uint64_t holdUs = 0;
+		if (sweet_disp_hold_frames != 0) {
+			absolutetime_to_nanoseconds(sweet_disp_hold_ticks, &holdUs);
+			holdUs = holdUs / 1000 / sweet_disp_hold_frames;
+		}
 		if (sweet_disp_sends != 0) {
 			absolutetime_to_nanoseconds(sweet_disp_send_ticks, &sendUs);
 			sendUs = sendUs / 1000 / sweet_disp_sends;
@@ -304,10 +314,20 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		IOLog("SWEET FB: frame sync seen %u missed %u wait %llu/%llu us\n",
 		    sweet_disp_frame_seen, sweet_disp_frame_missed,
 		    frameWaitUs, frameWaitMaxUs);
-		IOLog("SWEET FB: mutex stops %u running %u last %u; hold %d done %u missed %u\n",
+		IOLog("SWEET FB: underrun %u; te edges %u lows %u; dcs %u teoff %d teext %d\n",
+		    sweet_disp_underruns, sweet_disp_te_edges, sweet_disp_te_lows,
+		    sweet_disp_dcs, sweet_disp_te_off, sweet_disp_te_ext);
+		IOLog("SWEET FB: scanline 0x%x 0x%x 0x%x 0x%x 0x%x teon %d sline %d teint %d\n",
+		    sweet_disp_scan[0], sweet_disp_scan[1], sweet_disp_scan[2],
+		    sweet_disp_scan[3], sweet_disp_scan[4], sweet_disp_te_on,
+		    sweet_disp_sline, sweet_disp_te_int);
+		IOLog("SWEET FB: con_ctrl 0x%x txrx 0x%x cmdqsize 0x%x cmdq0 0x%x\n",
+		    sweet_disp_cmdq[0], sweet_disp_cmdq[1], sweet_disp_cmdq[2],
+		    sweet_disp_cmdq[3]);
+		IOLog("SWEET FB: mutex stops %u running %u last %u; hold %d frames %u %llu us\n",
 		    sweet_disp_mutex_stops, sweet_disp_mutex_running,
 		    sweet_disp_mutex_last, sweet_disp_hold, sweet_disp_hold_frames,
-		    sweet_disp_hold_missed);
+		    holdUs);
 		fb->fStatTicks = 0; fb->fStatSum = 0; fb->fStatMax = 0;
 		fb->fStatSwaps = fb->fStatPresents = fb->fStatScans = fb->fStatCopies = 0;
 		fb->fStatCopyUs = 0; fb->fStatTried = fb->fStatRefused = 0;

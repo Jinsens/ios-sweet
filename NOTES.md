@@ -1,5 +1,5 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-10: CPU CLOCKS NOW AT THE TOP (32 fps); 2496 STOPS THE FRAME SOURCE BEFORE MOVING THE OVERLAY (tear trial, unflashed) <<<
+## >>> ACTIVE 2026-11-10: 32 fps; TEAR = ONE FRAME PER PRESENT, STATIC CLEAN, MOTION FLASHES. NO USABLE TEAR LINE (2500-2505) <<<
 
 ### The processor clock was never set - now it is
 
@@ -108,6 +108,43 @@ in `xnu/display/` (see its README) as well as
 
 Do not read "the frame cost" numbers below as the whole story any more: the
 CPU clock change moves them.
+
+### 2500-2505: no tear line to sync to, and a DCS write that stops the panel
+
+Three probes, all with the display path of 2497 (stop the source, one frame,
+wait 9.5 ms, stop again):
+
+- **2500** (`sweetfb_teext=1 sweetfbtesync=1`): `txrx 0x1023c` - LK already
+  left the vendor value, so EXT_TE_EN was never the missing piece. `te edges
+  0 lows 0`: the tear line does not move at all during a present, and every
+  wait burned its 40 ms cap (`te seen 0 missed 166`, vsync 17.6 -> 31.4 ms).
+  `underrun 0`: the frames are not being starved, so a cut frame is not what
+  the flash is.
+- **2501** (`sweetfb_copy=1`, kernel buffer instead of the compositor
+  surface): `copy 16124422 us / 117` = **138 ms a copy**, 0 scans. The CPU
+  copy into Normal-NC memory is far too slow to be a fallback, and at 7 fps
+  it cannot even be judged by eye.
+- **2502/2503** (DCS channel): `disp_dcs()` sends through the DSIM's own
+  command queue (word = `cmd<<16 | 0x05<<8`, size `1|BIT(15)`). The first
+  run showed `dcs 0` - the boot args were being parsed in SweetFramebuffer's
+  start(), long after `sweet_display_init()` - so init now parses them
+  itself. After the fix, `dcs 1` and `te edges 1 lows 1` in 200 ms: DCS 0x35
+  (tear line on) does move the line once, but never periodically.
+- **2504** (`0x35` at init + per-frame TE wait): **the panel stopped
+  updating and stayed on the REDMI logo** while the kernel pushed 137 frames
+  (26 of them compositor frames). A DCS read of 0x45 came back `0x3500081c`,
+  i.e. the command we had just written echoed back, so this command channel
+  is not behaving like mtk_dsi_cmdq. Do not send panel commands over it
+  again without checking the encoding against the vendor.
+- **2505**: same kernel, no DCS command. 417 compositor frames, 17.6 ms
+  vsync - the picture is back. This is the state the device boots now.
+
+Still open: `sweetfb_teint=1` enables DSI_INTEN bit2 (the vendor turns the TE
+interrupt on in mtk_dsi_set_interrupt_enable and we never did) and samples
+the line for 200 ms without touching the panel. If edges appear at a fixed
+period the present path can be aligned to them; if they do not, the tear
+line is simply not wired to this DSIM and the only remaining lever is the
+DSC/DSI timing (make one frame shorter than the panel's scan).
 
 ### The missing wallpaper is an assertion in PosterBoard, not the missing GPU
 

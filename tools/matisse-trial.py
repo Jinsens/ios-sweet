@@ -19,7 +19,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TRIALS = ROOT / 'research/matisse/20261109-resident-gpu'
 IMAGE_TOOL = ROOT / 'tools/matisse-shim-gpu-image.py'
 KERNEL = ROOT / 'xnu/out/local/build/xnu.obj/DEVELOPMENT_ARM64_SWEET/kernel.development.sweet'
-BASELINE = ROOT / 'backup/recovery-20261021/boot_a-live-20261021.img'
+BASELINE = ROOT / 'backup/boot_a-before-2499-20261110.img'
+BASELINE_SHA = 'c4b70dafb0b8a69ce59f6a246c7bab5412827c80306dde6113cc483b9ec707d8'
 FIRMWARE = ROOT / 'research/matisse/20261031-gpu/shim2333-path-ready/csf.bin'
 FIRMWARE_SHA = 'de22d2fc06bc8a859968499a6e609c27fe838be062bf5c97d92ea9f904f7229a'
 TEMPLATE = ROOT / 'backup/boot_a-stock-trim.img'
@@ -88,6 +89,16 @@ def main():
     new = new.replace(f'matisse-shim-gpu{prev}.img', f'matisse-shim-gpu{trial}.img')
     new = re.sub(r'(?<!\d)0x' + f'{int(str(prev), 16):x}' + r'(?![0-9a-f])', hex(build_id), new)
     new = new.replace(f'248{prev % 10} ', f'{trial} ')
+    # the baseline moved: boot_a now holds the image dumped on 2026-11-10,
+    # not the stock trim, so every restore path has to write that back
+    new = new.replace("backup/recovery-20261021/boot_a-live-20261021.img",
+                      "backup/boot_a-before-2499-20261110.img")
+    new = new.replace("backup/boot_a-stock-trim.img",
+                      "backup/boot_a-before-2499-20261110.img")
+    new = new.replace("20873216", "67108864")
+    new = new.replace("fe6e8fbf321ea542eb060efcda27b70ae96065e82cc871d4c71082b7268c220d",
+                      BASELINE_SHA)
+    new = re.sub(r"^BH='[0-9a-f]{64}'", "BH='%s'" % BASELINE_SHA, new, flags=re.M)
     new = re.sub(r"authorization='[^']*'",
                  f"authorization='2026-11-09 user authorized continuing GPU acceleration and "
                  f"device tests. {trial}: {a.note.replace(chr(39), chr(92) + chr(39))} "
