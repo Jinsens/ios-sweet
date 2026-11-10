@@ -1,5 +1,72 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-10: NO APP EXTENSION IS REGISTERED (WALLPAPER+WIDGETS ARE ONE BUG); RENDERING IS GPU, NOT SOFTWARE; FRAME 49->37 ms, 15.3->24.6 fps <<<
+## >>> ACTIVE 2026-11-10: CPU CLOCKS NOW AT THE TOP (32 fps); THE PICTURE TEARS BECAUSE THE OVERLAY READS MEMORY LIVE <<<
+
+### The processor clock was never set - now it is
+
+MT6983 has a performance domain per cluster (mt6983.dts
+performance-controller@0011bc00, a block every 0x120 bytes from +0x10). The
+bootloader fills each domain's table with descending frequencies in the low
+twelve bits of each word; a domain picks one by index and sequences its own
+rail, which is all mediatek-cpufreq-hw.c does - table +0x00, enable +0x84,
+index +0x88, hardware state +0x8c. Read on the device (2487):
+
+    domain 0  30 states  200..1800 MHz, at index  8 = 1250 MHz, enable 1
+    domain 1  30 states  400..2850 MHz, at index 26 =  600 MHz, enable 0
+    domain 2  28 states 1300..3050 MHz, at index 27 = 1300 MHz, enable 0
+
+So the little cluster was at 1250 MHz - which is exactly what the earlier
+four-million-add probe read, so that number was right - and the A710 and X2
+clusters had never been paced at all. Writing enable=1 then index=0 takes
+all three to 1800 / 2850 / 3050 MHz and the machine stays up (2488, 2489,
+applied on the first submit). Effect: 50.1 -> 35.8 us per GL call on busy
+frames (1.40x, against the little cluster's 1250 -> 1800 MHz = 1.44x, so the
+compositor's work is on the little cluster and the X2 at 3.05 GHz is not
+what draws the UI), busiest ten seconds 27.7 -> 32.0 fps.
+
+PMCCNTR_EL0 reads a constant zero here, so the secure firmware keeps the
+cycle counter; the rate is read from the table by index instead. Nothing
+throttles: there is no thermal loop in this kernel, and the domains do their
+own SVS.
+
+### The tearing is the overlay reading memory live, not a frame being written
+
+Reported by the user as text that jumps with horizontal bands, and it happens
+in the boot console too, so it predates everything in this section. Four
+experiments, in order:
+
+1. 2492 made every scanout wait for the panel to finish receiving the frame
+   (the behaviour before 2475): present then cost ~17 ms a frame, `send` went
+   to 0/0. **No change** - so it is not a frame still leaving when the next
+   one starts.
+2. 2493 used the CPU copy path (`sweetfb_copy=1`) so the panel reads a buffer
+   the compositor never touches. **No change** - so it is not the shared
+   surface either.
+3. 2491 waited for a *fresh* tearing-effect edge before starting a frame.
+   `te seen N missed 0 stale N wait 0/3 us`: TE_RDY is a level, not an edge,
+   and re-asserts within microseconds of being cleared. Unusable.
+4. 2494 (`sweetfbprobe=1`) painted the surface the overlay was fetching from
+   a solid colour and sent nothing for two seconds, presentation held. **The
+   screen turned solid blue.** The overlay is reading that memory all the
+   time; nothing has to be triggered for a change to reach the glass.
+
+That is the whole bug: the display is free-running, so an address - or a
+pixel - written between two frames takes effect where it is written. The
+frame above the line is the old one, below it the new one.
+
+2495 tried to write the address just after DSI_INT_FRAME_DONE. That bit is a
+level too (`wait 0/1 us`, seen N missed 0), so nothing moved.
+
+What is left to try, in order:
+1. The mutex should latch OVL shadow registers at SOF. We toggle MUTEX_EN
+   0 -> 1 around every trigger, which may well be what defeats it. Try a
+   frame that writes the address and then pulses MUTEX_EN once, or find the
+   OVL shadow select bit in the vendor ddp_ovl.c.
+2. If the panel can be put in command mode (it is not: it displays what the
+   overlay fetches, continuously) the frame would be latched instead.
+3. A frame-boundary interrupt rather than a status bit.
+
+Do not read "the frame cost" numbers below as the whole story any more: the
+CPU clock change moves them.
 
 ### The missing wallpaper is an assertion in PosterBoard, not the missing GPU
 
