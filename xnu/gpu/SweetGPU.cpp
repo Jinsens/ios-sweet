@@ -38,6 +38,114 @@ static volatile uint32_t *address(uint64_t pa)
 static uint32_t read_word(void *,uint64_t pa){return *address(pa);}
 static void write_word(void *,uint64_t pa,uint32_t v){*address(pa)=v;}
 static void barrier(void *){__asm__ volatile("dsb sy" ::: "memory");}
+
+/* ---- processor clock -------------------------------------------------
+ *
+ * Nothing in this kernel asks for a processor clock, so every core runs at
+ * whatever the bootloader left. The three clusters each have a performance
+ * domain (mt6983.dts performance-controller@0011bc00, one block every
+ * 0x120 bytes from +0x10) and the bootloader fills each domain's table
+ * with descending frequencies in kHz in the low twelve bits. A domain then
+ * picks one by index and walks it itself: that is the whole interface
+ * mediatek-cpufreq-hw.c uses, a table read at +0x00, an enable at +0x84,
+ * the index at +0x88 and the hardware state at +0x8c.
+ *
+ * The rate is read rather than guessed: the index in force is looked up in
+ * that same table. (PMCCNTR_EL0 was tried first and reads a constant zero
+ * here, so the secure firmware is keeping the cycle counter.)
+ */
+#define SWEET_PERF_PA       0x0011b000u   /* page the domains start in */
+#define SWEET_PERF_FIRST    0xc10u        /* 0x0011bc10, domain 0 */
+#define SWEET_PERF_STRIDE   0x120u
+#define SWEET_PERF_DOMAINS  3u
+#define SWEET_PERF_LUT      0x00u
+#define SWEET_PERF_ENABLE   0x84u
+#define SWEET_PERF_STATE    0x88u
+#define SWEET_PERF_HW       0x8cu
+#define SWEET_PERF_LATENCY  0x114u
+
+/* Ask each cluster for its fastest entry and say what it was before.
+ *
+ * The table is the source of truth for the rate: PMCCNTR_EL0 reads a
+ * constant zero on this phone (the secure firmware keeps the counter for
+ * itself), so the index in force is read back and looked up in the table
+ * the domain itself holds, which is exact.
+ */
+static void
+sweet_cpu_clock_fastest(void)
+{
+	static bool done;
+	volatile uint32_t *regs;
+	uint32_t asked = 1;
+
+	if (done) {
+		return;
+	}
+	done = true;
+	(void)PE_parse_boot_argn("sweetcpuclock", &asked, sizeof(asked));
+	vm_offset_t map = ml_io_map(SWEET_PERF_PA, 0x2000);
+	if (map == 0) {
+		IOLog("SWEET CPU: performance domains did not map\n");
+		return;
+	}
+	regs = (volatile uint32_t *)(map + SWEET_PERF_FIRST);
+
+	for (unsigned d = 0; d < SWEET_PERF_DOMAINS; d++) {
+		volatile uint32_t *b = regs + (d * SWEET_PERF_STRIDE) / 4;
+		uint32_t previous = 0, top = 0, bottom = 0;
+		unsigned states = 0;
+		char line[256];
+		int n;
+
+		for (unsigned i = 0; i < 32; i++) {
+			uint32_t khz = (b[SWEET_PERF_LUT / 4 + i] & 0xfffu) * 1000u;
+			if (khz == 0 || (previous != 0 && khz >= previous)) {
+				break;  /* the table is descending and ends at a repeat */
+			}
+			previous = khz;
+			states++;
+		}
+		if (states != 0) {
+			top = (b[SWEET_PERF_LUT / 4] & 0xfffu) * 1000u;
+			bottom = previous;
+		}
+		n = snprintf(line, sizeof(line), "SWEET CPU: domain %u %u states MHz:", d, states);
+		for (unsigned i = 0; i < states && n > 0 && n < (int)sizeof(line) - 8; i++) {
+			n += snprintf(line + n, sizeof(line) - n, " %u",
+			    (unsigned)((b[SWEET_PERF_LUT / 4 + i] & 0xfffu)));
+		}
+		IOLog("%s | at %u (%u kHz) enable %u hw 0x%x, range %u..%u kHz\n", line,
+		    b[SWEET_PERF_STATE / 4],
+		    states && b[SWEET_PERF_STATE / 4] < states
+		        ? (b[SWEET_PERF_LUT / 4 + b[SWEET_PERF_STATE / 4]] & 0xfffu) * 1000u : 0u,
+		    b[SWEET_PERF_ENABLE / 4], b[SWEET_PERF_HW / 4], bottom, top);
+	}
+
+	if (asked == 0) {
+		return;
+	}
+	/* One domain at a time, and the intention is printed before the write:
+	 * a hang then names the domain that took the machine down. A domain
+	 * sequences its own rail, which is why mediatek-cpufreq-hw.c writes
+	 * only the index and nothing else. The big two read enable 0, so the
+	 * bootloader left the A710 cluster and the X2 at 600 MHz and 1300 MHz
+	 * of the 2850 and 3050 they offer. */
+	for (unsigned d = 0; d < SWEET_PERF_DOMAINS; d++) {
+		volatile uint32_t *b = regs + (d * SWEET_PERF_STRIDE) / 4;
+
+		IOLog("SWEET CPU: domain %u enable=1 index=0\n", d);
+		b[SWEET_PERF_ENABLE / 4] = 1;
+		barrier(NULL);
+		IODelay(2000);
+		b[SWEET_PERF_STATE / 4] = 0;
+		barrier(NULL);
+		IODelay(20000);
+		IOLog("SWEET CPU: domain %u enable %u index %u (%u kHz) hw 0x%x\n", d,
+		    b[SWEET_PERF_ENABLE / 4], b[SWEET_PERF_STATE / 4],
+		    (b[SWEET_PERF_LUT / 4 + (b[SWEET_PERF_STATE / 4] & 31u)] & 0xfffu) * 1000u,
+		    b[SWEET_PERF_HW / 4]);
+	}
+}
 static uint64_t ticks(void *)
 {uint64_t t;__asm__ volatile("isb; mrs %0,cntpct_el0":"=r"(t));return t;}
 static struct sweet_gpu_io gpu_io;
@@ -158,19 +266,13 @@ IOReturn SweetGPUUserClient::externalMethod(uint32_t selector,IOExternalMethodAr
             /* The client pings once per submit, and a frame submits around a
              * hundred times: a line each was 35783 IOLog calls in one run,
              * every one of them with gpu_lock held, and it pushed the lines
-             * that matter out of the console ring. Count them instead and say
-             * so once in a while, which still shows the client is alive. */
-            if (gpu_pings++ % 20000u == 0) {
-                /* How fast the processor this side runs at, because nothing
-                 * here sets a clock: one dependent add is about one cycle,
-                 * so the count over a measured time is the rate. */
-                uint64_t began = gpu_us(), x = 1;
-                for (uint64_t i = 0; i < 4000000ull; i++) {
-                    __asm__ volatile("add %0, %0, #1" : "+r"(x));
-                }
-                uint64_t took = gpu_us() - began;
-                IOLog("SWEET GPU: %llu pings, cpu about %llu MHz\n",
-                    (unsigned long long)gpu_pings, (unsigned long long)(took ? 4000000ull / took : 0));
+             * that matter out of the console ring. Count them instead, and
+             * use the twentieth frame to look at the processor clock, which
+             * is late enough that the compositor is drawing. */
+            if (gpu_pings++ == 0u) {
+                /* First submit: ask for the fastest state before the first
+                 * frame, not only when this is being looked at. */
+                sweet_cpu_clock_fastest();
             }
             rc=kIOReturnSuccess;break;
         }
