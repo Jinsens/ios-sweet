@@ -52,10 +52,11 @@ static uint64_t gpu_us(void)
     return ns/1000;
 }
 enum { GPU_STAT_IMPORT, GPU_STAT_MAP_PTE, GPU_STAT_MAP_FLUSH, GPU_STAT_UNMAP,
-       GPU_STAT_CLOSE, GPU_STAT_COUNT };
+       GPU_STAT_CLOSE, GPU_STAT_SUBMIT, GPU_STAT_WAIT, GPU_STAT_COUNT };
 static struct { uint64_t calls, total, max; } gpu_stat[GPU_STAT_COUNT];
 static const char *const gpu_stat_name[GPU_STAT_COUNT] = {
-    "surface import", "map ptes", "map flush", "unmap", "bo close" };
+    "surface import", "map ptes", "map flush", "unmap", "bo close",
+    "submit", "wait" };
 static void gpu_note(unsigned which,uint64_t began)
 {
     uint64_t now=gpu_us();
@@ -442,7 +443,9 @@ static IOReturn gpu_submit_async(GPUVM *v,struct sweet_gpu_submit *r)
            r->stream-b->va<=b->mapped-r->bytes){found=true;break;}
     }
     if(!found)return kIOReturnBadArgument;
+    uint64_t began=gpu_us();
     int rc=sweet_csf_runtime_enqueue(&queue,&gpu_io,&v->groups[r->group-1],r->stream,r->bytes,&last_report);
+    gpu_note(GPU_STAT_SUBMIT,began);
     submits++;
     if(rc){v->broken=true;failures++;}
     r->sequence=v->groups[r->group-1].sequence;
@@ -456,8 +459,10 @@ static IOReturn gpu_wait(GPUVM *v,struct sweet_gpu_wait *w)
     if(v->broken||!w->group||w->group>SWEET_CSF_GROUPS)return kIOReturnNotReady;
     struct sweet_csf_runtime_group *g=&v->groups[w->group-1];
     if(!g->active)return kIOReturnNotReady;
+    uint64_t began=gpu_us();
     int rc=sweet_csf_runtime_wait(&queue,&gpu_io,g,(uint32_t)w->sequence,w->insert,
         w->timeout_ms?w->timeout_ms:queue.timeout_ms,&last_report);
+    gpu_note(GPU_STAT_WAIT,began);
     static unsigned waits_logged;
     if(rc||waits_logged<8) {
         if(!rc)waits_logged++;

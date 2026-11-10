@@ -24,6 +24,7 @@ static struct sweet_csf_queue_config queue;
 static vm_offset_t gpu_map, arena_map;
 static IOLock *gpu_lock;
 static uint32_t ready, submits, failures;
+static uint64_t gpu_pings;             /* SWEET_GPU_PING calls: one a submit (see the selector) */
 static struct sweet_csf_queue_report last_report;
 
 static volatile uint32_t *address(uint64_t pa)
@@ -153,7 +154,25 @@ IOReturn SweetGPUUserClient::externalMethod(uint32_t selector,IOExternalMethodAr
              * calls are allowed to make progress while the GPU finishes. */
             IOLockUnlock(gpu_lock);rc=gpu_wait(vm,&r.wait);IOLockLock(gpu_lock);break;
         case SWEET_GPU_SURFACE:rc=gpu_surface(vm,&r.surface);break;
-        case SWEET_GPU_PING:IOLog("SWEET GPU: ping %llu\n",(unsigned long long)r.ping.tag);rc=kIOReturnSuccess;break;
+        case SWEET_GPU_PING:
+            /* The client pings once per submit, and a frame submits around a
+             * hundred times: a line each was 35783 IOLog calls in one run,
+             * every one of them with gpu_lock held, and it pushed the lines
+             * that matter out of the console ring. Count them instead and say
+             * so once in a while, which still shows the client is alive. */
+            if (gpu_pings++ % 20000u == 0) {
+                /* How fast the processor this side runs at, because nothing
+                 * here sets a clock: one dependent add is about one cycle,
+                 * so the count over a measured time is the rate. */
+                uint64_t began = gpu_us(), x = 1;
+                for (uint64_t i = 0; i < 4000000ull; i++) {
+                    __asm__ volatile("add %0, %0, #1" : "+r"(x));
+                }
+                uint64_t took = gpu_us() - began;
+                IOLog("SWEET GPU: %llu pings, cpu about %llu MHz\n",
+                    (unsigned long long)gpu_pings, (unsigned long long)(took ? 4000000ull / took : 0));
+            }
+            rc=kIOReturnSuccess;break;
         }
         memcpy(a->structureOutput,&r,size);a->structureOutputSize=size;IOLockUnlock(gpu_lock);return rc;
     }

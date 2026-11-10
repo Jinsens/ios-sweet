@@ -112,11 +112,44 @@ out", and the panel path says "copies 0 copy 0 us" with presents in 17 us.
 Draws land in offscreen textures (CA renders layers to FBOs) and the composite
 is drawn straight into the surface the panel scans out.
 
-What does cost is the CPU side of the GL calls themselves: frame 220 during an
-animation is 1048 calls / 202 draws in 49717 us with 2353 us of it waiting for
-the GPU and 331 us handing commands on, i.e. ~45 us a call. That, not software
-rasterisation, is the next thing to look at (glslow=US names the calls, or
-compare 202 draws against the same scene with glcensus=1).
+What does cost is the CPU side of the GL calls themselves. Over the 65 frame
+lines of 2482 the time inside a frame divides as:
+
+    GL calls themselves   68.6 %   (median 32.8 us a call)
+    attaching textures    21.4 %   (the per-frame import/VM_BIND, cached buffers)
+    waiting for the GPU    9.0 %
+    handing commands on    1.0 %
+    copying a picture out  0.0 %
+
+Three things were measured on the device since, and none of them is the whole
+answer:
+
+- 2484 removed the debug PING IOLog from the submit path. It was 93 % of the
+  console (77977 lines in 2482) and every line was written with gpu_lock held,
+  so removing it is right, but it changed nothing: median us a call 85.8
+  against 84.6, busiest window 21.1 fps against 24.6 (run-to-run work varies
+  by that much, so read that as no change). The call and its count stay.
+- 2485 timed the kernel side of a submit and of a wait: **submit 7 us** (max
+  17), **wait 376 us** (max 2504), 9600 waits over ~500 frames. The client
+  keeps 24 submissions in flight and then waits for the oldest
+  (redwood_drm.c pend_wait_head), so about 19 waits a frame = **7 ms a frame**
+  spent inside GL calls that the frame line does not count as waiting.
+- 2486: nothing in this kernel sets a processor clock, and a probe that times
+  four million dependent adds every 20000 pings reads **about 1250 MHz**, run
+  after run (1250, 1250, 1297, 1250). The A76 in this SoC is specified at
+  2.2-2.3 GHz, so userland runs at roughly half rate. At 32.8 us a call that
+  is ~40k cycles, which is an ordinary cost for Mesa state validation at
+  1.25 GHz; at the top rate the same frame would cost about half the CPU.
+
+So the order of what is left is:
+
+1. A processor clock. Nothing votes for one today; the rate is whatever the
+   bootloader left. This is the ~1.8x between 24 and 40 fps, and it is worth
+   more than every GL-side change on this list together.
+2. The ~19 queue-full waits a frame (7 ms). The queue is 24 deep on purpose
+   (redwood_drm.c: an async enqueue must not find the ring full), so the way
+   to cut these is fewer submissions a frame, not a deeper queue.
+3. attach, still 21 % of the frame.
 
 ### Frame cost
 
