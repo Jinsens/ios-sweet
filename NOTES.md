@@ -76,7 +76,7 @@ poll plus 0.3 ms launch plus 9.5 ms fixed hold), on the vsync workloop.
 This GPU change preserves that display behavior; if lag remains, GUI-only
 sleep/worker scheduling needs a separate surface-lifetime-safe change.
 
-## >>> ACTIVE 2026-11-13: 2516 NEGATIVE; RESTORED; INVESTIGATING IOSURFACE IN-USE <<<
+## >>> ACTIVE 2026-11-13: 2517 IN-USE FIX READY; PREFLIGHT PASSED; AWAIT EXACT TRIAL APPROVAL <<<
 
 ### 2026-11-12/13: host synchronization conclusions reopened
 
@@ -99,6 +99,48 @@ approval and full backup restoration. Its ABL historically rejects `fastboot boo
 (`unknown command`), so a hardware trial needs a concrete image and explicit
 approval for a temporary `boot_a` write followed by full backup restoration.
 Do not run an old generated runner based only on its embedded authorization.
+
+### 2517 build milestone: protect queued/displayed IOSurfaces
+
+2516 result committed as `9b21b97`. Missing in-use ABI is confirmed directly
+against actual20H392 IOSurface-20H392.disass (research/matisse/20261109-gles-inject):
+IsInUse reads64bits at shared+0x18; category0 is low32/category1 high32.
+User traps0/1 carry(id,category) only at local0->1/1->0 transitions. GetUseCount
+is process-local and cannot demonstrate a display hold. prohibitUseCount stays0.
+
+Implementation now snapshots SweetSurface.cpp/h under xnu/display (previously
+only ignored local tree), publishes the64-bit shared aggregate under table
+lock, isolates each client's categories, and removes own contributions on ref
+free/client close. Framebuffer acquires retain+use atomically with ID lookup
+before SwapEnd returns. Pending/inflight carry pointers; replacement, TE retry,
+copy and direct scanout transfer or release their exact owners. fShown remains
+in use until a completed replacement. Stop drains/cancels timer before pending
+cleanup; failed/async shutdown conservatively pins the hardware source. Wake
+redraw is separate from a pending frame. No display/PHY/DCS timing change.
+
+Validation:28/28 existing actual-driver MMIO tests and18/18 new actual-C++
+use-count/trap/client lifecycle/queue/present/retry/copy/shutdown tests pass
+under ASan/UBSan. Independent audits verified actual ABI, locks, zero-init,
+and ownership. Complete local build exit0, log build2517-native-final.log;
+no new CI run. GPU VM stays at the same2515 display baseline, excluding the
+concurrent2520 optimization to isolate this comparison.
+
+Kernel2517 SHA256
+`180b13db7914c6fb8c59be7ada49ab8175c7f9e80a1d4f7b047e1b32498c07c3`.
+Image uses exact2515 cmdline (vendor=1, hold14500us, lead300us).
+`shim2517-te/matisse-shim-gpu2517.img`,26,746,880 bytes, SHA256
+`78a7450731874ca6539418f98b4ce56e2d799cc557941402f591d67808ea03de`.
+Predicted full boot_a SHA256
+`cd3c66fd049910604de0c2029da04e8122cbfdce09740e1876bffea6efa31ddd`.
+Read-only preflight passed (`preflight2517.log`), including complete baseline
+readback and local image/backup hashes. No device runner/build currently active.
+Four temporary harness mutations (no use count, wrong shared offset, missing
+ownership transfer, lost retry) are all rejected by their behavioral tests.
+Manifest `display2517-build-manifest.json`; canonical/build files byte-identical.
+No2517 partition write authorized or executed. Next approval must cover this
+exact2517 image and restoration; ask user to keep the other chat off device.
+Observe especially camera-left dynamic flicker and occasional thin horizontal
+flashes; code/tests alone do not prove visible flicker is fixed.
 
 ### 2516 completed: zero lead did not improve flicker
 

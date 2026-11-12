@@ -83,6 +83,61 @@ enum {
 #define SWEET_FB_LOGICAL_H              2436
 #define SWEET_FB_FORMAT_BGRA            0x42475241
 
+static uint32_t
+get32(const uint8_t *p, uint32_t off)
+{
+	uint32_t v;
+	memcpy(&v, p + off, 4);
+	return v;
+}
+
+/* A frame owns one retain AND one IOSurface in-use contribution per enabled
+ * layer. IDs alone are insufficient: CA can release/recycle a queued surface
+ * before the timer looks it up, or draw into it while the panel reads it. */
+struct sweet_fb_frame {
+	uint8_t rec[SWEET_FB_SWAP_REC_SIZE];
+	SweetSurface *surfaces[SWEET_FB_LAYERS];
+};
+
+static void
+sweet_fb_frame_release(struct sweet_fb_frame *frame)
+{
+	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+		sweet_surface_end_use(frame->surfaces[layer]);
+		frame->surfaces[layer] = NULL;
+	}
+}
+
+/* Destination is empty. Moving never drops the source's in-use protection. */
+static void
+sweet_fb_frame_move(struct sweet_fb_frame *dst, struct sweet_fb_frame *src)
+{
+	memcpy(dst, src, sizeof(*dst));
+	bzero(src, sizeof(*src));
+}
+
+static bool
+sweet_fb_frame_acquire(struct sweet_fb_frame *frame, const uint8_t *rec)
+{
+	bzero(frame, sizeof(*frame));
+	memcpy(frame->rec, rec, sizeof(frame->rec));
+	uint32_t mask = get32(rec, 0x104);
+	if (mask & ~((1u << SWEET_FB_LAYERS) - 1)) {
+		return false;
+	}
+	for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+		uint32_t id = get32(rec, 0x54 + 4 * layer);
+		if ((mask & (1u << layer)) && id != 0) {
+			frame->surfaces[layer] = sweet_surface_begin_use(id);
+			if (frame->surfaces[layer] == NULL) {
+				sweet_fb_frame_release(frame);
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 class IOMobileFramebuffer : public IOService {
 	OSDeclareDefaultStructors(IOMobileFramebuffer);
 };
@@ -97,6 +152,7 @@ class AppleCLCD : public IOMobileFramebuffer {
 	IOWorkLoop         *fWorkLoop;
 	IOTimerEventSource *fVsync;
 	uint64_t            fVsyncCount;
+	bool                fVsyncAttached;
 
 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
 
@@ -112,13 +168,15 @@ public:
 	OSArray      *fClients;
 	uint32_t      fSwapID;
 	bool          fConsolePaused;
-	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+	struct sweet_fb_frame fPending;   /* latest queued frame, owns its surfaces */
 	bool          fDirty;
+	bool          fStopping;
 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
 	bool          fPowerOff;      /* RequestPowerChange(0) */
+	bool          fRedrawShown;   /* power-on redraw, separate from an owned swap */
 	uint32_t      fFadeStep;      /* fade-out steps done while off */
 	bool          fScanout;       /* point the overlay at the frame (sweetfb_copy=1: copy) */
-	SweetSurface *fShown;         /* surface the panel is fetching from, retained */
+	SweetSurface *fShown;         /* retained + in use until next scanout replaces it */
 	/* What the panel path costs, for the vsync log. */
 	uint64_t      fStatTicks, fStatLast, fStatSum, fStatMax;
 	uint64_t      fStatSwaps, fStatPresents, fStatScans, fStatCopies;
@@ -142,11 +200,13 @@ public:
 	int32_t       fStatReason;    /* why the last direct scanout was refused */
 
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
 	void free() APPLE_KEXT_OVERRIDE;
+	void quiesce();
 	void addClient(IOMobileFramebufferUserClient *client);
 	void removeClient(IOMobileFramebufferUserClient *client);
 	void swap(const uint8_t *rec);
-	void present(const uint8_t *rec);
+	void present(struct sweet_fb_frame *frame);
 };
 
 OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
@@ -217,6 +277,7 @@ AppleCLCD::start(IOService *provider)
 		IOLog("SWEET FB: no vsync timer\n");
 		return false;
 	}
+	fVsyncAttached = true;
 	uint32_t hz = 10;
 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
@@ -251,9 +312,59 @@ AppleCLCD::start(IOService *provider)
 }
 
 void
+AppleCLCD::quiesce()
+{
+	if (fLock != NULL) {
+		IOLockLock(fLock);
+		fStopping = true;
+		IOLockUnlock(fLock);
+	}
+	/* removeEventSource takes the workloop gate and drains a running callback.
+	 * Never hold fLock while waiting: the callback and its rearm need it. */
+	if (fVsync != NULL) {
+		fVsync->disable();
+		fVsync->cancelTimeout();
+		if (fVsyncAttached) {
+			fWorkLoop->removeEventSource(fVsync);
+			fVsyncAttached = false;
+		}
+	}
+	sweet_fb_frame_release(&fPending);
+	fDirty = false;
+	if (fShown != NULL) {
+		/* The permanent boot buffer is safe even after this service is gone.
+		 * A successful switch proves the old source is no longer being fetched.
+		 * If the engine cannot switch, preserve that one pinned allocation. */
+		bool async = sweet_disp_shadow_on && !sweet_disp_vendor &&
+		    !sweet_disp_te_sync && !(sweet_disp_te_period != 0 && sweet_disp_te_align);
+		if (!async && sweet_display_scanout(fPhys, fRowBytes) == 0) {
+			sweet_surface_end_use(fShown);
+		} else {
+			IOLog("SWEET FB: shutdown could not switch scanout; keeping surface %u pinned\n", fShown->id);
+		}
+	}
+	fShown = NULL;
+}
+
+void
+AppleCLCD::stop(IOService *provider)
+{
+	quiesce();
+	IOService::stop(provider);
+}
+
+void
 AppleCLCD::free()
 {
-	OSSafeReleaseNULL(fShown);
+	quiesce();
+	OSSafeReleaseNULL(fVsync);
+	OSSafeReleaseNULL(fWorkLoop);
+	OSSafeReleaseNULL(fClients);
+	OSSafeReleaseNULL(fSurface);
+	if (fLock != NULL) {
+		IOLockFree(fLock);
+		fLock = NULL;
+	}
 	IOService::free();
 }
 
@@ -289,13 +400,23 @@ sweet_vsync_arm(AppleCLCD *fb, IOTimerEventSource *sender)
 		fb->fNextDue = now + perAbs;
 		deltaUs = (int64_t)fb->fVsyncUs;
 	}
-	sender->setTimeoutUS((uint32_t)deltaUs);
+	IOLockLock(fb->fLock);
+	if (!fb->fStopping) {
+		sender->setTimeoutUS((uint32_t)deltaUs);
+	}
+	IOLockUnlock(fb->fLock);
 }
 
 void
 AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 {
 	AppleCLCD *fb = (AppleCLCD *)owner;
+	IOLockLock(fb->fLock);
+	bool stopping = fb->fStopping;
+	IOLockUnlock(fb->fLock);
+	if (stopping) {
+		return;
+	}
 	uint64_t now = mach_absolute_time();
 	uint64_t count = ++fb->fVsyncCount;
 	uint64_t values[6] = {
@@ -494,21 +615,32 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		}
 	}
 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+	bool redrawShown = fb->fRedrawShown;
+	fb->fRedrawShown = false;
 	if (fb->fProbe == 2) {
 		flush = false;   /* hold the painted surface on the panel */
 	}
-	uint8_t *rec = NULL;
+	struct sweet_fb_frame *frame = NULL;
 	if (flush) {
-		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
-		if (rec != NULL) {
-			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+		frame = (struct sweet_fb_frame *)IOMallocData(sizeof(*frame));
+		if (frame != NULL) {
+			sweet_fb_frame_move(frame, &fb->fPending);
 			fb->fDirty = false;
 		}
 	}
 	IOLockUnlock(fb->fLock);
-	if (rec != NULL) {
-		fb->present(rec);
-		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+	if (frame != NULL) {
+		fb->present(frame);
+		sweet_fb_frame_release(frame);
+		IOFreeData(frame, sizeof(*frame));
+	} else if (redrawShown && fb->fShown != NULL) {
+		/* fPending is empty after its ownership was moved to the presenter.
+		 * A wake must redraw the retained display source, not an empty record. */
+		if (sweet_display_scanout(fb->fShown->physicalAddress(), fb->fRowBytes) != 0) {
+			IOLockLock(fb->fLock);
+			fb->fRedrawShown = true;
+			IOLockUnlock(fb->fLock);
+		}
 	}
 	/* Waiting for the panel's frame boundary must not stretch the display
 	 * link: the compositor paces itself by these notifications, so the next
@@ -536,14 +668,6 @@ AppleCLCD::removeClient(IOMobileFramebufferUserClient *client)
 	IOLockUnlock(fLock);
 }
 
-static uint32_t
-get32(const uint8_t *p, uint32_t off)
-{
-	uint32_t v;
-	memcpy(&v, p + off, 4);
-	return v;
-}
-
 static uint32_t sweet_fb_swaps_logged;
 static uint64_t sweet_fb_swap_count;
 
@@ -557,19 +681,32 @@ static uint64_t sweet_fb_swap_count;
 void
 AppleCLCD::swap(const uint8_t *rec)
 {
+	struct sweet_fb_frame next = {}, old = {};
+	if (!sweet_fb_frame_acquire(&next, rec)) {
+		IOLog("SWEET FB: invalid or unavailable swap surface\n");
+		return;
+	}
 	IOLockLock(fLock);
-	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+	if (fStopping) {
+		IOLockUnlock(fLock);
+		sweet_fb_frame_release(&next);
+		return;
+	}
+	sweet_fb_frame_move(&old, &fPending);
+	sweet_fb_frame_move(&fPending, &next);
 	fDirty = true;
 	fStatSwaps++;
 	IOLockUnlock(fLock);
+	sweet_fb_frame_release(&old);
 	if ((++sweet_fb_swap_count % 1000) == 0) {
 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
 	}
 }
 
 void
-AppleCLCD::present(const uint8_t *rec)
+AppleCLCD::present(struct sweet_fb_frame *frame)
 {
+	const uint8_t *rec = frame->rec;
 	uint32_t mask = get32(rec, 0x104);
 	uint64_t copyBegan = 0;
 	uint64_t presentBegan = mach_absolute_time();
@@ -606,7 +743,7 @@ AppleCLCD::present(const uint8_t *rec)
 		int32_t sx = (int32_t)get32(a, 0), sy = (int32_t)get32(a, 4);
 		int32_t dx = (int32_t)get32(b, 0) - fOffX, dy = (int32_t)get32(b, 4) - fOffY;
 		int32_t w = (int32_t)get32(b, 8), h = (int32_t)get32(b, 12);
-		SweetSurface *s = id != 0 ? sweet_surface_copy(id) : NULL;
+		SweetSurface *s = frame->surfaces[layer];
 		uint64_t phys = 0;
 
 		if (s != NULL) {
@@ -627,9 +764,8 @@ AppleCLCD::present(const uint8_t *rec)
 			int rc = sweet_display_scanout(phys, fRowBytes);
 			if (rc == 0) {
 				fStatScans++;
-				/* Two frames in a row onto one surface means the panel
-				 * is reading memory the compositor is drawing into: a
-				 * frame with bands of the next one in it. */
+				/* Repeats describe buffer reuse; in-use protection now spans
+				 * both the pending frame and the currently displayed one. */
 				if (id == fLastScanId) {
 					fStatRepeats++;
 				}
@@ -638,8 +774,9 @@ AppleCLCD::present(const uint8_t *rec)
 				}
 				fLastScanId = id;
 				fLastScanPhys = phys;
-				OSSafeReleaseNULL(fShown);
-				fShown = s;		/* the panel is reading it now */
+				sweet_surface_end_use(fShown);
+				fShown = s;     /* transfer queued ownership to the display */
+				frame->surfaces[layer] = NULL;
 				goto shown;
 			}
 			fStatRefused++;
@@ -650,11 +787,10 @@ AppleCLCD::present(const uint8_t *rec)
 				 * Retry this record only if no newer swap is already queued. */
 				IOLockLock(fLock);
 				if (!fDirty) {
-					memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+					sweet_fb_frame_move(&fPending, frame);
 					fDirty = true;
 				}
 				IOLockUnlock(fLock);
-				s->release();
 				return;
 			}
 			if (fStatScans + fStatRefused <= 3) {
@@ -673,7 +809,6 @@ AppleCLCD::present(const uint8_t *rec)
 				    s ? s->bytesPerElement : 0, sx, sy, dx, dy, w, h, fWidth, fHeight);
 			}
 		}
-		OSSafeReleaseNULL(s);
 	}
 
 	copyBegan = mach_absolute_time();
@@ -688,7 +823,7 @@ AppleCLCD::present(const uint8_t *rec)
 		if (!(mask & (1u << layer)) || id == 0) {
 			continue;
 		}
-		SweetSurface *s = sweet_surface_copy(id);
+		SweetSurface *s = frame->surfaces[layer];
 		if (sweet_fb_swaps_logged < 16) {
 			sweet_fb_swaps_logged++;
 			IOLog("SWEET FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
@@ -697,7 +832,6 @@ AppleCLCD::present(const uint8_t *rec)
 			    get32(a, 12), dx, dy, w, h);
 		}
 		if (s == NULL || s == fSurface) {
-			OSSafeReleaseNULL(s);
 			continue;
 		}
 		uintptr_t src = s->kernelAddress();
@@ -750,7 +884,6 @@ AppleCLCD::present(const uint8_t *rec)
 				    (size_t)w * 4);
 			}
 		}
-		s->release();
 	}
 	/* Command-mode panels need a transfer after the CPU copy. The vsync
 	 * timer already limits presentation to sweetfb_hz; console refreshes
@@ -951,7 +1084,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			if (off != fFB->fPowerOff) {
 				fFB->fPowerOff = off;
 				fFB->fFadeStep = 0;
-				fFB->fDirty = true;     /* on: redraw the latest frame */
+				fFB->fRedrawShown = !off;
 			}
 			IOLockUnlock(fFB->fLock);
 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");

@@ -6,6 +6,7 @@ ignored by git. The build compiles the copies in
 
     xnu/out/local/xnu/osfmk/arm64/sweet_matisse_dsi.{c,h}
     xnu/out/local/xnu/iokit/Kernel/arm/SweetFramebuffer.cpp
+    xnu/out/local/xnu/iokit/Kernel/arm/SweetSurface.{cpp,h}
 
 so an edit here has to be copied there before `tools/build-xnu-clt.sh`.
 
@@ -61,3 +62,39 @@ is never deliberately cut off at that bound; a later present waits for idle
 before stopping the pipeline. HS is cleared only after completion evidence.
 Trial 2515 uses a 14.5 ms minimum hold because NULL packets can lengthen the
 frame. The MMIO regression suite now has 27 cases.
+
+
+Trial 2516 removed only the 300us lead with the exact2515 kernel. User saw
+no improvement or worse flicker. All1441 transfers completed, so the next
+baseline keeps the300us lead and vendor completion configuration.
+
+Trial2517 adds the missing IOSurface in-use protocol. The actual20H392
+IOSurfaceClientIsInUse reads the64-bit shared field at+0x18 (cat0 low32,
+cat1 high32); library traps0/1 carry(id,category) only on process-local
+zero/nonzero transitions. SweetSurface now publishes both aggregate counts
+with one aligned release store, accounts for each client's own contributions,
+and removes only those contributions at ref teardown.
+
+SwapEnd atomically looks up/retains/marks every enabled surface in use before
+returning. The queue carries those pointers through dequeue and TE retry;
+a replacement acquires its sources before releasing the superseded frame.
+Direct scanout transfers the queued ownership to fShown until the next
+completed switch. Copy sources remain protected through the copy. This
+closes the window where CA could redraw or free a queued source even though
+fShown itself was retained. HakiOS MiniIOMobileFramebuffer documents the same
+partial-screen flicker from CA redrawing pending surfaces; causality on this
+phone still requires hardware validation.
+
+The service drains its timer before releasing pending frames. Shutdown first
+switches to the permanent boot buffer; a failed switch or explicitly enabled
+no-TE asynchronous shadow mode conservatively leaves one source pinned.
+The latter experimental mode still lacks a hardware retirement guarantee;
+2517 uses the measured-TE vendor path. Power-on redraw is separate from a
+pending swap, so moving queue ownership cannot enqueue an empty record.
+
+SweetSurface.cpp/h are now canonical snapshots alongside the framebuffer;
+copy all three to the build tree together. The surface snapshots include the
+previous working layout/wrapping/cache code and introduce no GPU VM change.
+Run python3 -m unittest tools.tests.test_sweet_surface_use for the actual C++
+count/trap/queue/presentation code under ASan/UBSan. These tests and the MMIO
+suite verify ownership and transfer order, not the absence of visible flicker.
