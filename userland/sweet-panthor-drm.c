@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT
  * Mesa Panthor ABI over SweetGPU's Darwin IOUserClient. Hardware submission
- * is synchronous; timeline values become signalled only after its GPU-written
- * fence completes. No JM ioctls, software renderer or fabricated completion. */
+ * supports synchronous and queued submission. Timeline values become signalled
+ * only after the GPU-written fence completes. No JM ioctls, software renderer
+ * or fabricated completion. */
 #include <IOKit/IOKitLib.h>
 #include <pthread.h>
 #include <sys/mman.h>
@@ -38,16 +39,16 @@ static unsigned vm_alive;
  * wait-before-submit sync) and wherever a resource's lifetime needs the GPU
  * to have finished. The synchronous path stays the default. */
 #define PEND 64u
-#define PEND_HANDLES 4u
-struct pending {uint32_t group,sequence,insert,count,handle[PEND_HANDLES];uint64_t point[PEND_HANDLES];};
+/* A fence is independent of a userspace syncobj handle. Transfers retain the
+ * exact hardware ticket, so destroying/resetting/reusing its source handle
+ * cannot change the dependency already copied to another object. */
+struct gpu_fence {unsigned refs,complete;uint32_t group,sequence,insert;};
+struct sync_point {uint64_t value;struct gpu_fence *fence;struct sync_point *next;};
+struct pending {struct gpu_fence *fence;};
 static struct pending pend[PEND];
 static unsigned pend_head,pend_tail,pend_count;
 static int async_submit;
-/* SYNCOBJ_TRANSFER copies a fence, it does not wait for it. An unsignalled
- * transfer records the source point here; the destination becomes signalled
- * when that source point is reached. */
-struct forwarded {uint32_t src;uint64_t point,value;};
-static struct forwarded fwd[OBJECTS];
+static struct sync_point *sync_points[OBJECTS];
 static int error(int e){errno=e;return -1;}
 /* Bring-up trace. The probe is PID 1 and the kernel console stops when it
  * wedges, so the trace goes to a file on the read-write root that a later
@@ -102,10 +103,12 @@ int drmOpenWithType(const char *name,const char *busid,int type)
             pthread_mutex_unlock(&lock);return error(ENODEV);
         }
         device=open("/dev/null",O_RDWR|O_CLOEXEC);
-        char arguments[1024];size_t asize=sizeof(arguments);
-        if(!sysctlbyname("kern.bootargs",arguments,&asize,NULL,0))
+        char arguments[1024]={0};size_t asize=sizeof(arguments);
+        if(!sysctlbyname("kern.bootargs",arguments,&asize,NULL,0)) {
+            arguments[sizeof(arguments)-1]=0;
             async_submit=strstr(arguments,"gpuasync=1")!=NULL;
-        trace_on=async_submit;
+        }
+        trace_on=async_submit&&strstr(arguments,"gputrace=1")!=NULL;
         fprintf(stderr,"SweetGPU Panthor: GPU=%08x regs=%u scoreboards=%u%s\n",info.gpu[0],info.cs[2],info.cs[3],
             async_submit?" async":" sync");
     }
@@ -119,76 +122,92 @@ drmVersionPtr drmGetVersion(int fd)
 void drmFreeVersion(drmVersionPtr v){if(v){free(v->name);free(v->date);free(v->desc);free(v);}}
 int drmGetCap(int fd,uint64_t cap,uint64_t *value)
 {(void)fd;*value=cap==DRM_CAP_SYNCOBJ||cap==DRM_CAP_SYNCOBJ_TIMELINE;return 0;}
-static int signalled(uint32_t handle,uint64_t point)
-{return handle&&handle<OBJECTS&&syncs[handle].used&&syncs[handle].signalled&&syncs[handle].point>=point;}
-static void pend_push(uint32_t group,uint32_t sequence,uint32_t insert,
-    const struct drm_panthor_obj_array *a)
+static void fence_put(struct gpu_fence *f)
+{if(f&&!--f->refs)free(f);}
+static void points_clear(uint32_t handle)
 {
-    if(pend_count==PEND)return;
-    struct pending *p=&pend[pend_tail];
-    memset(p,0,sizeof(*p));p->group=group;p->sequence=sequence;p->insert=insert;
-    for(unsigned i=0;a&&i<a->count&&p->count<PEND_HANDLES;i++) {
-        const struct drm_panthor_sync_op *s=(const void *)(uintptr_t)(a->array+(uint64_t)a->stride*i);
-        if((s->flags>>31)!=1||!s->handle||s->handle>=OBJECTS)continue;
-        p->handle[p->count]=s->handle;p->point[p->count]=(s->flags&1)?s->timeline_value:0;p->count++;
+    struct sync_point *p=sync_points[handle];sync_points[handle]=NULL;
+    while(p){struct sync_point *next=p->next;fence_put(p->fence);free(p);p=next;}
+}
+static void resolve(uint32_t handle)
+{
+    if(!handle||handle>=OBJECTS||!syncs[handle].used)return;
+    struct sync_point **link=&sync_points[handle];
+    while(*link) {
+        struct sync_point *p=*link;
+        if(!p->fence->complete){link=&p->next;continue;}
+        if(p->value>syncs[handle].point)syncs[handle].point=p->value;
+        syncs[handle].signalled=1;*link=p->next;fence_put(p->fence);free(p);
     }
-    pend_tail=(pend_tail+1)%PEND;pend_count++;
+}
+static int signalled(uint32_t handle,uint64_t point)
+{
+    if(!handle||handle>=OBJECTS||!syncs[handle].used)return 0;
+    resolve(handle);
+    return syncs[handle].signalled&&syncs[handle].point>=point;
+}
+static struct sync_point *point_find(uint32_t handle,uint64_t value)
+{
+    struct sync_point *best=NULL;
+    for(struct sync_point *p=sync_points[handle];p;p=p->next)
+        if(p->value>=value&&(!best||p->value<best->value))best=p;
+    return best;
+}
+static void pend_push(struct gpu_fence *f)
+{
+    pend[pend_tail].fence=f;pend_tail=(pend_tail+1)%PEND;pend_count++;
 }
 /* Waits for the oldest queued fence. The kernel releases gpu_lock while it
  * polls, so other clients can enqueue during the wait; the transport mutex is
  * only held by callers that already own it. */
-static int pend_wait_head(void)
+static int pend_wait_head_timeout(uint32_t timeout_ms)
 {
     if(!pend_count)return 0;
-    struct pending *p=&pend[pend_head];
-    struct sweet_gpu_wait w={.group=p->group,.sequence=p->sequence,.insert=p->insert,.timeout_ms=5000};
-    tr("wait seq=%u begin",(unsigned)p->sequence);
-    if(call(SWEET_GPU_WAIT,&w,sizeof(w))){tr("wait seq=%u failed %d",(unsigned)p->sequence,errno);return -1;}
-    tr("wait seq=%u done",(unsigned)p->sequence);
-    for(unsigned i=0;i<p->count;i++) {
-        if(p->point[i]>syncs[p->handle[i]].point)syncs[p->handle[i]].point=p->point[i];
-        syncs[p->handle[i]].signalled=1;
-    }
+    struct gpu_fence *f=pend[pend_head].fence;
+    struct sweet_gpu_wait w={.group=f->group,.sequence=f->sequence,.insert=f->insert,.timeout_ms=timeout_ms};
+    tr("wait seq=%u begin",(unsigned)f->sequence);
+    if(call(SWEET_GPU_WAIT,&w,sizeof(w))){tr("wait seq=%u failed %d",(unsigned)f->sequence,errno);return -1;}
+    tr("wait seq=%u done",(unsigned)f->sequence);
+    f->complete=1;fence_put(f);pend[pend_head].fence=NULL;
     pend_head=(pend_head+1)%PEND;pend_count--;
     pthread_cond_broadcast(&changed);
     return 0;
 }
-static int pend_drain(uint32_t handle);
-static int pend_contains(uint32_t handle)
+static int pend_wait_head(void){return pend_wait_head_timeout(5000);}
+static int64_t monotonic_ns(void)
 {
-    for(unsigned n=0;n<pend_count;n++) {
-        struct pending *p=&pend[(pend_head+n)%PEND];
-        for(unsigned i=0;i<p->count;i++)if(p->handle[i]==handle)return 1;
+    struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
+    return (int64_t)now.tv_sec*1000000000+now.tv_nsec;
+}
+static int wait_one_until(int64_t deadline)
+{
+    int64_t now=monotonic_ns();
+    if(deadline<=now)return error(ETIME);
+    uint64_t ms=((uint64_t)(deadline-now)+999999)/1000000;
+    if(ms>5000)ms=5000;
+    if(!pend_count)return error(EIO);
+    return pend_wait_head_timeout((uint32_t)ms);
+}
+static int fence_wait_ticket(struct gpu_fence *f)
+{
+    /* The caller holds a sync-point reference; popping the FIFO cannot free
+     * this ticket until it has observed the GPU-written completion. */
+    while(!f->complete) {
+        if(!pend_count)return error(EIO);
+        if(pend_wait_head())return -1;
     }
     return 0;
 }
-static void resolve(uint32_t handle)
-{
-    if(!handle||handle>=OBJECTS||!fwd[handle].src)return;
-    uint32_t src=fwd[handle].src;uint64_t point=fwd[handle].point,value=fwd[handle].value;
-    if(!signalled(src,point))return;
-    if(value>syncs[handle].point)syncs[handle].point=value;
-    syncs[handle].signalled=1;fwd[handle].src=0;
-}
-/* Wait until handle is signalled at point, following one forwarding hop.
- * Draining only while the *requested* point is unreached: an older, already
- * signalled point on the same handle must not end the wait. */
+/* Wait only for the requested attached timeline point. A future, unattached
+ * point is left for TimelineWait's normal condition/deadline handling. */
 static int fence_wait(uint32_t handle,uint64_t point)
 {
     if(!async_submit)return 0;
-    for(unsigned k=0;k<4096;k++) {
-        resolve(handle);
-        if(signalled(handle,point))return 0;
-        if(fwd[handle].src) {
-            if(pend_drain(fwd[handle].src))return -1;
-            resolve(handle);
-            if(signalled(handle,point))return 0;
-            if(!pend_count)return 0;
-            continue;
-        }
-        if(!pend_count)return 0;
-        if(pend_wait_head())return -1;
-    }
+    if(!handle||handle>=OBJECTS||!syncs[handle].used)return error(EINVAL);
+    if(signalled(handle,point))return 0;
+    struct sync_point *p=point_find(handle,point);
+    if(p&&fence_wait_ticket(p->fence))return -1;
+    resolve(handle);
     return 0;
 }
 static int pend_drain_all(void)
@@ -196,14 +215,37 @@ static int pend_drain_all(void)
     while(pend_count)if(pend_wait_head())return -1;
     return 0;
 }
-/* Drain the FIFO up to and including the entry that signals handle. Work is
- * in-order per group, so everything ahead of it has to be waited for too. */
-static int pend_drain(uint32_t handle)
+/* Attach a preallocated point. A timeline's earlier operations must complete
+ * before a new, independently ordered group can advance its high-water mark.
+ * The compositor's same-group, monotonic sequence path never waits here. */
+static int point_order(uint32_t handle,struct gpu_fence *fence)
 {
-    if(!async_submit)return 0;
-    unsigned guard=pend_count+1;
-    while(pend_count&&!signalled(handle,0)&&guard--)if(pend_wait_head())return -1;
+    resolve(handle);
+    for(struct sync_point *p=sync_points[handle];p;p=p->next) {
+        if(!fence||p->fence->group!=fence->group||
+           p->fence->sequence>fence->sequence) {
+            if(fence_wait_ticket(p->fence))return -1;
+        }
+    }
     return 0;
+}
+/* No allocation, hardware call, or failure is permitted during publication. */
+static void point_publish(uint32_t handle,struct sync_point *point)
+{
+    resolve(handle);
+    if(!point->value) {
+        points_clear(handle);syncs[handle].point=0;syncs[handle].signalled=0;
+    }
+    if(!point->fence) {
+        if(point->value>syncs[handle].point)syncs[handle].point=point->value;
+        syncs[handle].signalled=1;free(point);return;
+    }
+    point->next=sync_points[handle];sync_points[handle]=point;
+}
+static int point_attach(uint32_t handle,struct sync_point *point)
+{
+    if(point_order(handle,point->fence))return -1;
+    point_publish(handle,point);return 0;
 }
 static int sync_ops(struct drm_panthor_obj_array a,int signal)
 {
@@ -211,13 +253,52 @@ static int sync_ops(struct drm_panthor_obj_array a,int signal)
     if(a.count>OBJECTS||(a.count&&a.stride!=sizeof(struct drm_panthor_sync_op)))return error(EINVAL);
     for(unsigned i=0;i<a.count;i++) {
         const struct drm_panthor_sync_op *s=(const void *)(uintptr_t)(a.array+(uint64_t)a.stride*i);
-        if(((s->flags>>31)!=0)!=signal)continue;
         if(!s->handle||s->handle>=OBJECTS||!syncs[s->handle].used||(s->flags&0x7ffffffeu))return error(EINVAL);
+        if(((s->flags>>31)!=0)!=signal)continue;
         uint64_t point=(s->flags&1)?s->timeline_value:0;
-        if(signal){if(point>syncs[s->handle].point)syncs[s->handle].point=point;syncs[s->handle].signalled=1;}
+        if(signal){
+            /* Output ordering is preflighted before synchronous work. Its
+             * completed signal requires no allocation or fallible operation. */
+            resolve(s->handle);
+            if(!point){points_clear(s->handle);syncs[s->handle].point=0;}
+            if(point>syncs[s->handle].point)syncs[s->handle].point=point;
+            syncs[s->handle].signalled=1;
+        }
         else {if(fence_wait(s->handle,point))return -1;if(!signalled(s->handle,point))return error(ETIME);}
     }
     if(signal)pthread_cond_broadcast(&changed);return 0;
+}
+static int sync_output_order(struct drm_panthor_obj_array a)
+{
+    for(unsigned i=0;i<a.count;i++) {
+        const struct drm_panthor_sync_op *s=(const void *)(uintptr_t)(a.array+(uint64_t)a.stride*i);
+        if((s->flags>>31)&&point_order(s->handle,NULL))return -1;
+    }
+    return 0;
+}
+struct prepared_signal {uint32_t handle;struct sync_point *point;};
+static void signals_free(struct prepared_signal *signals,unsigned count)
+{
+    for(unsigned i=0;i<count;i++)if(signals[i].point) {
+        fence_put(signals[i].point->fence);free(signals[i].point);
+    }
+    free(signals);
+}
+static int signals_prepare(struct drm_panthor_obj_array a,struct gpu_fence *f,
+    struct prepared_signal **out,unsigned *count)
+{
+    struct prepared_signal *signals=calloc(a.count?a.count:1,sizeof(*signals));
+    if(!signals)return error(ENOMEM);
+    unsigned n=0;
+    for(unsigned i=0;i<a.count;i++) {
+        const struct drm_panthor_sync_op *s=(const void *)(uintptr_t)(a.array+(uint64_t)a.stride*i);
+        if(!(s->flags>>31))continue;
+        struct sync_point *p=calloc(1,sizeof(*p));
+        if(!p){signals_free(signals,n);return error(ENOMEM);}
+        p->value=(s->flags&1)?s->timeline_value:0;p->fence=f;f->refs++;
+        signals[n++]=(struct prepared_signal){s->handle,p};
+    }
+    *out=signals;*count=n;return 0;
 }
 static void *map_bo(uint32_t handle,uint64_t bytes)
 {
@@ -301,6 +382,7 @@ static int ioctl_locked(unsigned long request,void *arg)
         for(unsigned i=0;i<r->ops.count;i++) {
             struct drm_panthor_vm_bind_op *o=(void *)(uintptr_t)(r->ops.array+(uint64_t)i*r->ops.stride);
             if(sync_ops(o->syncs,0))return -1;
+            if(sync_output_order(o->syncs))return -1;
             if((o->flags>>28)==2&&pend_drain_all())return -1;
             if((o->flags>>28)!=2) {
                 struct sweet_gpu_map m={o->bo_handle,o->flags,o->bo_offset,o->va,o->size};
@@ -327,23 +409,46 @@ static int ioctl_locked(unsigned long request,void *arg)
     if(request==DRM_IOCTL_PANTHOR_GROUP_SUBMIT) {
         struct drm_panthor_group_submit *r=arg;
         if(r->queue_submits.stride!=sizeof(struct drm_panthor_queue_submit)||r->queue_submits.count>1024)return error(EINVAL);
-        /* The command ring holds 32 submissions. Keep the queue shallow so an
-         * async enqueue never finds the ring full and reports -62. */
-        if(async_submit)while(pend_count>=24)if(pend_wait_head())return -1;
+        /* The 4096-byte ring has 32 envelopes; one stays unused, giving 31
+         * usable slots. Keep at most 24 transport entries outstanding. */
         for(unsigned i=0;i<r->queue_submits.count;i++) {
             struct drm_panthor_queue_submit *q=(void *)(uintptr_t)(r->queue_submits.array+(uint64_t)i*r->queue_submits.stride);
             if(q->queue_index||sync_ops(q->syncs,0))return error(EINVAL);
             struct sweet_gpu_submit s={r->group_handle,q->stream_size,q->stream_addr,0};
             if(q->stream_size&&async_submit) {
+                /* Enforce this for every queue item, including multi-item
+                 * GROUP_SUBMIT calls, before allocating/publishing its fence. */
+                while(pend_count>=24)if(pend_wait_head())return -1;
+                struct gpu_fence *f=calloc(1,sizeof(*f));if(!f)return error(ENOMEM);
+                f->refs=1;f->group=r->group_handle;f->sequence=UINT32_MAX;
+                struct prepared_signal *signals=NULL;unsigned count=0;
+                if(signals_prepare(q->syncs,f,&signals,&count)){fence_put(f);return -1;}
+                /* Validate every output's ordering before hardware can accept
+                 * this item. Same-group sequences are assigned monotonically
+                 * by the kernel; only independent older groups can wait here. */
+                for(unsigned n=0;n<count;n++)if(point_order(signals[n].handle,f)) {
+                    signals_free(signals,count);fence_put(f);return -1;
+                }
                 tr("submit group=%u bytes=%u",r->group_handle,q->stream_size);
                 if(call(SWEET_GPU_SUBMIT_ASYNC,&s,sizeof(s))) {
                     tr("submit failed rc=%d",errno);
-                    if(pend_drain_all()||call(SWEET_GPU_SUBMIT_ASYNC,&s,sizeof(s))){failed=1;return -1;}
+                    if(errno!=EBUSY||pend_drain_all()||call(SWEET_GPU_SUBMIT_ASYNC,&s,sizeof(s))) {
+                        int saved=errno;signals_free(signals,count);fence_put(f);
+                        if(saved!=EBUSY&&saved!=ETIMEDOUT)failed=1;
+                        return error(saved);
+                    }
                 }
                 ping(1000+(unsigned long long)s.sequence);
-                pend_push(r->group_handle,(uint32_t)s.sequence,0,&q->syncs);
+                f->sequence=(uint32_t)s.sequence;pend_push(f);
+                for(unsigned n=0;n<count;n++) {
+                    point_publish(signals[n].handle,signals[n].point);
+                    signals[n].point=NULL;
+                }
+                signals_free(signals,count);
+                pthread_cond_broadcast(&changed);
                 continue;
             }
+            if(sync_output_order(q->syncs))return -1;
             if(q->stream_size&&call(SWEET_GPU_SUBMIT,&s,sizeof(s))){failed=1;return -1;}
             if(sync_ops(q->syncs,1))return -1;
         }
@@ -396,32 +501,45 @@ int drmSyncobjCreate(int fd,uint32_t flags,uint32_t *handle)
 int drmSyncobjDestroy(int fd,uint32_t h)
 {
     (void)fd;pthread_mutex_lock(&lock);if(!h||h>=OBJECTS){pthread_mutex_unlock(&lock);return error(EINVAL);}
+    points_clear(h);
     memset(&syncs[h],0,sizeof(syncs[h]));pthread_mutex_unlock(&lock);return 0;
 }
 int drmSyncobjReset(int fd,const uint32_t *h,uint32_t n)
 {
     (void)fd;pthread_mutex_lock(&lock);
     for(unsigned i=0;i<n;i++)if(!h[i]||h[i]>=OBJECTS||!syncs[h[i]].used){pthread_mutex_unlock(&lock);return error(EINVAL);}
-    for(unsigned i=0;i<n;i++){syncs[h[i]].signalled=0;syncs[h[i]].point=0;}
+    for(unsigned i=0;i<n;i++){points_clear(h[i]);syncs[h[i]].signalled=0;syncs[h[i]].point=0;}
     pthread_mutex_unlock(&lock);return 0;
 }
 int drmSyncobjTimelineWait(int fd,uint32_t *h,uint64_t *points,unsigned n,int64_t timeout,unsigned flags,uint32_t *first)
 {
     (void)fd;if(!n)return error(EINVAL);tr("sync-wait h=%u p=%llu",h[0],(unsigned long long)(points?points[0]:0));ping(3);pthread_mutex_lock(&lock);
-    /* WAIT_AVAILABLE asks whether the fence exists, not whether it completed:
-     * the transport attaches it at submit time, so it always does. */
-    if(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE){pthread_mutex_unlock(&lock);return 0;}
-    for(unsigned i=0;i<n;i++)
-        if(fence_wait(h[i],points?points[i]:0)){pthread_mutex_unlock(&lock);return -1;}
+    for(unsigned i=0;i<n;i++)if(!h[i]||h[i]>=OBJECTS||!syncs[h[i]].used){pthread_mutex_unlock(&lock);return error(EINVAL);}
+    /* Mesa probes cached BOs with an already-expired absolute deadline. Such
+     * a probe must never become a blocking GPU drain. The transport has no
+     * nonblocking hardware query yet, so an unobserved fence stays busy. */
     for(;;) {
         unsigned done=0;
-        for(unsigned i=0;i<n;i++)if(signalled(h[i],points?points[i]:0)) {
+        struct gpu_fence *pending=NULL;
+        for(unsigned i=0;i<n;i++) {
+            uint64_t value=points?points[i]:0;
+            int complete=signalled(h[i],value);
+            struct sync_point *p=complete?NULL:point_find(h[i],value);
+            int available=complete||p!=NULL;
+            if(!pending&&p)pending=p->fence;
+            if((flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)?available:complete) {
             done++;if(!(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL)){if(first)*first=i;break;}
+            }
         }
         if(done&&(!(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL)||done==n)){pthread_mutex_unlock(&lock);return 0;}
-        struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
-        int64_t ns=(int64_t)now.tv_sec*1000000000+now.tv_nsec;
+        int64_t ns=monotonic_ns();
         if(timeout<=ns){pthread_mutex_unlock(&lock);return error(ETIME);}
+        if(pending&&!(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)) {
+            /* Recheck all requested objects after each completion: WAIT_ANY
+             * must not drain a later object after an earlier one has finished. */
+            if(wait_one_until(timeout)){pthread_mutex_unlock(&lock);return -1;}
+            continue;
+        }
         int64_t remaining=timeout-ns;if(remaining>1000000000)remaining=1000000000;
         struct timespec rel={remaining/1000000000,remaining%1000000000};
         pthread_cond_timedwait_relative_np(&changed,&lock,&rel);
@@ -432,14 +550,18 @@ int drmSyncobjWait(int fd,uint32_t *h,unsigned n,int64_t timeout,unsigned flags,
 int drmSyncobjTransfer(int fd,uint32_t dst,uint64_t dp,uint32_t src,uint64_t sp,uint32_t flags)
 {
     (void)fd;(void)flags;tr("transfer src=%u sp=%llu dst=%u",src,(unsigned long long)sp,dst);ping(2);pthread_mutex_lock(&lock);
-    if(!dst||dst>=OBJECTS||!syncs[dst].used||!src||src>=OBJECTS){pthread_mutex_unlock(&lock);return error(EINVAL);}
-    if(fence_wait(src,sp)){pthread_mutex_unlock(&lock);return -1;}
-    if(signalled(src,sp)) {
-        if(dp>syncs[dst].point)syncs[dst].point=dp;syncs[dst].signalled=1;fwd[dst].src=0;
-    } else if(pend_contains(src)||fwd[src].src) {
-        /* The fence exists but has not completed: carry the dependency. */
-        fwd[dst]=(struct forwarded){src,sp,dp};syncs[dst].signalled=0;
-    } else {pthread_mutex_unlock(&lock);return error(EINVAL);}
+    if(flags||!dst||dst>=OBJECTS||!syncs[dst].used||!src||src>=OBJECTS||!syncs[src].used){pthread_mutex_unlock(&lock);return error(EINVAL);}
+    struct sync_point *p=calloc(1,sizeof(*p));
+    if(!p){pthread_mutex_unlock(&lock);return error(ENOMEM);}
+    p->value=dp;
+    if(!signalled(src,sp)) {
+        struct sync_point *source=point_find(src,sp);
+        if(!source){free(p);pthread_mutex_unlock(&lock);return error(EINVAL);}
+        p->fence=source->fence;p->fence->refs++;
+    }
+    if(point_attach(dst,p)) {
+        fence_put(p->fence);free(p);pthread_mutex_unlock(&lock);return -1;
+    }
     pthread_cond_broadcast(&changed);pthread_mutex_unlock(&lock);return 0;
 }
 /* Shared IOSurface and cross-process fences are a separate transport; never
