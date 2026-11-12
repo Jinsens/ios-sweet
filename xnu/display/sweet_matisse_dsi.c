@@ -137,8 +137,8 @@ int sweet_disp_frame_sync;              /* move the overlay at a frame boundary 
 /* Keep the frame source stopped once a frame is out (sweetfb_hold=1): the
  * panel then holds the last frame until the compositor presents the next
  * one, instead of the hardware re-fetching the same surface every panel
- * frame. Not the default: if this panel needs a stream to stay lit, this
- * is what would leave it dark, so it is a trial lever and not the path. */
+ * frame. The bounded hold also keeps the submitted surface alive until the
+ * transfer window has ended, before the framebuffer releases its old one. */
 int sweet_disp_hold = 1;
 /* Use the overlay's shadow bank instead of LK's bypass (sweetfb_shadow=1):
  * the layer address then lands at the next frame boundary, the mutex can
@@ -165,7 +165,7 @@ int sweet_disp_sline;
 /* sweetfb_teint=1 enables the DSIM's TE interrupt bit. mtk_dsi.c turns it
  * on in mtk_dsi_set_interrupt_enable(); without it the status bit may not
  * latch at all, which is what "te edges 0" would look like. */
-int sweet_disp_te_int;
+int sweet_disp_te_int = 1;
 uint32_t sweet_disp_scan[5];
 /* What DCS 0x45 (get scan line) says. A value that climbs and wraps once a
  * frame is the panel's own clock: the transfer can start on the wrap instead
@@ -267,6 +267,16 @@ disp_write(uint32_t off, uint32_t value)
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
+/* MT6983 status latches are WRITE ZERO TO CLEAR, as in the vendor
+ * mtk_dsi_irq_status(): writel(~status, DSI_INTSTA). Writing the event mask
+ * itself preserves that stale event and clears every unrelated one. Never
+ * read/modify/write here: a different event can arrive after the read. */
+static void
+disp_ack(uint32_t flags)
+{
+	disp_write(DSI_INTSTA, ~flags);
+}
+
 static uint32_t
 secondary_read(uint32_t off)
 {
@@ -364,7 +374,7 @@ disp_dcs_read(uint32_t cmd, uint32_t *raw, uint32_t *payload)
 	uint32_t status, w, type;
 	volatile uint8_t *rx = (volatile uint8_t *)(disp_base + DSI_RX_DATA0);
 
-	disp_write(DSI_INTSTA, DSI_INT_RD_RDY | DSI_INT_CMD_DONE);
+	disp_ack(DSI_INT_RD_RDY | DSI_INT_CMD_DONE);
 	limit = disp_counter() + disp_frequency() / 200;   /* 5 ms */
 	while ((disp_read(DSI_INTSTA) & DSI_INT_RD_RDY) &&
 	    disp_counter() < limit) {
@@ -379,7 +389,7 @@ disp_dcs_read(uint32_t cmd, uint32_t *raw, uint32_t *payload)
 		status = disp_read(DSI_INTSTA);
 	} while ((status & DSI_INT_RD_RDY) == 0 && disp_counter() < limit);
 	if ((status & DSI_INT_RD_RDY) == 0) {
-		disp_write(DSI_INTSTA, DSI_INT_RD_RDY);
+		disp_ack(DSI_INT_RD_RDY);
 		return -1;
 	}
 	w = disp_read(DSI_RX_DATA0);
@@ -397,7 +407,7 @@ disp_dcs_read(uint32_t cmd, uint32_t *raw, uint32_t *payload)
 			*payload = 0xffffffffu;
 		}
 	}
-	disp_write(DSI_INTSTA, DSI_INT_RD_RDY | DSI_INT_CMD_DONE);
+	disp_ack(DSI_INT_RD_RDY | DSI_INT_CMD_DONE);
 	return 0;
 }
 
@@ -419,14 +429,14 @@ disp_dcs(uint32_t cmd, uint32_t value, int has_value)
 	disp_write(DSI_CMDQ0, (has_value ? (value << 24) : 0) | (cmd << 16) |
 	    ((has_value ? 0x15u : 0x05u) << 8));
 	disp_write(DSI_CMDQ_SIZE, 1u | CMDQ_SIZE_SEL);
-	disp_write(DSI_INTSTA, DSI_INT_CMD_DONE);
+	disp_ack(DSI_INT_CMD_DONE);
 	disp_write(DSI_START, 0);
 	disp_write(DSI_START, 1);
 	sweet_disp_dcs++;
 	do {
 		status = disp_read(DSI_INTSTA);
 	} while ((status & DSI_INT_CMD_DONE) == 0 && disp_counter() < limit);
-	disp_write(DSI_INTSTA, DSI_INT_CMD_DONE);
+	disp_ack(DSI_INT_CMD_DONE);
 	return (status & DSI_INT_CMD_DONE) ? 0 : -1;
 }
 
@@ -448,24 +458,101 @@ disp_point(uint64_t phys, uint32_t pitch)
 /* Wait for one panel frame boundary out of the DSIM's TE status.
  *
  * The bit is an interrupt latch, not a level: it goes high on the tearing
- * effect and stays high until it is written back. 2498 and 2500 read it in a
- * tight loop without clearing it, so it looked like a permanently asserted
- * level and every wait on it was declared useless. Clear it first and it
- * becomes one edge per panel frame - which is the boundary a frame start can
- * be aligned to. */
+ * effect and stays high until a ZERO is written to that bit. Previous probes
+ * wrote one, preserving the stale latch: their instant "edges" did not say
+ * anything about the panel's actual TE signal. */
 static int
 disp_te_wait(uint64_t ticks)
 {
 	uint64_t end = disp_counter() + ticks;
 
-	disp_write(DSI_INTSTA, DSI_INT_TE_RDY);
+	disp_ack(DSI_INT_TE_RDY);
+	if (disp_read(DSI_INTSTA) & DSI_INT_TE_RDY) {
+		/* A latch that did not clear is not a fresh panel boundary. */
+		return -1;
+	}
+	sweet_disp_te_lows++;
 	while ((disp_read(DSI_INTSTA) & DSI_INT_TE_RDY) == 0) {
 		if (disp_counter() > end) {
 			return -1;
 		}
 		__asm__ volatile("yield");
 	}
-	disp_write(DSI_INTSTA, DSI_INT_TE_RDY);
+	disp_ack(DSI_INT_TE_RDY);
+	return 0;
+}
+
+/* Establish a clock from seven real edges, checking each of six intervals.
+ * An average alone can turn stale flags mixed with timeouts into a plausible
+ * frame period. No panel command or PHY/timing change is needed. */
+static void
+disp_te_measure(void)
+{
+	uint64_t last = 0, sum = 0, reference = 0;
+	uint64_t freq = disp_frequency();
+	uint32_t i;
+
+	sweet_disp_te_period = 0;
+	for (i = 0; i < 7; i++) {
+		uint64_t now, interval;
+
+		if (disp_te_wait(freq / 25) != 0) {    /* 40 ms, including 30 Hz */
+			sweet_disp_te_missed++;
+			return;
+		}
+		now = disp_counter();
+		sweet_disp_te_edges++;
+		if (i != 0) {
+			interval = now - last;
+			if (interval < freq / 120 || interval > freq / 30) {
+				return;
+			}
+			if (reference == 0) {
+				reference = interval;
+			} else if (interval < reference * 3 / 4 ||
+			    interval > reference * 5 / 4) {
+				return;
+			}
+			sum += interval;
+		}
+		last = now;
+	}
+	sweet_disp_te_period = sum / 6;
+}
+
+/* Called after both overlay addresses have been staged, before either
+ * pipeline is triggered. The old fShown remains retained during this wait. */
+static int
+disp_sync_frame(void)
+{
+	static uint64_t last_te;
+	uint64_t began, at, waited;
+
+	if (!sweet_disp_te_sync &&
+	    !(sweet_disp_te_period != 0 && sweet_disp_te_align)) {
+		return 0;
+	}
+	began = disp_counter();
+	if (disp_te_wait(disp_frequency() / 25) != 0) {
+		sweet_disp_te_sync_missed++;
+		sweet_disp_te_missed++;
+		return -1;                  /* keep the previous frame on the panel */
+	}
+	at = disp_counter();
+	waited = at - began;
+	sweet_disp_te_sync_hits++;
+	sweet_disp_te_sync_ticks += waited;
+	sweet_disp_te_seen++;
+	sweet_disp_te_waits++;
+	sweet_disp_te_wait_ticks += waited;
+	if (waited > sweet_disp_te_wait_max) {
+		sweet_disp_te_wait_max = waited;
+	}
+	if (last_te != 0) {
+		sweet_disp_te_ticks += at - last_te;
+		sweet_disp_te_gaps++;
+	}
+	last_te = at;
 	return 0;
 }
 
@@ -526,6 +613,13 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
 	 * parses them in start() - long after this runs - so read them here. */
 	(void)PE_parse_boot_argn("sweetfb_hold", &sweet_disp_hold,
 	    sizeof(sweet_disp_hold));
+	(void)PE_parse_boot_argn("sweetfb_hold_us", &sweet_disp_hold_us,
+	    sizeof(sweet_disp_hold_us));
+	if (sweet_disp_hold_us > 50000) {
+		sweet_disp_hold_us = 50000;
+	}
+	(void)PE_parse_boot_argn("sweetfb_tealign", &sweet_disp_te_align,
+	    sizeof(sweet_disp_te_align));
 	(void)PE_parse_boot_argn("sweetfbtesync", &sweet_disp_te_sync,
 	    sizeof(sweet_disp_te_sync));
 	(void)PE_parse_boot_argn("sweetfb_teon", &sweet_disp_te_on,
@@ -685,42 +779,15 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
 	}
 	if (sweet_disp_te_ext) {
 		disp_write(DSI_TXRX_CTRL, disp_read(DSI_TXRX_CTRL) |
-		    (1u << 9) | (1u << 10));
+		    (1u << 9));              /* preserve LK's edge polarity */
 	}
 	sweet_disp_cmdq[1] = disp_read(DSI_TXRX_CTRL);
 	sweet_disp_cmdq[0] = disp_read(DSI_CON_CTRL);
 	disp_last = 0;
 	disp_ready = 1;
 	if (sweet_disp_te_int) {
-		uint64_t last = 0, sum = 0;
-		uint32_t n = 0, i;
-
 		disp_write(DSI_INTEN, disp_read(DSI_INTEN) | DSI_INT_TE_RDY);
-		for (i = 0; i < 12; i++) {
-			uint64_t now;
-
-			if (disp_te_wait(disp_frequency() / 50) != 0) {
-				sweet_disp_te_missed++;
-				break;
-			}
-			now = disp_counter();
-			sweet_disp_te_edges++;
-			if (last != 0) {
-				sum += now - last;
-				n++;
-			}
-			last = now;
-		}
-		if (n >= 2) {
-			uint64_t period = sum / n;
-
-			/* 30 Hz to 120 Hz is the range a panel frame can be;
-			 * anything else is not the panel's own boundary. */
-			if (period > disp_frequency() / 120 &&
-			    period < disp_frequency() / 30) {
-				sweet_disp_te_period = period;
-			}
-		}
+		disp_te_measure();
 	}
 	if (sweet_disp_te_on) {
 		uint64_t until = disp_counter() + disp_frequency() / 5; /* 200 ms */
@@ -881,6 +948,10 @@ sweet_display_refresh(int force)
 		 * kernel's own buffer, so point the overlays back at it. */
 		disp_point(disp_fb_phys, disp_pitch);
 	}
+	if (disp_sync_frame() != 0) {
+		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
+		return;
+	}
 	/* MT6983: start the primary path before the secondary. Reversing
 	 * these writes stalls both OVL outputs and leaves DSI waiting for
 	 * data. This ordering completed a full frame on matisse (0146). */
@@ -898,7 +969,7 @@ sweet_display_refresh(int force)
 	status = disp_read(DSI_INTSTA);
 	if (status & DSI_INT_UNDERRUN) {
 		sweet_disp_underruns++;
-		disp_write(DSI_INTSTA, DSI_INT_UNDERRUN);
+		disp_ack(DSI_INT_UNDERRUN);
 	}
 	sweet_disp_status = status;
 
@@ -928,21 +999,12 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 	if (__atomic_test_and_set(&disp_busy, __ATOMIC_ACQUIRE)) {
 		return -1;
 	}
-	/* Shadow path (sweetfb_shadow, default): the overlay reads its new
-	 * address from the shadow bank at the next start of frame, so the
-	 * fetch never has to be stopped and the panel keeps a continuous
-	 * stream - no half-written frame can reach it. */
-	if (sweet_disp_shadow_on) {
-		if (sweet_disp_te_period != 0 && sweet_disp_te_align) {
-			uint64_t edge = disp_counter();
-
-			if (disp_te_wait(disp_frequency() / 50) == 0) {
-				sweet_disp_te_sync_hits++;
-				sweet_disp_te_sync_ticks += disp_counter() - edge;
-			} else {
-				sweet_disp_te_sync_missed++;
-			}
-		}
+	/* Keep the old asynchronous path only when synchronization is disabled
+	 * or no periodic TE was found. With a measured TE, stop and stage BOTH
+	 * pipelines before waiting: writing one address after SOF can split a
+	 * frame, even if OVL shadow registers are enabled. */
+	if (sweet_disp_shadow_on && !sweet_disp_te_sync &&
+	    !(sweet_disp_te_period != 0 && sweet_disp_te_align)) {
 		disp_point(phys, pitch);
 		if ((disp_read(MUTEX_EN) & 1u) == 0) {
 			disp_write(MUTEX_EN, 1);
@@ -999,49 +1061,6 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 	}
 	disp_last = now;
 
-	/* TE_RDY is the panel's tear line itself, not a latch: writing it
-	 * back does not clear it (2491 and 2498 both saw it re-assert inside
-	 * a microsecond). So look for the line going low and then high again -
-	 * that transition is the frame boundary - and time it. If the line
-	 * never goes low, the panel is not driving one we can see, and this
-	 * counts that instead of pretending to have synced. */
-	if (sweet_disp_te_sync) {
-		static uint64_t lastTe;
-		uint64_t began = disp_counter();
-		uint64_t limit2 = began + disp_frequency() / 50;   /* 20 ms */
-		uint32_t prev = disp_read(DSI_INTSTA);
-
-		for (;;) {
-			uint32_t cur = disp_read(DSI_INTSTA);
-
-			if ((prev & DSI_INT_TE_RDY) && !(cur & DSI_INT_TE_RDY)) {
-				sweet_disp_te_lows++;
-			}
-			if (!(prev & DSI_INT_TE_RDY) && (cur & DSI_INT_TE_RDY)) {
-				uint64_t at = disp_counter();
-
-				sweet_disp_te_edges++;
-				sweet_disp_te_seen++;
-				sweet_disp_te_waits++;
-				sweet_disp_te_wait_ticks += at - began;
-				if (at - began > sweet_disp_te_wait_max) {
-					sweet_disp_te_wait_max = at - began;
-				}
-				if (lastTe != 0 && at > lastTe) {
-					sweet_disp_te_ticks += at - lastTe;
-					sweet_disp_te_gaps++;
-				}
-				lastTe = at;
-				break;
-			}
-			if (disp_counter() > limit2) {
-				sweet_disp_te_missed++;
-				break;
-			}
-			prev = cur;
-		}
-	}
-
 	/* The overlay fetches the surface all the time, not only when a frame is
 	 * triggered: painting that memory with no transfer at all puts the paint
 	 * on the glass (2494). So an address written between two frames takes
@@ -1053,7 +1072,7 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 
 		status = disp_read(DSI_INTSTA);
 		if (status & DSI_INT_FRAME_DONE) {
-			disp_write(DSI_INTSTA, status & ~DSI_INT_BUSY);
+			disp_ack(DSI_INT_FRAME_DONE);
 		}
 		began = disp_counter();
 		edge = began + disp_frequency() / 50;   /* 20 ms */
@@ -1068,7 +1087,7 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 			if (waited > sweet_disp_frame_wait_max) {
 				sweet_disp_frame_wait_max = waited;
 			}
-			disp_write(DSI_INTSTA, status & ~DSI_INT_BUSY);
+			disp_ack(DSI_INT_FRAME_DONE);
 		} else {
 			sweet_disp_frame_missed++;
 		}
@@ -1092,6 +1111,7 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 			sweet_disp_phase_n++;
 		}
 	}
+	uint64_t previous_phys = disp_cur_phys;
 	__asm__ volatile("dsb sy" ::: "memory");
 	disp_point(phys, pitch);
 	/* The overlays latch their address at the trigger; a write that did not
@@ -1105,20 +1125,12 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 		return -3;		/* the overlay did not take the address */
 	}
 
-	/* The address is in place and nothing has fetched it yet. If the
-	 * panel's tear line answered at init, start the frame on its next
-	 * boundary instead of wherever the compositor happened to present:
-	 * that is the difference between a frame landing inside the panel's
-	 * scan and one landing where the panel expects a new one. */
-	if (sweet_disp_te_period != 0 && sweet_disp_te_align) {
-		uint64_t edge = disp_counter();
-
-		if (disp_te_wait(disp_frequency() / 50) == 0) {
-			sweet_disp_te_sync_hits++;
-			sweet_disp_te_sync_ticks += disp_counter() - edge;
-		} else {
-			sweet_disp_te_sync_missed++;
-		}
+	if (disp_sync_frame() != 0) {
+		/* Do not turn a missing TE into an unsynchronized flash. The caller
+		 * keeps the old surface and retries, rather than copying this frame. */
+		disp_point(previous_phys, pitch);
+		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
+		return -4;
 	}
 	/* The address is in place and nothing has fetched it yet: let the
 	 * mutex run again and start one frame from it. */
@@ -1182,7 +1194,7 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 	status = disp_read(DSI_INTSTA);
 	if (status & DSI_INT_UNDERRUN) {
 		sweet_disp_underruns++;
-		disp_write(DSI_INTSTA, DSI_INT_UNDERRUN);
+		disp_ack(DSI_INT_UNDERRUN);
 	}
 	sweet_disp_status = status;
 	__atomic_clear(&disp_busy, __ATOMIC_RELEASE);

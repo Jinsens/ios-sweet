@@ -39,7 +39,8 @@ void sweet_display_refresh(int force);
  * overlays at phys (pitch bytes a row, the right half starting half a row in)
  * and push it. Returns 0 when the transfer was started; non-zero when the
  * engine was busy, the address did not read back, or the driver never came
- * up, in which case the caller still has to copy. */
+ * up. -4 means a previously measured TE timed out: keep the previous surface
+ * and retry later, without a CPU-copy fallback. Other errors allow a copy. */
 int sweet_display_scanout(uint64_t phys, uint32_t pitch);
 
 /* Record the console's live mapping and translation attributes for later
@@ -106,7 +107,7 @@ extern int sweet_disp_te_align;
 extern uint32_t sweet_disp_dcs;
 /* sweetfb_teoff=1 sends DCS 0x34 once, turning the panel's tear line off. */
 extern int sweet_disp_te_off;
-/* sweetfb_teext=1 enables the DSIM's external TE input. */
+/* sweetfb_teext=1 enables the external TE input, preserving LK polarity. */
 extern int sweet_disp_te_ext;
 /* sweetfb_teon=1 sends DCS 0x35 once; sweetfb_sline=1 samples DCS 0x45. */
 extern int sweet_disp_te_on;
@@ -131,7 +132,7 @@ extern uint32_t sweet_disp_lead_us;
 extern uint32_t sweet_disp_pre_busy;
 extern uint32_t sweet_disp_pre_idle;
 extern uint64_t sweet_disp_pre_ticks;
-/* sweetfb_teint=1 enables the DSIM TE interrupt before sampling it. */
+/* sweetfb_teint=1 (default) enables the DSIM TE interrupt and measures it. */
 extern int sweet_disp_te_int;
 extern uint32_t sweet_disp_mutex_stops;
 extern uint32_t sweet_disp_mutex_running;

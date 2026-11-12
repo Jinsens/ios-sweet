@@ -20,3 +20,23 @@ mt6983 table), the DCS 0x45 scan-line read, the 300 us lead between MUTEX_EN
 and DSI_START, the absolute-deadline 60 Hz vsync schedule (`sweet_vsync_arm`),
 the OVL shadow-bank switch (`sweetfb_shadow`, LK leaves BYPASS_SHADOW on), the
 TE status-latch probe, and `sweetfb_hold_us` with its `trunc` counter.
+
+
+Trial 2513 (2026-11-13, pending hardware validation) corrects the MT6983
+`DSI_INTSTA` **write-zero-to-clear** protocol. All acknowledgements now use
+`~flags`, preserving unrelated events. The old direct-mask writes never
+cleared the requested latch, so earlier microsecond TE “periods” are invalid.
+TE measurement is enabled by default (`sweetfb_teint=0` disables it); seven
+fresh edges must give six consistent 30–120 Hz intervals. When measured,
+both OVL addresses are staged with both mutexes stopped, a fresh TE is
+awaited, then a complete frame is triggered and held. A TE timeout keeps the
+last frame and retries, without a CPU-copy fallback. Console refresh also
+uses TE. `sweetfb_tealign=0` disables measured-TE alignment for comparison.
+The existing asynchronous shadow path is retained when no valid TE is found.
+No new DCS panel command is enabled by this change; the optional scan-line
+read remains experimental (its receive-packet parsing/RACK need separate work).
+
+Run `python3 -m unittest discover -s tools/tests -p test_matisse_display.py`
+for the W0C/TE/frame-order MMIO regression model. It executes the actual
+driver source with simulated register access and time; it cannot prove the
+physical panel is free of flicker.

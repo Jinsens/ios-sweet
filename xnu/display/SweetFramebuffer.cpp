@@ -627,6 +627,19 @@ AppleCLCD::present(const uint8_t *rec)
 			}
 			fStatRefused++;
 			fStatReason = rc;
+			if (rc == -4) {
+				/* A measured TE disappeared. Keep the last complete picture
+				 * instead of falling through to an unsynchronized CPU copy.
+				 * Retry this record only if no newer swap is already queued. */
+				IOLockLock(fLock);
+				if (!fDirty) {
+					memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+					fDirty = true;
+				}
+				IOLockUnlock(fLock);
+				s->release();
+				return;
+			}
 			if (fStatScans + fStatRefused <= 3) {
 				IOLog("SWEET FB: scanout refused rc=%d id=%u %ux%u bpr %u fmt 0x%x phys 0x%llx -> 0x%llx mask 0x%x\n",
 				    rc, id, s ? s->width : 0, s ? s->height : 0,

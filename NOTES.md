@@ -1,5 +1,87 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-10: 32 fps; TEAR = ONE FRAME PER PRESENT, STATIC CLEAN, MOTION FLASHES. NO USABLE TEAR LINE (2500-2505) <<<
+## >>> ACTIVE 2026-11-13: 2513: REAL TE 16.507 ms, FLICKER REDUCED BUT REMAINS; BOOT_A RESTORED <<<
+
+### 2026-11-12/13: host synchronization conclusions reopened
+
+User reports random horizontal flashes, sometimes half the screen, sometimes a
+band at any height. Read-only vendor audit found an exact driver bug:
+`DSI_INTSTA` is **write-zero-to-clear**. Vendor `mediatek_v2/mtk_dsi.c`
+`mtk_dsi_irq_status()` writes `~status` (line 1955), and the original validated
+refresh sequence recorded below already used `~TE`. Current driver instead
+writes `TE_RDY`, `CMD_DONE`, `RD_RDY` and `FRAME_DONE` masks directly. Those
+writes preserve the event being acknowledged and clear unrelated events.
+Therefore 2511's instant TE waits do not demonstrate a missing TE edge; the
+latch was never cleared. The old “only the panel remains / host cannot fix it”
+conclusion is **withdrawn pending corrected hardware measurements**.
+
+Plan: correct all status acknowledgements, validate actual TE intervals, stage
+both overlay addresses before a fresh TE, then trigger one complete frame.
+No new DCS panel commands are needed. Keep the existing absolute vsync clock.
+Current attached device is in Recovery; no partition write or new boot has
+been performed in this session. Its ABL historically rejects `fastboot boot`
+(`unknown command`), so a hardware trial needs a concrete image and explicit
+approval for a temporary `boot_a` write followed by full backup restoration.
+Do not run an old generated runner based only on its embedded authorization.
+
+### 2513 build milestone (2026-11-13)
+
+Corrected W0C acknowledgements through one `disp_ack(flags)` helper that writes `~flags`; fresh
+TE waits verify the old latch cleared. Default init measures seven edges,
+validates all six intervals (30–120 Hz and ±25% consistency), and only then
+enables automatic TE alignment. Both pipelines are stopped and both addresses
+staged before TE; console uses the same wait. TE loss returns -4 without
+starting a frame; AppleCLCD keeps the previous surface and retries rather
+than taking a CPU-copy fallback. Existing async behavior remains if no valid
+TE is measured. No DCS command was enabled. Optional DCS scan-line parsing /
+RACK remain separate known issues; this trial does not use that path.
+
+Validation: `python3 -m unittest tools.tests.test_matisse_display -v`: **13/13
+passed**, executing the actual C driver against strict W0C/timed TE MMIO.
+Temporary W1C mutation makes ack/stale/measure/scanout tests fail as expected.
+Full local `tools/build-xnu-clt.sh`: **exit 0**, plain arm64 Mach-O, linked
+`_sweet_display_init`, `_sweet_display_refresh`, `_sweet_display_scanout`.
+No new CI run (these current display sources are still separate from CI's
+older patch-only driver; see xnu/display/README.md).
+
+Immutable local artifacts under `research/matisse/20261109-resident-gpu/`:
+- `kernel2513.development.sweet` SHA256
+  `39f5bd857f9ac9816e3414b96faac947e927128624f2aa8265c576e471de5723`
+- `shim2513-te/matisse-shim-gpu2513.img`, 26,746,880 bytes, SHA256
+  `52bc78b92873cd7bb9b133fa4c9ea031fd0e56a96d6717d8faf26c2c351b1bbb`
+- `cmdline2513.txt`, `display2513-build-manifest.json`,
+  `build2513-native.log`, `build2513-image.log`, `run2513.log`
+- Predicted full boot_a during test:
+  `c5eb1343baa6b7436239253853d99350e7d2605a3edb379f046895a3a3648645`
+- Restore baseline `backup/boot_a-before-2499-20261110.img`, 67,108,864 bytes:
+  `c4b70dafb0b8a69ce59f6a246c7bab5412827c80306dde6113cc483b9ec707d8`
+
+Read-only preflight passed: attached Recovery identity, geometry, local image
+and backup, and device boot_a SHA all match. Human explicitly approved this
+exact trial in the current chat (2026-11-13: “允许本次写入、启动测试并恢复备份”).
+**Hardware result (completed):** image written and full partition readback
+matched the predicted SHA. At 158.77 s the device reached fastboot; the runner
+restored the complete 64 MiB baseline and rebooted Recovery. Runner completed
+with exit 0 / restore_pending=false. A separate Recovery SHA read confirms
+`c4b70daf...ec707d8`. Device is safely back in Recovery.
+
+User observation: **“明显减少，但仍有闪烁”** (much reduced, still flickers).
+Actual console confirms a real **16,507 us TE period**, **838 aligned frames,
+zero misses**, including **722 GUI frames**. No underrun, busy skip or hold
+truncation; stable GUI windows have no refused scanout and no -3 shadow
+readback failures. All sampled mutex reads remain 0; do NOT revive the old
+“mutex stays enabled and free-runs” inference. GUI vsync windows cost
+10.21–10.45 s / 600 (17.0–17.4 ms), present ~13.5 ms. Full logs:
+`shim2513-ui/gpu-normal/after-console.txt` and `journal.json`.
+
+**Remaining work:** residual flash is not fixed. Correct TE eliminated the
+original false-latch problem, but a latch can be observed late if the polling
+thread is preempted, and TE-to-DSI_START latency is not measured yet. The
+9.5 ms hold still uses time, not a fresh verified OVL/DSI completion latch.
+These are hypotheses to measure next, alongside panel TE placement. Keep the
+2513 immutable artifact as the comparison baseline. No next partition write
+is authorized by the approval for this one trial.
+
+The historical notes below describe earlier trials, not current conclusions.
 
 ### 2506-2512: the vsync was 5.5 % slow; what is left is the panel
 
