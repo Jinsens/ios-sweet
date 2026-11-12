@@ -28,6 +28,22 @@ def replace(path, old, new):
     path.write_text(text.replace(old, new))
 
 
+def apply_panfrost_fence_patch(src):
+    """Patch both fresh and existing pinned trees, rejecting local drift."""
+    path = src / 'src/gallium/drivers/panfrost/pan_fence.c'
+    original = '699c815152720fdcbbae76629b8ede845d694bc29401a1bd8c13724bc0adb309'
+    patched = 'f35e1088b8f91da5628e51468b0978c5292ffabf745000039b3e44365532208c'
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest == patched:
+        return
+    if digest != original:
+        raise ValueError('incompatible Panfrost fence source; refusing local drift')
+    run(['patch', '--batch', '--forward', '--fuzz=0', '-p1', '-i',
+         ROOT / 'userland/panfrost-fence.patch'], cwd=src)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != patched:
+        raise ValueError('Panfrost fence patch produced unexpected source')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--work', type=Path, required=True)
@@ -86,6 +102,7 @@ def main():
         (src / '.sweet-v10-profile').write_text('panthor v10 hardware required\n')
     if not (src / '.sweet-v10-profile').exists():
         ap.error('incomplete or incompatible source tree; choose a fresh work directory')
+    apply_panfrost_fence_patch(src)
     # Match SweetGPU's reserved firmware/queue aperture. Gallium otherwise
     # advertises a 32 MiB start, below the kernel's 128 MiB BO boundary.
     p = src / 'src/panfrost/lib/kmod/panthor_kmod.c'
@@ -210,6 +227,8 @@ needs_exe_wrapper = true
         patches={f: hashlib.sha256((ref / 'tools/mesa' / f).read_bytes()).hexdigest() for f in patches},
         transport_sha256=hashlib.sha256((ROOT / 'userland/sweet-panthor-drm.c').read_bytes()).hexdigest(),
         frontend_patch_sha256=hashlib.sha256((ROOT / 'userland/eagl-iosurface.patch').read_bytes()).hexdigest(),
+        fence_patch_sha256=hashlib.sha256((ROOT / 'userland/panfrost-fence.patch').read_bytes()).hexdigest(),
+        fence_source_sha256=hashlib.sha256((src / 'src/gallium/drivers/panfrost/pan_fence.c').read_bytes()).hexdigest(),
         target='arm64-apple-ios16.0',
         files={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in out.iterdir()
                if p.is_file() and p.name != 'manifest.json'}), indent=2) + '\n')

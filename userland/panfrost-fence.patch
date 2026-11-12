@@ -1,0 +1,50 @@
+--- a/src/gallium/drivers/panfrost/pan_fence.c
++++ b/src/gallium/drivers/panfrost/pan_fence.c
+@@ -41,7 +41,8 @@
+    struct panfrost_device *dev = pan_device(pscreen);
+    struct pipe_fence_handle *old = *ptr;
+ 
+-   if (pipe_reference(&old->reference, &fence->reference)) {
++   if (pipe_reference(old ? &old->reference : NULL,
++                      fence ? &fence->reference : NULL)) {
+       drmSyncobjDestroy(panfrost_device_fd(dev), old->syncobj);
+       free(old);
+    }
+@@ -127,6 +128,31 @@
+ panfrost_fence_create(struct panfrost_context *ctx)
+ {
+    struct panfrost_device *dev = pan_device(ctx->base.screen);
++#ifdef __APPLE__
++   /* SweetGPU has process-local syncobjs, not Linux sync-file FDs. Transfer
++    * retains the immutable last-submission ticket without waiting, so later
++    * reuse of ctx->syncobj cannot retarget this fence. */
++   struct pipe_fence_handle *f = calloc(1, sizeof(*f));
++   if (!f)
++      return NULL;
++
++   int ret = drmSyncobjCreate(panfrost_device_fd(dev), 0, &f->syncobj);
++   if (ret) {
++      free(f);
++      return NULL;
++   }
++
++   ret = drmSyncobjTransfer(panfrost_device_fd(dev), f->syncobj, 0,
++                           ctx->syncobj, 0, 0);
++   if (ret) {
++      drmSyncobjDestroy(panfrost_device_fd(dev), f->syncobj);
++      free(f);
++      return NULL;
++   }
++
++   pipe_reference_init(&f->reference, 1);
++   return f;
++#else
+    int fd = -1, ret;
+ 
+    /* Snapshot the last rendering out fence. We'd rather have another
+@@ -146,4 +172,5 @@
+    close(fd);
+ 
+    return f;
++#endif
+ }
