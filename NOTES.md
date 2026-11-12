@@ -1,5 +1,5 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> GPU PERFORMANCE 2026-11-13: 2520 BUILT; DEVICE TEST PENDING <<<
+## >>> GPU PERFORMANCE 2026-11-13: 2520 SMOOTHER; BOOT_A RESTORED; GPU BENCH APP IN PROGRESS <<<
 
 User reports the whole UI is sluggish. GPU changes committed as `5f10580`:
 - Map/unmap resolve each 512-entry L3-table span once, keeping the exact
@@ -39,13 +39,37 @@ Artifacts in `research/matisse/20261109-resident-gpu/` (ignored):
   `gpu2520-build-manifest.json`, frozen `gpu-perf2520-image-builder.py`,
   and `shim2520-ui-run-once.py` (requires exact-image CLI approval).
 
-Hardware: NO write, boot or restore performed by this GPU task. Read-only
-2520 preflight failed with `adb: no devices/emulators found`; this is an
-observation, not proof of the current phone mode. No 2520 hardware approval
-has been given. Next: connect the phone in Recovery, repeat preflight, obtain
-explicit approval for this exact temporary boot_a test and full restoration,
-then compare map/unmap timings, GPU faults, comparable UI work/frame cadence,
-and user feel against 2514. A generated runner is never authorization.
+**2520 hardware result (completed):** current human approved the exact trial
+(“可以”). Read-only preflight passed. Written full-partition readback matched
+`004216b9...a55c14`; trial reached fastboot at 155.77 s, runner exit 0.
+Complete 64 MiB boot_a restored to `c4b70daf...ec707d8`, then independently
+verified again over adb in Recovery. `restore_pending=false`. No GPU fault,
+fatal/asfault or nonzero CSF return in fresh 2520 console. User explicitly:
+**“明显更流畅”** (visibly smoother).
+
+Same operation-count comparison: map @1000 calls **1462 -> 39 us**,
+unmap @800 calls **1991 -> 14 us**, AS invalidate **6 -> 6 us**. Matched
+6-draw/65-call frames: attach median **3073.5 -> 361 us** (n20/n19), GL frame
+**6559 -> 5317 us**. Matched25-draw/179-call: attach **3257.5 -> 267 us**
+(n6/n7), frame **10401 -> 8670 us**. Different user activity/long idle gaps
+make overall average FPS incomparable; do not claim a particular FPS gain.
+Logs `shim2520-ui/gpu-normal/{after-console.txt,journal.json}`; ignored
+analysis `gpu-perf-analysis/{comparison2520,matched-workload2520}.json`.
+
+Next user request: maximize toward120fps, then explicitly asks for an iOS
+GPU benchmark app with selectable frame rate, **only60 and120**. App work is
+in progress under `userland/gpu-bench`, build/package via
+`tools/build-gpu-bench.py`. Keep real completed offscreen GPU work separate
+from CADisplayLink and actual physical panel scanout. No subsequent partition
+write or benchmark installation has yet been performed/approved.
+
+Vendor120Hz audit: exact panel `research/matisse/panel-l11-38-0a-0a-dsc-cmd.c`
+supports WQHD120; mode sequenceF0 5A5A /60 00 /F7 0F /F0 A5A5 uses generic
+long0x29, DCS short-param0x15, generic short2-byte0x23. Host NULL length
+1300->90; PLL680/data1360 and DSC identical. Vendor cycles DSI idle/reinit;
+current shortDCS helper cannot encode all packets and EXT_TE gate sequencing
+needs care. Current9.5ms hold exceeds8.33ms. These are required work before
+claiming true120Hz; timer-only changes do not meet that goal.
 
 Remaining measured display cost: 2514 present ~13.5 ms (~3.8 ms fresh-TE
 poll plus 0.3 ms launch plus 9.5 ms fixed hold), on the vsync workloop.
