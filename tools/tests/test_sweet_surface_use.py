@@ -121,6 +121,22 @@ static bool sweet_disp_shadow_on, sweet_disp_vendor, sweet_disp_te_sync;
 static bool sweet_disp_te_align = true;
 static uint64_t sweet_disp_te_period = 16500;
 static IOLock *displayLock;
+static unsigned wakes, sleeps;
+static std::function<void()> sleepHook;
+enum { kMillisecondScale = 1000000, THREAD_UNINT = 0, THREAD_TIMED_OUT = 1 };
+static void clock_interval_to_deadline(unsigned n, unsigned scale, uint64_t *deadline) {
+    assert(n == 1000 && scale == kMillisecondScale); *deadline = 1000000;
+}
+static void IOLockWakeup(IOLock *lock, void *, bool one) {
+    assert(lock->held && !one); wakes++;
+}
+static int IOLockSleepDeadline(IOLock *lock, void *, uint64_t deadline, int flags) {
+    assert(lock->held && deadline == 1000000 && flags == THREAD_UNINT); sleeps++;
+    IOLockUnlock(lock);
+    if (sleepHook) sleepHook();
+    IOLockLock(lock);
+    return sleepHook ? 0 : THREAD_TIMED_OUT;
+}
 struct Timer {
     bool disabled = false, cancelled = false;
     void disable() { assert(!displayLock->held); disabled = true; }
@@ -143,6 +159,8 @@ struct AppleCLCD {
     uint64_t fPhys = 0x100000;
     sweet_fb_frame fPending = {};
     bool fDirty = false, fConsolePaused = true, fScanout = true, fStopping = false;
+    bool fSyncSwap = false, fPowerOff = false;
+    uint64_t fSwapSerial = 0, fInFlightSerial = 0;
     uint32_t fWidth = 2, fHeight = 2, fLogicalW = 2, fLogicalH = 2, fRowBytes = 8;
     int32_t fOffX = 0, fOffY = 0;
     uint32_t pixels[4] = {};
@@ -360,6 +378,63 @@ int main(int argc, char **argv) {
         record(rec, 16, 7); fb.swap(rec); // bad new frame must preserve the valid pending one
         assert(fb.fPending.surfaces[0] == &b && fb.fStatSwaps == 2);
         finish_display(fb); clean_client(cb);
+    } else if (test == "actual_syncswap" || test == "actual_syncswap_retry") {
+        AppleCLCD fb; displayLock = fb.fLock; fb.fSyncSwap = true;
+        uint8_t rec[SWEET_FB_SWAP_REC_SIZE]; record(rec, 1, 7);
+        sleepHook = [&] {
+            assert(shared(a) == 1 && fb.fDirty && sleeps <= 2);
+            sweet_fb_frame active = {};
+            dequeue(fb, active); fb.fInFlightSerial = active.serial;
+            scanResult = test == "actual_syncswap_retry" && sleeps == 1 ? -4 : 0;
+            fb.present(&active); sweet_fb_frame_release(&active);
+            assert(shared(a) == 1); // still protected until successful display replacement
+            fb.fInFlightSerial = 0;
+        };
+        fb.swap(rec);
+        assert(sleeps == (test == "actual_syncswap_retry" ? 2u : 1u));
+        assert(!fb.fDirty && fb.fShown == &a && shared(a) == 1);
+        finish_display(fb);
+    } else if (test == "actual_syncswap_replaced") {
+        publish(b, 8); attach(cb, br, b);
+        AppleCLCD fb; displayLock = fb.fLock; fb.fSyncSwap = true;
+        uint8_t rec[SWEET_FB_SWAP_REC_SIZE], newer[SWEET_FB_SWAP_REC_SIZE];
+        record(rec, 1, 7); record(newer, 1, 8);
+        sleepHook = [&] {
+            assert(sleeps == 1 && shared(a) == 1);
+            fb.fSyncSwap = false; fb.swap(newer); fb.fSyncSwap = true;
+        };
+        fb.swap(rec);
+        assert(sleeps == 1 && fb.fPending.surfaces[0] == &b && !shared(a) && shared(b) == 1);
+        finish_display(fb); clean_client(cb);
+    } else if (test == "actual_syncswap_inflight") {
+        publish(b, 8); attach(cb, br, b);
+        AppleCLCD fb; displayLock = fb.fLock; fb.fSyncSwap = true;
+        uint8_t rec[SWEET_FB_SWAP_REC_SIZE], newer[SWEET_FB_SWAP_REC_SIZE];
+        record(rec, 1, 7); record(newer, 1, 8);
+        sweet_fb_frame active = {};
+        sleepHook = [&] {
+            assert(sleeps <= 2);
+            if (sleeps == 1) {
+                dequeue(fb, active); fb.fInFlightSerial = active.serial;
+                fb.fSyncSwap = false; fb.swap(newer); fb.fSyncSwap = true;
+                assert(fb.fPending.serial != active.serial);
+            } else {
+                assert(fb.fInFlightSerial == active.serial && shared(a) == 1 && shared(b) == 1);
+                fb.present(&active); sweet_fb_frame_release(&active);
+                fb.fInFlightSerial = 0;
+            }
+        };
+        fb.swap(rec);
+        assert(sleeps == 2 && fb.fShown == &a && fb.fPending.surfaces[0] == &b);
+        finish_display(fb); clean_client(cb);
+    } else if (test == "actual_syncswap_timeout" || test == "actual_syncswap_off") {
+        AppleCLCD fb; displayLock = fb.fLock; fb.fSyncSwap = true;
+        fb.fPowerOff = test == "actual_syncswap_off";
+        uint8_t rec[SWEET_FB_SWAP_REC_SIZE]; record(rec, 1, 7);
+        fb.swap(rec);
+        assert(sleeps == (fb.fPowerOff ? 0u : 1u));
+        assert(fb.fDirty && fb.fPending.surfaces[0] == &a && shared(a) == 1);
+        finish_display(fb);
     } else if (test == "actual_stopping_swap") {
         AppleCLCD fb; displayLock = fb.fLock; fb.fStopping = true;
         uint8_t rec[SWEET_FB_SWAP_REC_SIZE]; record(rec, 1, 7);
@@ -528,6 +603,24 @@ class SurfaceUseTests(unittest.TestCase):
 
     def test_real_swap_balances_superseded_and_rejected_frames(self):
         self.run_case('actual_swap_supersede')
+
+    def test_syncswap_waits_through_presentation(self):
+        self.run_case('actual_syncswap')
+
+    def test_syncswap_waits_through_te_retry(self):
+        self.run_case('actual_syncswap_retry')
+
+    def test_syncswap_superseded_frame_returns_without_waiting_for_new_frame(self):
+        self.run_case('actual_syncswap_replaced')
+
+    def test_syncswap_keeps_waiting_for_own_inflight_frame_after_new_swap(self):
+        self.run_case('actual_syncswap_inflight')
+
+    def test_syncswap_timeout_preserves_queued_ownership(self):
+        self.run_case('actual_syncswap_timeout')
+
+    def test_powered_off_display_does_not_block_syncswap(self):
+        self.run_case('actual_syncswap_off')
 
     def test_stopping_rejects_and_releases_new_swap(self):
         self.run_case('actual_stopping_swap')

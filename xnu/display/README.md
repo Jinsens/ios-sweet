@@ -98,3 +98,17 @@ previous working layout/wrapping/cache code and introduce no GPU VM change.
 Run python3 -m unittest tools.tests.test_sweet_surface_use for the actual C++
 count/trap/queue/presentation code under ASan/UBSan. These tests and the MMIO
 suite verify ownership and transfer order, not the absence of visible flicker.
+
+
+2517 hardware result: camera-left severe flicker disappeared; occasional thin
+horizontal tearing remains, only during motion. All1131 transfers completed,
+without TE misses or truncation. Complete boot_a restored/independently hashed.
+
+2518 adds opt-in sweetfb_syncswap=1. SwapEnd waits for its own internal serial
+to leave both pending and inflight, so the rendering thread cannot treat the
+frame as finished while the timer still reads it. A TE retry retains that
+serial; a replaced pending frame may return, without releasing an unrelated
+inflight frame early. The wait drops fLock, has a1s deadline, and is cancelled
+by power-off or shutdown. Default asynchronous submission remains unchanged.
+This is a pacing comparison on top of2517 ownership, with identical panel
+configuration; it is not yet a proven fix for the remaining thin tear.

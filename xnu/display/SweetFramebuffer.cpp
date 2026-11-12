@@ -97,6 +97,7 @@ get32(const uint8_t *p, uint32_t off)
 struct sweet_fb_frame {
 	uint8_t rec[SWEET_FB_SWAP_REC_SIZE];
 	SweetSurface *surfaces[SWEET_FB_LAYERS];
+	uint64_t serial;     /* internal submission, independent of user swap IDs */
 };
 
 static void
@@ -171,6 +172,8 @@ public:
 	struct sweet_fb_frame fPending;   /* latest queued frame, owns its surfaces */
 	bool          fDirty;
 	bool          fStopping;
+	bool          fSyncSwap;      /* diagnostic: don't return SwapEnd before presentation */
+	uint64_t      fSwapSerial, fInFlightSerial;
 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
 	bool          fPowerOff;      /* RequestPowerChange(0) */
 	bool          fRedrawShown;   /* power-on redraw, separate from an owned swap */
@@ -280,6 +283,7 @@ AppleCLCD::start(IOService *provider)
 	fVsyncAttached = true;
 	uint32_t hz = 10;
 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+	(void)PE_parse_boot_argn("sweetfb_syncswap", &fSyncSwap, sizeof(fSyncSwap));
 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
 	int copy = 0;
@@ -308,6 +312,7 @@ AppleCLCD::start(IOService *provider)
 	registerService();
 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+	IOLog("SWEET FB: IOSurface in-use protection, synchronous SwapEnd %u\n", fSyncSwap);
 	return true;
 }
 
@@ -317,6 +322,7 @@ AppleCLCD::quiesce()
 	if (fLock != NULL) {
 		IOLockLock(fLock);
 		fStopping = true;
+		IOLockWakeup(fLock, &fInFlightSerial, false);
 		IOLockUnlock(fLock);
 	}
 	/* removeEventSource takes the workloop gate and drains a running callback.
@@ -625,6 +631,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		frame = (struct sweet_fb_frame *)IOMallocData(sizeof(*frame));
 		if (frame != NULL) {
 			sweet_fb_frame_move(frame, &fb->fPending);
+			fb->fInFlightSerial = frame->serial;
 			fb->fDirty = false;
 		}
 	}
@@ -633,6 +640,10 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		fb->present(frame);
 		sweet_fb_frame_release(frame);
 		IOFreeData(frame, sizeof(*frame));
+		IOLockLock(fb->fLock);
+		fb->fInFlightSerial = 0;
+		IOLockWakeup(fb->fLock, &fb->fInFlightSerial, false);
+		IOLockUnlock(fb->fLock);
 	} else if (redrawShown && fb->fShown != NULL) {
 		/* fPending is empty after its ownership was moved to the presenter.
 		 * A wake must redraw the retained display source, not an empty record. */
@@ -693,11 +704,32 @@ AppleCLCD::swap(const uint8_t *rec)
 		return;
 	}
 	sweet_fb_frame_move(&old, &fPending);
+	next.serial = ++fSwapSerial;
 	sweet_fb_frame_move(&fPending, &next);
+	uint64_t serial = fPending.serial;
 	fDirty = true;
 	fStatSwaps++;
+	/* A replaced pending frame was never fetched and its submitter can
+	 * return. A different frame already in flight must still finish. */
+	IOLockWakeup(fLock, &fInFlightSerial, false);
 	IOLockUnlock(fLock);
 	sweet_fb_frame_release(&old);
+	if (fSyncSwap) {
+		uint64_t deadline;
+		clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
+		IOLockLock(fLock);
+		while (!fStopping && !fPowerOff &&
+		    (fPending.serial == serial || fInFlightSerial == serial)) {
+			/* Sleep drops fLock, so the timer can present and wake us.
+			 * A missing TE or powered-off panel must not trap the compositor. */
+			if (IOLockSleepDeadline(fLock, &fInFlightSerial, deadline,
+			    THREAD_UNINT) == THREAD_TIMED_OUT) {
+				IOLog("SWEET FB: synchronous swap timed out serial %llu\n", serial);
+				break;
+			}
+		}
+		IOLockUnlock(fLock);
+	}
 	if ((++sweet_fb_swap_count % 1000) == 0) {
 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
 	}
@@ -1085,6 +1117,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 				fFB->fPowerOff = off;
 				fFB->fFadeStep = 0;
 				fFB->fRedrawShown = !off;
+				IOLockWakeup(fFB->fLock, &fFB->fInFlightSerial, false);
 			}
 			IOLockUnlock(fFB->fLock);
 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");

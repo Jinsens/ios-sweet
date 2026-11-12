@@ -76,7 +76,7 @@ poll plus 0.3 ms launch plus 9.5 ms fixed hold), on the vsync workloop.
 This GPU change preserves that display behavior; if lag remains, GUI-only
 sleep/worker scheduling needs a separate surface-lifetime-safe change.
 
-## >>> ACTIVE 2026-11-13: 2517 FIXES CAMERA-LEFT FLICKER; THIN DYNAMIC TEAR REMAINS; RESTORED <<<
+## >>> ACTIVE 2026-11-13: 2517 CAMERA-LEFT FIX VERIFIED; 2518 SYNC-SUBMIT READY; AWAIT APPROVAL <<<
 
 ### 2026-11-12/13: host synchronization conclusions reopened
 
@@ -99,6 +99,33 @@ approval and full backup restoration. Its ABL historically rejects `fastboot boo
 (`unknown command`), so a hardware trial needs a concrete image and explicit
 approval for a temporary `boot_a` write followed by full backup restoration.
 Do not run an old generated runner based only on its embedded authorization.
+
+### 2518 prepared: wait for own frame presentation before SwapEnd returns
+
+2517 result committed `733ef5c`: camera-left flicker disappeared; residual thin
+motion-only content tearing remains. Next opt-in `sweetfb_syncswap=1` waits for
+own internal frame serial to leave both pending and inflight. Pending replacement
+wakes its cancelled submitter, but cannot release another still-inflight caller.
+TE retry carries the same serial; wait drops fLock, has1s deadline and power-off/
+shutdown wakeup. Default submit behavior remains asynchronous. Same2517 in-use,
+300us lead, vendor trigger and14500us hold; no PHY/DCS/DSIM timing change.
+This tests producer pacing; it is a hypothesis for remaining thin tearing.
+
+Validation:28/28 display MMIO and24/24 actual-C++ ASan/UBSan use/lifecycle/pacing
+tests pass (52 total). Removed-wait and pending-only temporary harness mutations
+fail expected tests. Complete local build exit0: build2518-native.log, noCI run.
+Canonical/build copies identical. Artifacts in research/matisse/20261109-resident-gpu:
+- kernel2518.development.sweet SHA256
+  `286e36e9f4c29298a0f678c2d3e0041fa34fde89726c33139b28e324a938307f`
+- shim2518-te/matisse-shim-gpu2518.img,26,746,880 bytes, SHA256
+  `2e580129e42009578c947d07d00f5dab4e5a0c3b4b8cbc25c6be50a71033137a`
+- predicted full boot_a SHA256
+  `1b630a62525d0955f2f61372c218119c92c40a80378d60c658ed3e5a394234da`
+- cmdline2518.txt,display2518-build-manifest.json,build2518-image.log,
+  shim2518-ui-run-once.py (requires exact image CLI approval).
+No2518 write authorized/executed. Previous2517 restore independently confirmed
+again. Read-only2518 preflight passed; no other device runner active. Ask exact
+2518 trial+complete restoration approval and keep other chat off the device.
 
 ### 2517 build milestone: protect queued/displayed IOSurfaces
 
