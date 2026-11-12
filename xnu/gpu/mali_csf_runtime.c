@@ -122,7 +122,24 @@ int sweet_csf_runtime_enqueue(const struct sweet_csf_queue_config *c,const struc
     if(!valid(c,io)||!g||!g->active||g->failed||!bytes||(bytes&7)||
        bytes>(16u<<20)||(stream&7)||stream>=(UINT64_C(1)<<48)-bytes||
        g->sequence==UINT32_MAX){r->error=-60;return -60;}
-    if(read64(io,g->memory_pa+0x2000)!=g->insert){r->error=-62;return -62;}
+    /* CS_EXTRACT may advance while its two halves are read. Take a stable
+     * snapshot before measuring available ring space; a transient update is
+     * retryable. Keep one envelope unused so producer and consumer cannot
+     * alias at wrap. The firmware may fetch within an envelope (8-byte CS
+     * instructions), so it need not be aligned to a whole submission. */
+    uint64_t extract=0;unsigned stable=0;
+    for(unsigned i=0;i<3;i++) {
+        uint32_t hi=read32(io,g->memory_pa+0x2004);
+        uint32_t lo=read32(io,g->memory_pa+0x2000);
+        if(hi==read32(io,g->memory_pa+0x2004)) {
+            extract=((uint64_t)hi<<32)|lo;stable=1;break;
+        }
+    }
+    if(!stable){r->error=-62;return -62;}
+    if((extract&7)||extract>g->insert||g->insert-extract>4096) {
+        g->failed=1;r->error=-64;return -64;
+    }
+    if(g->insert-extract>4096-2*128){r->error=-62;return -62;}
     uint32_t seq=++g->sequence;
     uint64_t commands[16]={
         UINT64_C(0x025e000000000000),UINT64_C(0x24005e0000000233),

@@ -466,12 +466,14 @@ static IOReturn gpu_submit_async(GPUVM *v,struct sweet_gpu_submit *r)
     int rc=sweet_csf_runtime_enqueue(&queue,&gpu_io,&v->groups[r->group-1],r->stream,r->bytes,&last_report);
     gpu_note(GPU_STAT_SUBMIT,began);
     submits++;
-    if(rc){v->broken=true;failures++;}
+    /* Ring pressure is backpressure, not a GPU fault. The transport may
+     * wait for outstanding fences and retry this unchanged submission. */
+    if(rc&&rc!=-62){v->broken=true;failures++;}
     r->sequence=v->groups[r->group-1].sequence;
     if(rc||r->sequence<=3||(r->sequence%100)==0)
         IOLog("SWEET GPU: CSF enqueue as=%u group=%u seq=%llu rc=%d insert=%u\n",
             v->as_nr,r->group,r->sequence,rc,last_report.insert);
-    return rc?kIOReturnIOError:kIOReturnSuccess;
+    return rc==-62?kIOReturnBusy:rc?kIOReturnIOError:kIOReturnSuccess;
 }
 static IOReturn gpu_wait(GPUVM *v,struct sweet_gpu_wait *w)
 {

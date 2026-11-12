@@ -16,7 +16,7 @@ HARNESS = r'''
 #define MEM 0x91000000ull
 struct model {
  uint32_t gpu[0x110000/4],sh[0x10000/4],mem[SWEET_CSF_QUEUE_BYTES/4],reg[96];
- uint64_t ticks,user[4];unsigned writes,calls,mode,user_doorbells;
+ uint64_t ticks,user[4];unsigned writes,calls,mode,user_doorbells,extract_tear,extract_high_reads;
 };
 static uint32_t *addr(struct model*m,uint64_t a){
  assert(!(a&3));
@@ -25,7 +25,15 @@ static uint32_t *addr(struct model*m,uint64_t a){
  if(a>=MEM&&a<MEM+sizeof(m->mem))return m->mem+(a-MEM)/4;
  assert(0);return NULL;
 }
-static uint32_t rd(void*p,uint64_t a){return *addr(p,a);}
+static uint32_t rd(void*p,uint64_t a){
+ struct model*m=p;uint32_t value=*addr(m,a);
+ if(a==MEM+0x2004&&m->extract_tear){
+  m->extract_high_reads++;
+  if(m->extract_tear==2)return value+m->extract_high_reads;
+  if(m->extract_high_reads==1)return value-1; /* one high/low rollover */
+ }
+ return value;
+}
 static uint64_t word(struct model*m,uint64_t a){return rd(m,a)|((uint64_t)rd(m,a+4)<<32);}
 static void instruction(struct model*m,uint64_t ins,unsigned depth){
  unsigned op=ins>>56,dst=(ins>>48)&255,ar=(ins>>40)&255,vr=(ins>>32)&255;
@@ -43,6 +51,16 @@ static void instruction(struct model*m,uint64_t ins,unsigned depth){
   if(m->mode!=2)m->mem[0x3000/4]=m->reg[vr];
  }else assert(0);
 }
+/* Firmware may acknowledge doorbells long before the CS consumes commands.
+ * Execute complete envelopes explicitly to model multiple jobs in flight. */
+static void process(struct model*m,unsigned envelopes){
+ uint64_t insert=word(m,MEM+0x1000),extract=word(m,MEM+0x2000);
+ assert(insert>=extract&&insert-extract<=4096);
+ uint64_t end=extract+(uint64_t)envelopes*128;
+ if(end>insert)end=insert;
+ for(uint64_t n=extract;n<end;n+=8)instruction(m,word(m,MEM+(n&4095)),0);
+ m->mem[0x2000/4]=end;m->mem[0x2004/4]=end>>32;
+}
 static void doorbell(struct model*m,int user){
  uint32_t *gi=m->sh+0x2000/4,*go=m->sh+0x3000/4,*in=m->sh+0x4000/4,*out=m->sh+0x5000/4;
  uint32_t *ci=m->sh+0x6000/4,*co=m->sh+0x7000/4;
@@ -55,12 +73,9 @@ static void doorbell(struct model*m,int user){
  /* Firmware request notifications do not stand in for a queue kick. */
  if(!user)return;
  assert(ci[1]==0x10f);m->user_doorbells++;
- if(m->mode==1)return;
+ if(m->mode==1||m->mode==6)return;
  if(m->mode==3){co[0x80/4]=0x44;return;}
- uint64_t insert=word(m,MEM+0x1000),extract=word(m,MEM+0x2000);
- assert(insert>=extract&&insert-extract<=4096);
- for(uint64_t n=extract;n<insert;n+=8)instruction(m,word(m,MEM+(n&4095)),0);
- m->mem[0x2000/4]=insert;m->mem[0x2004/4]=insert>>32;
+ process(m,32);
 }
 static void wr(void*p,uint64_t a,uint32_t n){
  struct model*m=p;m->writes++;*addr(m,a)=n;
@@ -107,6 +122,26 @@ int main(void){
  assert(!sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r));
  assert(r.after==1 && r.extract==128 && m->reg[80]==0x2438cafe);
  assert(!sweet_csf_runtime_stop(&c,&io,&g));
+
+ /* A high-word rollover during extract sampling must be retried before
+  * occupancy is evaluated; persistent tearing is retryable backpressure. */
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));m->mode=6;
+ g.insert=UINT64_C(0x100000080);
+ m->mem[0x1000/4]=(uint32_t)g.insert;m->mem[0x1004/4]=g.insert>>32;
+ m->mem[0x2000/4]=0;m->mem[0x2004/4]=1;m->extract_tear=1;
+ assert(!sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r));
+ assert(!g.failed&&g.sequence==1&&g.insert==UINT64_C(0x100000100));
+ assert(m->extract_high_reads>=4);m->extract_tear=0;
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));m->mode=6;
+ m->extract_tear=2;writes=m->writes;
+ assert(sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r)==-62);
+ assert(!g.failed&&!g.sequence&&!g.insert&&m->writes==writes&&r.error==-62);
+ assert(m->extract_high_reads>=6);m->extract_tear=0;
+ assert(!sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r));
+ assert(g.sequence==1&&g.insert==128&&!g.failed);
+ process(m,1);assert(!sweet_csf_runtime_wait(&c,&io,&g,1,128,1,&r));
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
  assert(!sweet_csf_runtime_bind(&c,&io,1,0)&&word(m,GPU+0x2470)==1);
  /* A stalled queue times out without declaring a hardware fault. Its
   * existing submission stays intact: retry WAIT, never enqueue it twice. */
@@ -115,9 +150,8 @@ int main(void){
  assert(sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r)==-63);
  assert(!g.failed&&g.active&&g.sequence==1&&g.insert==128);
  assert(r.after==0&&r.extract==0&&r.error==-63&&m->calls==0);
- writes=m->writes;
- assert(sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r)==-62);
- assert(m->writes==writes&&g.sequence==1&&g.insert==128);
+ /* A timeout is retried by waiting on this ticket. Ring space could admit
+  * newer tickets, but resubmitting this same work would execute it twice. */
  m->mode=0;
  /* Enough budget to exercise the early doorbell re-ring at poll 2000. */
  assert(!sweet_csf_runtime_wait(&c,&io,&g,1,128,3,&r));
@@ -128,6 +162,87 @@ int main(void){
  /* Waiting for an old sequence remains valid after newer progress. */
  assert(!sweet_csf_runtime_wait(&c,&io,&g,1,128,1,&r));
  assert(r.after==2&&r.extract==256&&m->calls==2);
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
+
+ /* Keep 31 complete envelopes outstanding. The remaining slot separates
+  * full from empty; rejecting entry 32 must not touch memory or a ticket. */
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));
+ m->mode=6;
+ for(unsigned i=0;i<31;i++){
+  assert(!sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r));
+  assert(g.sequence==i+1&&g.insert==(i+1)*128&&r.stage==4&&r.error==0);
+ }
+ assert(!word(m,MEM+0x2000)&&!m->mem[0x3000/4]&&!m->calls);
+ uint32_t saved[4096/4];memcpy(saved,m->mem,sizeof(saved));writes=m->writes;
+ assert(sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r)==-62);
+ assert(!g.failed&&g.sequence==31&&g.insert==3968&&m->writes==writes);
+ assert(!memcmp(saved,m->mem,sizeof(saved)));
+ /* Retire only three jobs; the producer may refill exactly those slots,
+  * crossing ring offset 4096 without overwriting unconsumed envelopes. */
+ process(m,3);assert(m->calls==3&&word(m,MEM+0x2000)==384&&m->mem[0x3000/4]==3);
+ for(unsigned i=0;i<3;i++)assert(!sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r));
+ assert(g.sequence==34&&g.insert==4352&&word(m,MEM+0x1000)==4352);
+ writes=m->writes;
+ assert(sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r)==-62&&m->writes==writes);
+ assert(!sweet_csf_runtime_wait(&c,&io,&g,3,384,1,&r));
+ assert(r.after==3&&r.extract==384&&m->calls==3);
+ process(m,31);assert(m->calls==34&&word(m,MEM+0x2000)==4352);
+ assert(!sweet_csf_runtime_wait(&c,&io,&g,34,4352,1,&r)&&r.after==34);
+ /* Exercise several complete wraps with deferred consumers. */
+ for(unsigned round=0;round<4;round++){
+  uint32_t seq=g.sequence;
+  for(unsigned i=0;i<31;i++)assert(!sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r));
+  writes=m->writes;
+  assert(sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r)==-62&&m->writes==writes);
+  process(m,31);assert(g.sequence==seq+31&&m->calls==g.sequence);
+  assert(!sweet_csf_runtime_wait(&c,&io,&g,g.sequence,(uint32_t)g.insert,1,&r));
+ }
+ assert(!g.failed&&g.insert>4096*4);
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
+
+ /* A high 32-bit ring generation still uses absolute producer/consumer
+  * positions. This is independent of wrapping the 4096-byte backing. */
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));m->mode=6;
+ g.insert=UINT64_C(0x100000000)+3968;
+ m->mem[0x1000/4]=(uint32_t)g.insert;m->mem[0x1004/4]=g.insert>>32;
+ m->mem[0x2000/4]=(uint32_t)g.insert;m->mem[0x2004/4]=g.insert>>32;
+ assert(!sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r));
+ assert(g.sequence==1&&g.insert==UINT64_C(0x100001000));
+ process(m,1);assert(word(m,MEM+0x2000)==g.insert&&m->mem[0x3000/4]==1);
+ assert(!sweet_csf_runtime_wait(&c,&io,&g,1,(uint32_t)g.insert,1,&r));
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
+
+ /* Invalid hardware extract values are not retryable fullness: fail closed
+  * without writing the ring, producer index, sequence or a doorbell. */
+ const uint64_t invalid_extract[]={128,1,UINT64_C(0x100000000)};
+ for(unsigned i=0;i<sizeof(invalid_extract)/sizeof(invalid_extract[0]);i++){
+  init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));m->mode=6;
+  if(i==1)g.insert=128; /* unaligned extract behind an aligned producer */
+  m->mem[0x2000/4]=(uint32_t)invalid_extract[i];m->mem[0x2004/4]=invalid_extract[i]>>32;
+  writes=m->writes;
+  assert(sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r)==-64);
+  assert(g.failed&&!g.sequence&&g.insert==(i==1?128u:0u)&&m->writes==writes&&r.error==-64);
+ }
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));m->mode=6;
+ g.insert=4224;writes=m->writes; /* valid alignment but impossible occupancy */
+ assert(sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r)==-64);
+ assert(g.failed&&g.insert==4224&&!g.sequence&&m->writes==writes);
+
+ /* Extract is an instruction cursor, not an envelope boundary. A valid
+  * eight-byte advance must not be mistaken for a corrupt queue. */
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));m->mode=6;
+ g.insert=128;m->mem[0x1000/4]=128;m->mem[0x2000/4]=8;
+ assert(!sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r));
+ assert(!g.failed&&g.sequence==1&&g.insert==256);
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
+
+ /* A different CS/AS status register must not poison this healthy group.
+  * MMU upper completion bits are retained as diagnostic status only. */
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));m->mode=6;
+ m->sh[0x8080/4]=0x44;m->gpu[(0x241c+2*64)/4]=0x44;m->gpu[0x2000/4]=0x20000;
+ assert(!sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r));process(m,1);
+ assert(!sweet_csf_runtime_wait(&c,&io,&g,1,128,1,&r));
+ assert(!g.failed&&!r.fault&&!r.fatal&&!r.as_fault&&r.mmu_raw==0x20000);
  assert(!sweet_csf_runtime_stop(&c,&io,&g));
 
  /* Extract advancing without the GPU-written fence is not completion. A

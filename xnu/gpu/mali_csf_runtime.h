@@ -23,8 +23,10 @@ int sweet_csf_runtime_start(const struct sweet_csf_queue_config *,
 int sweet_csf_runtime_submit(const struct sweet_csf_queue_config *,
     const struct sweet_gpu_io *, struct sweet_csf_runtime_group *,
     uint64_t stream, uint32_t bytes, struct sweet_csf_queue_report *);
-/* Split submission: enqueue returns once the doorbell is rung, wait polls the
- * fence already written by enqueue. The caller serialises each group. */
+/* Split submission: enqueue returns once the doorbell is rung, with up to31
+ * 128-byte envelopes in the 4KiB ring. -62 is retryable ring pressure and
+ * does not change the sequence or memory. Wait polls the GPU-written fence.
+ * The caller serialises each group's enqueue operations. */
 int sweet_csf_runtime_enqueue(const struct sweet_csf_queue_config *,
     const struct sweet_gpu_io *, struct sweet_csf_runtime_group *,
     uint64_t stream, uint32_t bytes, struct sweet_csf_queue_report *);
