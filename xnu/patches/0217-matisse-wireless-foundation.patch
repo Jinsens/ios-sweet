@@ -1,0 +1,647 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,6 +107,10 @@
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_gpu_queue.c		standard
+ bsd/dev/sweet_gpu_runtime.c		standard
++bsd/dev/mt6983_conninfra.c		standard
++bsd/dev/mtk_bt_h4.c			standard
++bsd/dev/mtk_bt_firmware.c		standard
++bsd/dev/sweet_wireless.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_mt_keys.c			standard
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -10,6 +10,7 @@
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+ extern "C" void SweetGPUStart(IOService *provider);
++extern "C" void SweetWirelessStart(void);
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+@@ -32,6 +33,7 @@
+ 	}
+ 	registerService();
+ 	SweetGPUStart(this);
++	SweetWirelessStart();
+ 	IOLog("SWEET: platform expert registered\n");
+ 	return true;
+ }
+--- /dev/null
++++ b/bsd/dev/mt6983_conninfra.c
+@@ -0,0 +1,60 @@
++#include "mt6983_conninfra.h"
++
++int
++mt6983_conninfra_capture(const struct mt6983_conninfra_io *io,
++    struct mt6983_conninfra_report *report)
++{
++    struct mt6983_conninfra_report result = {0};
++    static const uint64_t addresses[3] = {
++        MT6983_CONNINFRA_PWR_CON_PA,
++        MT6983_CONNINFRA_RX_PROTECT_PA,
++        MT6983_CONNINFRA_TX_PROTECT_PA
++    };
++    uint32_t values[3] = {0};
++    unsigned i;
++
++    if (report == 0)
++        return MT6983_CONNINFRA_ARGUMENT;
++    *report = result;
++    if (io == 0 || io->read32 == 0)
++        return MT6983_CONNINFRA_ARGUMENT;
++
++    for (i = 0; i < 3; i++) {
++        int error = io->read32(io->opaque, addresses[i], &values[i]);
++        if (error != 0) {
++            result.state = MT6983_CONNINFRA_READ_ERROR;
++            result.read_error = error;
++            result.failed_address = addresses[i];
++            *report = result;
++            return MT6983_CONNINFRA_IO;
++        }
++        result.valid_mask |= 1u << i;
++        if (i == 0)
++            result.conn_pwr_con = values[i];
++        else if (i == 1)
++            result.rx_protect = values[i];
++        else
++            result.tx_protect = values[i];
++    }
++
++    /* Require both requests and both acknowledgements, plus released
++     * reset/isolation and an enabled AP-to-CONN bus clock. Transitions are
++     * reported conservatively as blocked; nothing here changes power.
++     */
++    if ((result.conn_pwr_con & 0xc000000cu) != 0xc000000cu)
++        result.blockers |= MT6983_CONNINFRA_BLOCK_POWER;
++    if ((result.conn_pwr_con & (1u << 0)) == 0)
++        result.blockers |= MT6983_CONNINFRA_BLOCK_RESET;
++    if ((result.conn_pwr_con & (1u << 1)) != 0)
++        result.blockers |= MT6983_CONNINFRA_BLOCK_ISOLATION;
++    if ((result.conn_pwr_con & (1u << 4)) != 0)
++        result.blockers |= MT6983_CONNINFRA_BLOCK_CLOCK;
++    if ((result.rx_protect & (1u << 0)) != 0)
++        result.blockers |= MT6983_CONNINFRA_BLOCK_RX;
++    if ((result.tx_protect & (1u << 12)) != 0)
++        result.blockers |= MT6983_CONNINFRA_BLOCK_TX;
++    result.state = result.blockers != 0 ? MT6983_CONNINFRA_HOST_BLOCKED :
++        MT6983_CONNINFRA_HOST_GATES_OPEN;
++    *report = result;
++    return MT6983_CONNINFRA_OK;
++}
+--- /dev/null
++++ b/bsd/dev/mt6983_conninfra.h
+@@ -0,0 +1,82 @@
++#ifndef SWEET_MT6983_CONNINFRA_H
++#define SWEET_MT6983_CONNINFRA_H
++
++#include <stdint.h>
++
++/* AP-side prerequisites shared by MT6983 WLAN and Bluetooth.
++ * Independently written from MediaTek's published register descriptions:
++ * MiCode/MTK_kernel_modules, rubens-s-oss,
++ * c66b3c9ce7b5c0bc3d72a829f6542200deaa8a9c:
++ * connectivity/conninfra/platform/mt6983/mt6983_pos_gen.c:
++ *   consys_conninfra_on_power_ctrl_mt6983_gen() (power/reset/clock bits)
++ * connectivity/conninfra/platform/mt6983/mt6983_consys_reg.c:
++ *   consys_check_conninfra_on_domain() (AP-to-CONN RX/TX protection)
++ * connectivity/conninfra/platform/mt6983/include/mt6983_pos_gen.h:
++ *   CONN_PWR_CON=SPM+0xe04; protection=INFRACFG_AO+0xc9c/+0xc5c.
++ *
++ * Capture never writes and never accesses 0x18000000..0x18ffffff. Open AP
++ * gates do NOT establish that CONN off-domain clocks, firmware or radios
++ * work. The vendor off-domain readability check resets a clock detector;
++ * a read-only snapshot cannot replace that fresh clock check.
++ */
++#define MT6983_CONNINFRA_PWR_CON_PA UINT64_C(0x1c001e04)
++#define MT6983_CONNINFRA_RX_PROTECT_PA UINT64_C(0x10001c9c)
++#define MT6983_CONNINFRA_TX_PROTECT_PA UINT64_C(0x10001c5c)
++
++#define MT6983_CONNINFRA_VALID_POWER (1u << 0)
++#define MT6983_CONNINFRA_VALID_RX (1u << 1)
++#define MT6983_CONNINFRA_VALID_TX (1u << 2)
++#define MT6983_CONNINFRA_VALID_ALL (MT6983_CONNINFRA_VALID_POWER | \
++    MT6983_CONNINFRA_VALID_RX | MT6983_CONNINFRA_VALID_TX)
++
++#define MT6983_CONNINFRA_BLOCK_POWER (1u << 0)
++#define MT6983_CONNINFRA_BLOCK_RESET (1u << 1)
++#define MT6983_CONNINFRA_BLOCK_ISOLATION (1u << 2)
++#define MT6983_CONNINFRA_BLOCK_CLOCK (1u << 3)
++#define MT6983_CONNINFRA_BLOCK_RX (1u << 4)
++#define MT6983_CONNINFRA_BLOCK_TX (1u << 5)
++
++enum mt6983_conninfra_state {
++    MT6983_CONNINFRA_INVALID = 0,
++    MT6983_CONNINFRA_READ_ERROR = 1,
++    MT6983_CONNINFRA_HOST_BLOCKED = 2,
++    MT6983_CONNINFRA_HOST_GATES_OPEN = 3
++};
++
++enum mt6983_conninfra_result {
++    MT6983_CONNINFRA_OK = 0,
++    MT6983_CONNINFRA_ARGUMENT = -1,
++    MT6983_CONNINFRA_IO = -2
++};
++
++struct mt6983_conninfra_io {
++    void *opaque;
++    /* Return zero only after storing a successfully read 32-bit value.
++     * The caller owns mapping, ordering, and the hardware's lifetime.
++     * Failed reads stop capture immediately; callback error codes are
++     * preserved in read_error. Capture makes at most three calls.
++     */
++    int (*read32)(void *opaque, uint64_t physical, uint32_t *value);
++};
++
++struct mt6983_conninfra_report {
++    uint32_t state;
++    uint32_t valid_mask;
++    uint32_t blockers;
++    uint32_t conn_pwr_con;
++    uint32_t rx_protect;
++    uint32_t tx_protect;
++    uint32_t firmware_ready; /* Always zero: firmware is not inspected. */
++    int32_t read_error;
++    uint64_t failed_address;
++};
++
++/* The output is initialized on every call when report is non-NULL.
++ * Complete capture returns OK, even when host gates are blocked.
++ * Only valid_mask fields contain successfully observed register data.
++ * io/report must not overlap and the callback must not modify report.
++ */
++int mt6983_conninfra_capture(const struct mt6983_conninfra_io *io,
++    struct mt6983_conninfra_report *report);
++
++#endif
+--- /dev/null
++++ b/bsd/dev/mtk_bt_firmware.c
+@@ -0,0 +1,84 @@
++/* EMI format and checksum: MiCode/MTK_kernel_modules,
++ * rubens-s-oss, connectivity/bt/mt66xx/btif/btmtk_mt66xx.c.
++ * The vendor copies bytes after the outer 48-byte header to EMI. Its disabled
++ * region checks are replaced by caller-approved bounds before any copy.
++ */
++#include "mtk_bt_firmware.h"
++
++static uint32_t
++signed_high_fold(uint32_t sum)
++{
++    /* The vendor uses int32_t and arithmetic >>16 after the sign bit sets.
++     * Match its on-disk checksum without C signed-overflow/shift assumptions.
++     * Plain unsigned Internet-checksum folding differs on actual BT images.
++     */
++    int32_t high = (int32_t)(sum >> 16);
++    if (sum & 0x80000000u)
++        high -= 0x10000;
++    return (sum & 0xffffu) + (uint32_t)high;
++}
++
++uint16_t
++mtk_bt_patch_checksum(const uint8_t *bytes, size_t length)
++{
++    uint32_t sum = 0;
++    while (length > 1) {
++        sum += (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8);
++        if (sum & 0x80000000u)
++            sum = signed_high_fold(sum);
++        bytes += 2;
++        length -= 2;
++    }
++    if (length)
++        sum += bytes[0];
++    while (sum >> 16)
++        sum = signed_high_fold(sum);
++    return (uint16_t)~sum;
++}
++
++int
++mtk_bt_patch_parse(const uint8_t *image, size_t length,
++    size_t window_offset, size_t window_bytes, size_t emi_bytes,
++    struct mtk_bt_patch *output)
++{
++    struct mtk_bt_patch patch = {0};
++    uint16_t checksum;
++    size_t i;
++    if (!image || !output || window_offset > emi_bytes ||
++        window_bytes > emi_bytes - window_offset)
++        return MTK_BT_PATCH_ARGUMENT;
++    /* Documented format contains an outer EMI and an inner MCU/BT header. */
++    if (length < 2 * MTK_BT_EMI_HEADER_BYTES)
++        return MTK_BT_PATCH_TRUNCATED;
++    /* Firmware address is 0xFXXXXXXX. Only its middle two bytes are an EMI
++     * offset in this protocol; reject discarded bits instead of aliasing an
++     * unrepresentable address to an unrelated location in reserved memory.
++     */
++    if (image[24] != 0 || image[27] != 0xf0)
++        return MTK_BT_PATCH_ADDRESS;
++    patch.emi_offset = (uint32_t)image[25] << 8 |
++        (uint32_t)image[26] << 16;
++    patch.firmware_address = (uint32_t)image[24] | (uint32_t)image[25] << 8 |
++        (uint32_t)image[26] << 16 | (uint32_t)image[27] << 24;
++    patch.payload_bytes = length - MTK_BT_EMI_HEADER_BYTES;
++    if (patch.emi_offset < window_offset ||
++        patch.emi_offset - window_offset > window_bytes ||
++        patch.payload_bytes > window_bytes - (patch.emi_offset - window_offset))
++        return MTK_BT_PATCH_RANGE;
++    patch.payload = image + MTK_BT_EMI_HEADER_BYTES;
++    checksum = (uint16_t)image[46] | ((uint16_t)image[47] << 8);
++    if (mtk_bt_patch_checksum(patch.payload, patch.payload_bytes) != checksum)
++        return MTK_BT_PATCH_CHECKSUM;
++    patch.subsystem = (uint32_t)image[28] | (uint32_t)image[29] << 8 |
++        (uint32_t)image[30] << 16 | (uint32_t)image[31] << 24;
++    for (i = 0; i < sizeof(patch.datetime); i++)
++        patch.datetime[i] = image[i];
++    for (i = 0; i < sizeof(patch.platform); i++)
++        patch.platform[i] = image[16 + i];
++    for (i = 0; i < sizeof(patch.hardware_version); i++) {
++        patch.hardware_version[i] = image[20 + i];
++        patch.software_version[i] = image[22 + i];
++    }
++    *output = patch;
++    return MTK_BT_PATCH_OK;
++}
+--- /dev/null
++++ b/bsd/dev/mtk_bt_firmware.h
+@@ -0,0 +1,48 @@
++#ifndef SWEET_MTK_BT_FIRMWARE_H
++#define SWEET_MTK_BT_FIRMWARE_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define MTK_BT_EMI_HEADER_BYTES 48u
++enum mtk_bt_patch_result {
++    MTK_BT_PATCH_OK = 0,
++    MTK_BT_PATCH_ARGUMENT = -1,
++    MTK_BT_PATCH_TRUNCATED = -2,
++    MTK_BT_PATCH_ADDRESS = -3,
++    MTK_BT_PATCH_RANGE = -4,
++    MTK_BT_PATCH_CHECKSUM = -5
++};
++
++struct mtk_bt_patch {
++    /* Borrowed bytes after the outer EMI header, INCLUDING the inner 48-byte
++     * MCU/BT header. No allocation, mapping, copy or register write is done.
++     */
++    const uint8_t *payload;
++    size_t payload_bytes;
++    uint32_t emi_offset;
++    uint32_t firmware_address;
++    uint32_t subsystem;
++    /* Kept raw: vendor logs byte-swapped versions but selection must inspect
++     * the exact board/ECO contract rather than infer it from these bytes. */
++    uint8_t hardware_version[2];
++    uint8_t software_version[2];
++    uint8_t datetime[16];
++    uint8_t platform[4];
++};
++
++/* bytes must reference length bytes (NULL is valid only for length zero). */
++uint16_t mtk_bt_patch_checksum(const uint8_t *, size_t);
++/* Validates format, vendor checksum, and the specific subsystem's
++ * caller-approved window inside its reserved Conninfra EMI allocation. This checksum
++ * is consistency checking, not firmware authentication. The owner must keep
++ * the validated image immutable through copying it into EMI.
++ * output is untouched on failure. emi_bytes is allocation size, not PA.
++ * window_offset/window_bytes must come from the board's firmware load plan.
++ * The old vendor's disabled MCU/BT window constants do not describe the actual
++ * matisse BT blobs (their offset is 0x5bc00, not 0x100000).
++ */
++int mtk_bt_patch_parse(const uint8_t *, size_t, size_t window_offset,
++    size_t window_bytes, size_t emi_bytes, struct mtk_bt_patch *output);
++
++#endif
+--- /dev/null
++++ b/bsd/dev/mtk_bt_h4.c
+@@ -0,0 +1,147 @@
++/* Protocol references: MiCode/MTK_kernel_modules, rubens-s-oss,
++ * connectivity/bt/mt66xx/{btmtk_main.c,include/btmtk_define.h,
++ * btif/btmtk_mt66xx.c,btif/btmtk_btif_main.c}.
++ * H:4 length fields and ISO's 14-bit length follow h4_recv_buf().
++ */
++#include "mtk_bt_h4.h"
++
++static void
++clear_frame(struct mtk_bt_h4 *decoder)
++{
++    decoder->used = 0;
++    decoder->expected = 0;
++    decoder->header_bytes = 0;
++}
++
++int
++mtk_bt_h4_init(struct mtk_bt_h4 *decoder, uint8_t *storage, size_t capacity,
++    mtk_bt_h4_receive receive, void *context)
++{
++    if (!decoder)
++        return MTK_BT_H4_ARGUMENT;
++    decoder->storage = storage;
++    decoder->capacity = capacity;
++    decoder->receive = receive;
++    decoder->context = context;
++    clear_frame(decoder);
++    decoder->error = (!storage || capacity < 5 || !receive) ?
++        MTK_BT_H4_ARGUMENT : MTK_BT_H4_OK;
++    return decoder->error;
++}
++
++void
++mtk_bt_h4_reset(struct mtk_bt_h4 *decoder)
++{
++    if (!decoder)
++        return;
++    clear_frame(decoder);
++    decoder->error = (!decoder->storage || decoder->capacity < 5 ||
++        !decoder->receive) ? MTK_BT_H4_ARGUMENT : MTK_BT_H4_OK;
++}
++
++static size_t
++payload_bytes(const struct mtk_bt_h4 *decoder)
++{
++    const uint8_t *frame = decoder->storage;
++    switch (frame[0]) {
++    case 0x02: /* ACL */
++        return (size_t)frame[3] | ((size_t)frame[4] << 8);
++    case 0x03: /* SCO */
++        return frame[3];
++    case 0x04: /* Event */
++        return frame[2];
++    case 0x05: /* ISO, length excludes upper two bits */
++        return (size_t)frame[3] | ((size_t)(frame[4] & 0x3f) << 8);
++    default:
++        return 0; /* feed already rejected unknown indicators */
++    }
++}
++
++int
++mtk_bt_h4_feed(struct mtk_bt_h4 *decoder, const uint8_t *data, size_t length,
++    size_t *consumed)
++{
++    size_t position = 0;
++    if (consumed)
++        *consumed = 0;
++    if (!decoder)
++        return MTK_BT_H4_ARGUMENT;
++    if (decoder->error)
++        return decoder->error;
++    if (!data && length) {
++        decoder->error = MTK_BT_H4_ARGUMENT;
++        return decoder->error;
++    }
++    while (position < length) {
++        if (decoder->used == 0) {
++            uint8_t indicator = data[position++];
++            switch (indicator) {
++            case 0x02: case 0x05: decoder->header_bytes = 5; break;
++            case 0x03: decoder->header_bytes = 4; break;
++            case 0x04: decoder->header_bytes = 3; break;
++            default:
++                decoder->error = MTK_BT_H4_INDICATOR;
++                goto done;
++            }
++            decoder->storage[0] = indicator;
++            decoder->used = 1;
++            decoder->expected = decoder->header_bytes;
++        }
++        while (position < length && decoder->used < decoder->expected)
++            decoder->storage[decoder->used++] = data[position++];
++        if (decoder->used != decoder->expected)
++            break;
++        if (decoder->expected == decoder->header_bytes) {
++            size_t payload = payload_bytes(decoder);
++            if (payload > decoder->capacity - decoder->header_bytes) {
++                decoder->error = MTK_BT_H4_OVERSIZE;
++                goto done;
++            }
++            decoder->expected = decoder->header_bytes + payload;
++            if (payload)
++                continue;
++        }
++        decoder->receive(decoder->context, decoder->storage, decoder->used);
++        clear_frame(decoder);
++    }
++done:
++    if (consumed)
++        *consumed = position;
++    return decoder->error;
++}
++
++int
++mtk_bt_h4_finish(struct mtk_bt_h4 *decoder)
++{
++    if (!decoder)
++        return MTK_BT_H4_ARGUMENT;
++    if (!decoder->error && decoder->used)
++        decoder->error = MTK_BT_H4_TRUNCATED;
++    return decoder->error;
++}
++
++int
++mtk_bt_wmt_power_command(uint8_t *output, size_t capacity, unsigned on)
++{
++    static const uint8_t command[MTK_BT_WMT_POWER_COMMAND_BYTES] =
++        {0x01, 0x6f, 0xfc, 0x06, 0x01, 0x06, 0x02, 0x00, 0x00, 0x00};
++    size_t i;
++    if (!output || capacity < sizeof(command) || on > 1)
++        return -1;
++    for (i = 0; i < sizeof(command); i++)
++        output[i] = command[i];
++    output[9] = (uint8_t)on;
++    return 0;
++}
++
++int
++mtk_bt_wmt_power_event(const uint8_t *frame, size_t length, uint8_t *status)
++{
++    if (!frame || !status || length != 8 ||
++        frame[0] != 0x04 || frame[1] != 0xe4 || frame[2] != 0x05 ||
++        frame[3] != 0x02 || frame[4] != 0x06 ||
++        frame[5] != 0x01 || frame[6] != 0x00)
++        return -1;
++    *status = frame[7];
++    return 0;
++}
+--- /dev/null
++++ b/bsd/dev/mtk_bt_h4.h
+@@ -0,0 +1,52 @@
++/* MT6983 BTIF carries raw H:4; no STP envelope is used by this platform. */
++#ifndef SWEET_MTK_BT_H4_H
++#define SWEET_MTK_BT_H4_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++enum mtk_bt_h4_result {
++    MTK_BT_H4_OK = 0,
++    MTK_BT_H4_ARGUMENT = -1,
++    MTK_BT_H4_INDICATOR = -2,
++    MTK_BT_H4_OVERSIZE = -3,
++    MTK_BT_H4_TRUNCATED = -4
++};
++
++/* The callback borrows a complete frame INCLUDING its H:4 indicator until it
++ * returns. It must neither retain that pointer nor reenter this decoder.
++ * The owner serializes feed/reset, and supplies storage outside incoming data.
++ */
++typedef void (*mtk_bt_h4_receive)(void *, const uint8_t *, size_t);
++
++struct mtk_bt_h4 {
++    uint8_t *storage;
++    size_t capacity;
++    size_t used;
++    size_t expected;
++    size_t header_bytes;
++    int error;
++    mtk_bt_h4_receive receive;
++    void *context;
++};
++
++int mtk_bt_h4_init(struct mtk_bt_h4 *, uint8_t *, size_t,
++    mtk_bt_h4_receive, void *);
++void mtk_bt_h4_reset(struct mtk_bt_h4 *);
++/* Frames larger than capacity and unknown indicators latch an error. No bytes
++ * following an invalid header are searched for a new frame: reset only after
++ * resetting/draining the underlying transport. consumed may be NULL.
++ */
++int mtk_bt_h4_feed(struct mtk_bt_h4 *, const uint8_t *, size_t, size_t *consumed);
++/* Call only at an actual end of stream, not between BTIF fragments. */
++int mtk_bt_h4_finish(struct mtk_bt_h4 *);
++
++/* WMT FUNC_CTRL command and event include the H:4 indicator. */
++#define MTK_BT_WMT_POWER_COMMAND_BYTES 10u
++int mtk_bt_wmt_power_command(uint8_t *, size_t, unsigned on);
++/* A well-formed event returns 0 and writes controller status (0 = success).
++ * Nonmatching/malformed events return -1 and leave status untouched.
++ */
++int mtk_bt_wmt_power_event(const uint8_t *, size_t, uint8_t *status);
++
++#endif
+--- /dev/null
++++ b/bsd/dev/sweet_wireless.c
+@@ -0,0 +1,122 @@
++/* MT6983 wireless bring-up entry. No power/clock/EMI or radio writes. */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include "mt6983_conninfra.h"
++
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
++extern void ml_io_unmap(vm_offset_t, vm_size_t);
++void SweetWirelessStart(void);
++
++#define WIRELESS_IO_PAGE 0x4000u
++#define WIRELESS_AP_PA 0x10000000u
++#define WIRELESS_SPM_PA 0x1c000000u
++#define WIRELESS_VM_WIMG_IO 0x7u
++
++struct wireless_maps {
++    vm_offset_t ap;
++    vm_offset_t spm;
++};
++
++static uint32_t
++wireless_mmio_read32(vm_offset_t address)
++{
++    uint32_t value = *(volatile uint32_t *)address;
++    __asm__ volatile("dmb oshld" ::: "memory");
++    return value;
++}
++
++static int
++wireless_read32(void *opaque, uint64_t physical, uint32_t *value)
++{
++    struct wireless_maps *maps = opaque;
++    vm_offset_t address;
++
++    /* A second allowlist at the MMIO boundary. No CONN bus mapping exists. */
++    switch (physical) {
++    case MT6983_CONNINFRA_PWR_CON_PA:
++        address = maps->spm + (physical - WIRELESS_SPM_PA);
++        break;
++    case MT6983_CONNINFRA_RX_PROTECT_PA:
++    case MT6983_CONNINFRA_TX_PROTECT_PA:
++        address = maps->ap + (physical - WIRELESS_AP_PA);
++        break;
++    default:
++        return -1;
++    }
++    *value = wireless_mmio_read32(address);
++    return 0;
++}
++
++static bool
++wireless_is_matisse(void)
++{
++    DTEntry root;
++    const char *list;
++    unsigned int bytes;
++    bool board = false, soc = false;
++
++    if (SecureDTLookupEntry(NULL, "/", &root) != kSuccess ||
++        SecureDTGetProperty(root, "compatible", (const void **)&list,
++        &bytes) != kSuccess || bytes == 0 || bytes > 512) {
++        return false;
++    }
++    while (bytes != 0) {
++        size_t length = strnlen(list, bytes);
++        if (length == bytes) {
++            return false;
++        }
++        if (length == sizeof("xiaomi,matisse") - 1 &&
++            memcmp(list, "xiaomi,matisse", length) == 0) {
++            board = true;
++        }
++        if (length == sizeof("mediatek,mt6983") - 1 &&
++            memcmp(list, "mediatek,mt6983", length) == 0) {
++            soc = true;
++        }
++        list += length + 1;
++        bytes -= (unsigned int)(length + 1);
++    }
++    return board && soc;
++}
++
++void
++SweetWirelessStart(void)
++{
++    unsigned int mode = 0;
++    struct wireless_maps maps = {0};
++    struct mt6983_conninfra_report report;
++    struct mt6983_conninfra_io io = { &maps, wireless_read32 };
++    int error;
++
++    /* Called exactly once by the platform expert. Disabled unless requested. */
++    if (!PE_parse_boot_argn("sweetconn", &mode, sizeof(mode)) || mode == 0) {
++        return;
++    }
++    if (mode != 1 || !wireless_is_matisse()) {
++        printf("SWEET CONN: unsupported diagnostic mode/board\n");
++        return;
++    }
++    maps.ap = ml_io_map_unmappable(WIRELESS_AP_PA, WIRELESS_IO_PAGE,
++        WIRELESS_VM_WIMG_IO);
++    maps.spm = ml_io_map_unmappable(WIRELESS_SPM_PA, WIRELESS_IO_PAGE,
++        WIRELESS_VM_WIMG_IO);
++    if (maps.ap == 0 || maps.spm == 0) {
++        printf("SWEET CONN: AP register mapping failed\n");
++    } else {
++        error = mt6983_conninfra_capture(&io, &report);
++        printf("SWEET CONN: AP-only rc=%d state=%u valid=%x blockers=%x "
++            "pwr=%08x rx=%08x tx=%08x firmware=unprobed\n", error,
++            report.state, report.valid_mask, report.blockers,
++            report.conn_pwr_con, report.rx_protect, report.tx_protect);
++    }
++    if (maps.spm != 0) {
++        ml_io_unmap(maps.spm, WIRELESS_IO_PAGE);
++    }
++    if (maps.ap != 0) {
++        ml_io_unmap(maps.ap, WIRELESS_IO_PAGE);
++    }
++}
++#endif
