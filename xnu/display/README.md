@@ -40,3 +40,13 @@ Run `python3 -m unittest discover -s tools/tests -p test_matisse_display.py`
 for the W0C/TE/frame-order MMIO regression model. It executes the actual
 driver source with simulated register access and time; it cannot prove the
 physical panel is free of flicker.
+
+
+Trial 2514 adds a 100 us bound on observed TE age. A high latch after a long
+polling gap is acknowledged and discarded, with the original deadline kept.
+The short launch section preserves IRQ state and retries a fresh TE if the
+thread was delayed before it could enter that section. The configured lead
+is capped at 300 us so the launch cannot hold interrupts off for milliseconds;
+TE wait and the frame hold remain interruptible. `te late poll/launch` and
+`accepted age/start` logs expose these timing limits. Regression coverage is
+now 17 cases, including injected scheduling delays and IRQ restoration.

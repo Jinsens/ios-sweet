@@ -42,6 +42,9 @@ PREAMBLE = r'''
 #include <stdlib.h>
 #include <string.h>
 #define SWEET 1
+#define FALSE 0
+typedef int boolean_t;
+static boolean_t ml_set_interrupts_enabled(boolean_t enabled);
 void sweet_display_refresh(int force);
 typedef void *DTEntry;
 #define kSuccess 0
@@ -54,12 +57,14 @@ static int PE_parse_boot_argn(const char *a,void *b,int c)
 {(void)a;(void)b;(void)c;return 0;}
 
 enum { MAX_EVENTS=32, MAX_WRITES=512, REGS=0x18000/4 };
-struct write_event { unsigned secondary; uint32_t off,value; uint64_t time; unsigned edges; };
+struct write_event { unsigned secondary; uint32_t off,value; uint64_t time; unsigned edges; int irq_enabled; };
 static struct {
     uint32_t primary[REGS], secondary[REGS], status;
     uint64_t now, edge_at[MAX_EVENTS];
     unsigned edge_count, next_edge, edges, writes, acks, starts;
-    int stuck_high;
+    uint64_t pause_at, pause_us, lock_delay, irq_off_at, irq_off_max;
+    unsigned lock_delays, disables, restores;
+    int stuck_high, paused, irq_enabled;
     struct write_event log[MAX_WRITES];
 } model;
 static uint32_t model_read(unsigned secondary,uint32_t off);
@@ -71,9 +76,9 @@ static uint64_t model_clock(void);
 MODEL = r'''
 /* Every hardware access costs 10 us; TE occurs in absolute panel time,
  * independently of whether software is polling the status register. */
-static void advance(void)
+static void advance_by(uint64_t us)
 {
-    model.now += 10;
+    model.now += us;
     while(model.next_edge < model.edge_count &&
           model.edge_at[model.next_edge] <= model.now) {
         model.status |= DSI_INT_TE_RDY;
@@ -81,10 +86,36 @@ static void advance(void)
         model.edges++;
     }
 }
+static void advance(void){advance_by(10);}
+static boolean_t ml_set_interrupts_enabled(boolean_t enabled)
+{
+    boolean_t previous=model.irq_enabled;
+    if(!enabled && previous) {
+        /* Scheduling can happen just before entering the protected window. */
+        if(model.lock_delays) {
+            advance_by(model.lock_delay);
+            model.lock_delays--;
+        }
+        model.disables++;
+        model.irq_off_at=model.now;
+    } else if(enabled && !previous) {
+        uint64_t off=model.now-model.irq_off_at;
+        if(off>model.irq_off_max)model.irq_off_max=off;
+        model.restores++;
+    }
+    model.irq_enabled=enabled;
+    return previous;
+}
 static uint64_t model_clock(void){advance();return model.now;}
 static uint32_t model_read(unsigned secondary,uint32_t off)
 {
     assert(!(off & 3) && off/4 < REGS);
+    if(!secondary && off==DSI_INTSTA && model.pause_at &&
+       model.now>=model.pause_at && !model.paused) {
+        assert(model.irq_enabled);
+        model.paused=1;
+        advance_by(model.pause_us);
+    }
     advance();
     if(!secondary && off==DSI_INTSTA)
         return model.status | (model.stuck_high ? DSI_INT_TE_RDY : 0);
@@ -95,7 +126,7 @@ static void model_write(unsigned secondary,uint32_t off,uint32_t value)
     assert(!(off & 3) && off/4 < REGS);
     advance();
     assert(model.writes < MAX_WRITES);
-    model.log[model.writes++] = (struct write_event){secondary,off,value,model.now,model.edges};
+    model.log[model.writes++] = (struct write_event){secondary,off,value,model.now,model.edges,model.irq_enabled};
     if(!secondary && off==DSI_INTSTA) {
         /* MediaTek status is write-zero-to-clear. Ones leave other IRQs
          * pending; writing a set bit back does NOT acknowledge that bit. */
@@ -109,6 +140,7 @@ static void model_write(unsigned secondary,uint32_t off,uint32_t value)
 static void reset_model(void)
 {
     memset(&model,0,sizeof(model));
+    model.irq_enabled=1;
     disp_base=(uintptr_t)model.primary;
     disp_secondary_base=(uintptr_t)model.secondary;
     disp_ready=1;
@@ -135,6 +167,10 @@ static void reset_model(void)
     sweet_disp_pushes=0;
     sweet_disp_te_edges=0;
     sweet_disp_te_missed=0;
+    sweet_disp_te_late=0;
+    sweet_disp_te_launch_late=0;
+    sweet_disp_te_poll_max=0;
+    sweet_disp_te_launch_max=0;
     model.primary[MUTEX_EN/4]=1;
     model.secondary[MUTEX_EN/4]=1;
 }
@@ -157,7 +193,7 @@ static unsigned find_write(unsigned secondary,uint32_t off,uint32_t value)
     assert(!"required MMIO write missing");
     return MAX_WRITES;
 }
-static void check_frame_order(uint64_t phys,int addresses)
+static void check_frame_order(uint64_t phys,int addresses,unsigned expected_edges)
 {
     unsigned left_stop=find_write(0,MUTEX_EN,0);
     unsigned right_stop=find_write(1,MUTEX_EN,0);
@@ -166,7 +202,13 @@ static void check_frame_order(uint64_t phys,int addresses)
     unsigned right_on=find_write(1,MUTEX_EN,1);
     assert(left_stop < left_on && right_stop < right_on);
     assert(left_on < start && right_on < start);
-    assert(model.log[start].edges==1 && model.log[start].time >= 16000);
+    assert(model.log[start].edges==expected_edges && model.log[start].time >= 16000);
+    assert(!model.log[left_on].irq_enabled && !model.log[right_on].irq_enabled);
+    assert(!model.log[start].irq_enabled);
+    assert(model.irq_enabled && model.disables==model.restores);
+    /* The 9.5 ms frame hold and full TE polling remain interruptible. */
+    assert(model.irq_off_max<1000);
+    assert(sweet_disp_te_launch_max>=300 && sweet_disp_te_launch_max<1000);
     if(addresses) {
         unsigned left=find_write(0,OVL_L0_ADDR,(uint32_t)phys);
         unsigned right=find_write(1,OVL_L0_ADDR,(uint32_t)(phys+disp_pitch/2));
@@ -249,7 +291,7 @@ int main(int argc,char **argv)
         model.status=DSI_INT_TE_RDY|DSI_INT_RD_RDY|DSI_INT_CMD_DONE;
         edge(0,16000);
         assert(sweet_display_scanout(phys,5760)==0);
-        check_frame_order(phys,1);
+        check_frame_order(phys,1,1);
         assert(model.status==(DSI_INT_RD_RDY|DSI_INT_CMD_DONE));
         assert(sweet_disp_gui_flips==1);
     } else if(!strcmp(argv[1],"scanout_timeout")) {
@@ -269,7 +311,7 @@ int main(int argc,char **argv)
         model.status=DSI_INT_TE_RDY|DSI_INT_RD_RDY;
         edge(0,16000);
         sweet_display_refresh(1);
-        check_frame_order(disp_fb_phys,0);
+        check_frame_order(disp_fb_phys,0,1);
         assert(model.status==DSI_INT_RD_RDY);
     } else if(!strcmp(argv[1],"console_timeout")) {
         sweet_disp_te_period=16667;
@@ -278,6 +320,51 @@ int main(int argc,char **argv)
         assert(!model.starts && !sweet_disp_hold_frames);
         assert(!model.primary[MUTEX_EN/4] && !model.secondary[MUTEX_EN/4]);
         assert(model.status==DSI_INT_RD_RDY);
+    } else if(!strcmp(argv[1],"late_poll")) {
+        sweet_disp_te_period=16667;
+        model.status=DSI_INT_RD_RDY;
+        edge(0,16000);edge(1,32000);
+        model.pause_at=15900;model.pause_us=500;
+        assert(sweet_display_scanout(0x240000000ull,5760)==0);
+        assert(model.paused && sweet_disp_te_late==1);
+        assert(sweet_disp_te_poll_max<=100);
+        check_frame_order(0x240000000ull,1,2);
+        assert(model.log[find_write(0,DSI_START,1)].time>=32000);
+        assert(model.status==DSI_INT_RD_RDY);
+    } else if(!strcmp(argv[1],"late_poll_deadline")) {
+        model.status=DSI_INT_RD_RDY;
+        edge(0,16000);
+        model.pause_at=15900;model.pause_us=50000;
+        assert(disp_te_wait(40000)!=0);
+        assert(model.paused && model.edges==1 && !model.starts);
+        assert(!disp_te_edge);
+        assert(model.status&DSI_INT_RD_RDY);
+    } else if(!strcmp(argv[1],"late_launch")) {
+        sweet_disp_te_period=16667;
+        model.status=DSI_INT_CMD_DONE;
+        edge(0,16000);edge(1,32000);
+        model.lock_delay=500;model.lock_delays=1;
+        assert(sweet_display_scanout(0x240000000ull,5760)==0);
+        assert(sweet_disp_te_launch_late==1);
+        assert(model.disables==2 && model.restores==2);
+        check_frame_order(0x240000000ull,1,2);
+        assert(model.log[find_write(0,DSI_START,1)].time>=32000);
+        assert(model.status==DSI_INT_CMD_DONE);
+    } else if(!strcmp(argv[1],"late_launch_twice")) {
+        uint64_t previous=disp_cur_phys;
+        sweet_disp_te_period=16667;
+        model.status=DSI_INT_CMD_DONE;
+        edge(0,16000);edge(1,32000);
+        model.lock_delay=500;model.lock_delays=2;
+        assert(sweet_display_scanout(0x240000000ull,5760)==-4);
+        assert(sweet_disp_te_launch_late==2);
+        assert(!model.starts && !sweet_disp_hold_frames && !sweet_disp_gui_flips);
+        assert(model.irq_enabled && model.disables==2 && model.restores==2);
+        assert(model.irq_off_max<1000 && disp_cur_phys==previous);
+        assert(model.primary[OVL_L0_ADDR/4]==(uint32_t)previous);
+        assert(model.secondary[OVL_L0_ADDR/4]==(uint32_t)(previous+disp_pitch/2));
+        assert(!model.primary[MUTEX_EN/4] && !model.secondary[MUTEX_EN/4]);
+        assert(model.status==DSI_INT_CMD_DONE);
     } else {
         assert(!"unknown test case");
     }
@@ -365,6 +452,18 @@ class MatisseDisplay(unittest.TestCase):
 
     def test_boot_console_skips_frame_when_te_is_missing(self):
         self.run_case("console_timeout")
+
+    def test_late_poll_rejects_old_latch_and_uses_next_panel_edge(self):
+        self.run_case("late_poll")
+
+    def test_late_poll_cannot_extend_original_deadline(self):
+        self.run_case("late_poll_deadline")
+
+    def test_late_launch_restores_interrupts_and_rewaits_for_next_edge(self):
+        self.run_case("late_launch")
+
+    def test_repeated_late_launch_rolls_back_and_restores_interrupts(self):
+        self.run_case("late_launch_twice")
 
 
 if __name__ == "__main__":

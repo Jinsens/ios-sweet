@@ -226,6 +226,11 @@ uint32_t sweet_disp_te_sync_hits;
 uint32_t sweet_disp_te_sync_missed;
 uint64_t sweet_disp_te_sync_ticks;
 int sweet_disp_te_align = 1;            /* start a frame on the panel's TE */
+uint32_t sweet_disp_te_late;           /* edges observed after a scheduling gap */
+uint32_t sweet_disp_te_launch_late;    /* rescheduled between TE and trigger */
+uint64_t sweet_disp_te_poll_max;       /* upper bound on accepted edge age */
+uint64_t sweet_disp_te_launch_max;     /* accepted TE observation to DSI_START */
+static uint64_t disp_te_edge;
 uint32_t sweet_disp_dcs;
 uint32_t sweet_disp_mutex_stops;
 uint32_t sweet_disp_mutex_running;
@@ -465,21 +470,51 @@ static int
 disp_te_wait(uint64_t ticks)
 {
 	uint64_t end = disp_counter() + ticks;
+	uint64_t last_low, now;
+	uint64_t freshness = disp_frequency() / 10000; /* at most 100 us old */
 
+	disp_te_edge = 0;
 	disp_ack(DSI_INT_TE_RDY);
+	last_low = disp_counter();
 	if (disp_read(DSI_INTSTA) & DSI_INT_TE_RDY) {
 		/* A latch that did not clear is not a fresh panel boundary. */
 		return -1;
 	}
 	sweet_disp_te_lows++;
-	while ((disp_read(DSI_INTSTA) & DSI_INT_TE_RDY) == 0) {
-		if (disp_counter() > end) {
+	for (;;) {
+		/* Timestamp BEFORE the low observation. A preemption anywhere
+		 * between that sample and the high sample is included in its age. */
+		uint64_t before = disp_counter();
+		uint32_t status = disp_read(DSI_INTSTA);
+
+		now = disp_counter();
+		if (now > end) {
 			return -1;
+		}
+		if (status & DSI_INT_TE_RDY) {
+			uint64_t age = now - last_low;
+
+			disp_ack(DSI_INT_TE_RDY);
+			if (age <= freshness) {
+				if (age > sweet_disp_te_poll_max) {
+					sweet_disp_te_poll_max = age;
+				}
+				disp_te_edge = now;
+				return 0;
+			}
+			/* A latched edge survived a long scheduling gap. It is
+			 * real, but too old to start a frame on: wait for another. */
+			sweet_disp_te_late++;
+			if (disp_read(DSI_INTSTA) & DSI_INT_TE_RDY) {
+				return -1;
+			}
+			sweet_disp_te_lows++;
+			last_low = now;
+		} else {
+			last_low = before;
 		}
 		__asm__ volatile("yield");
 	}
-	disp_ack(DSI_INT_TE_RDY);
-	return 0;
 }
 
 /* Establish a clock from seven real edges, checking each of six intervals.
@@ -530,6 +565,7 @@ disp_sync_frame(void)
 
 	if (!sweet_disp_te_sync &&
 	    !(sweet_disp_te_period != 0 && sweet_disp_te_align)) {
+		disp_te_edge = 0;
 		return 0;
 	}
 	began = disp_counter();
@@ -554,6 +590,66 @@ disp_sync_frame(void)
 	}
 	last_te = at;
 	return 0;
+}
+
+/* The polling thread may be rescheduled after it saw TE. Protect only the
+ * short launch window, never the full wait for the next panel frame. */
+static int
+disp_start_frame(uint64_t *began)
+{
+	uint32_t attempt;
+
+	for (attempt = 0; attempt < 2; attempt++) {
+		boolean_t irq_state;
+		uint64_t now, lead, until, start;
+		uint32_t status;
+
+		if (disp_sync_frame() != 0) {
+			return -1;
+		}
+		irq_state = ml_set_interrupts_enabled(FALSE);
+		now = disp_counter();
+		if (disp_te_edge != 0 && now - disp_te_edge > disp_frequency() / 10000) {
+			(void)ml_set_interrupts_enabled(irq_state);
+			sweet_disp_te_launch_late++;
+			continue;
+		}
+		disp_write(MUTEX_EN, 0);
+		if (disp_secondary_base) {
+			secondary_write(MUTEX_EN, 0);
+		}
+		disp_write(MUTEX_EN, 1);
+		if (disp_secondary_base) {
+			secondary_write(MUTEX_EN, 1);
+		}
+		lead = disp_frequency() * sweet_disp_lead_us / 1000000;
+		start = disp_counter();
+		until = start + lead;
+		status = disp_read(DSI_INTSTA);
+		while (!(status & DSI_INT_BUSY) && lead != 0 && disp_counter() < until) {
+			__asm__ volatile("yield");
+			status = disp_read(DSI_INTSTA);
+		}
+		if (status & DSI_INT_BUSY) {
+			sweet_disp_pre_busy++;
+			sweet_disp_pre_ticks += disp_counter() - start;
+		} else {
+			sweet_disp_pre_idle++;
+		}
+		*began = disp_counter();
+		disp_write(DSI_START, 0);
+		disp_write(DSI_START, 1);
+		if (disp_te_edge != 0) {
+			uint64_t latency = disp_counter() - disp_te_edge;
+
+			if (latency > sweet_disp_te_launch_max) {
+				sweet_disp_te_launch_max = latency;
+			}
+		}
+		(void)ml_set_interrupts_enabled(irq_state);
+		return 0;
+	}
+	return -1;
 }
 
 /* LK leaves DISP_OVL_BYPASS_SHADOW (OVL_EN bit22) set, so every register
@@ -634,6 +730,9 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
 	    sizeof(sweet_disp_te_int));
 	(void)PE_parse_boot_argn("sweetfb_lead", &sweet_disp_lead_us,
 	    sizeof(sweet_disp_lead_us));
+	if (sweet_disp_lead_us > 300) {
+		sweet_disp_lead_us = 300; /* bound the interrupt-disabled launch */
+	}
 	(void)PE_parse_boot_argn("sweetfb_shadow", &sweet_disp_shadow,
 	    sizeof(sweet_disp_shadow));
 	disp_ready = 0;
@@ -948,20 +1047,11 @@ sweet_display_refresh(int force)
 		 * kernel's own buffer, so point the overlays back at it. */
 		disp_point(disp_fb_phys, disp_pitch);
 	}
-	if (disp_sync_frame() != 0) {
+	uint64_t began;
+	if (disp_start_frame(&began) != 0) {
 		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
 		return;
 	}
-	/* MT6983: start the primary path before the secondary. Reversing
-	 * these writes stalls both OVL outputs and leaves DSI waiting for
-	 * data. This ordering completed a full frame on matisse (0146). */
-	disp_write(MUTEX_EN, 1);
-	if (disp_secondary_base) {
-		secondary_write(MUTEX_EN, 1);
-	}
-	uint64_t began = disp_counter();
-	disp_write(DSI_START, 0);
-	disp_write(DSI_START, 1);
 	sweet_disp_pushes++;
 	if (sweet_disp_hold) {
 		disp_hold_frame(began);
@@ -1125,53 +1215,13 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 		return -3;		/* the overlay did not take the address */
 	}
 
-	if (disp_sync_frame() != 0) {
-		/* Do not turn a missing TE into an unsynchronized flash. The caller
-		 * keeps the old surface and retries, rather than copying this frame. */
+	uint64_t began;
+	if (disp_start_frame(&began) != 0) {
+		/* An old or missing TE must not turn into an unsynchronized flash. */
 		disp_point(previous_phys, pitch);
 		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
 		return -4;
 	}
-	/* The address is in place and nothing has fetched it yet: let the
-	 * mutex run again and start one frame from it. */
-	disp_write(MUTEX_EN, 0);
-	if (disp_secondary_base) {
-		secondary_write(MUTEX_EN, 0);
-	}
-	disp_write(MUTEX_EN, 1);
-	if (disp_secondary_base) {
-		secondary_write(MUTEX_EN, 1);
-	}
-	{
-		/* Does the mutex start a frame on its own? Watch the busy bit
-		 * for 300 us before the strobe below: if it goes up, the
-		 * strobe starts a second transfer over the first one. */
-		uint64_t lead = (uint64_t)sweet_disp_lead_us *
-		    (disp_frequency() / 1000000u);
-		uint64_t until = disp_counter() + lead;
-		uint64_t began = disp_counter();
-		uint32_t s2 = disp_read(DSI_INTSTA);
-
-		while ((s2 & DSI_INT_BUSY) == 0 && lead != 0 &&
-		    disp_counter() < until) {
-			__asm__ volatile("yield");
-			s2 = disp_read(DSI_INTSTA);
-		}
-		if (s2 & DSI_INT_BUSY) {
-			sweet_disp_pre_busy++;
-			sweet_disp_pre_ticks += disp_counter() - began;
-		} else {
-			sweet_disp_pre_idle++;
-		}
-	}
-	/* Started right after the panel's own frame boundary (see above). The
-	 * transfer is not waited for: the compositor can draw the next frame
-	 * while the panel reads this one, and the wait at the top of the next
-	 * call is where a transfer that is still running shows up. Measured
-	 * there, a "send" sample is a frame that was late, not every frame. */
-	uint64_t began = disp_counter();
-	disp_write(DSI_START, 0);
-	disp_write(DSI_START, 1);
 	disp_last_start = began;
 	sweet_disp_pushes++;
 	sweet_disp_gui_flips++;

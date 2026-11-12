@@ -232,6 +232,9 @@ AppleCLCD::start(IOService *provider)
 	(void)PE_parse_boot_argn("sweetfb_sline", &sweet_disp_sline, sizeof(sweet_disp_sline));
 	(void)PE_parse_boot_argn("sweetfb_teint", &sweet_disp_te_int, sizeof(sweet_disp_te_int));
 	(void)PE_parse_boot_argn("sweetfb_lead", &sweet_disp_lead_us, sizeof(sweet_disp_lead_us));
+	if (sweet_disp_lead_us > 300) {
+		sweet_disp_lead_us = 300;
+	}
 	(void)PE_parse_boot_argn("sweetfb_hold_us", &sweet_disp_hold_us, sizeof(sweet_disp_hold_us));
 	(void)PE_parse_boot_argn("sweetfbprobe", &fProbe, sizeof(fProbe));
 	fVsyncUs = SWEET_FB_VSYNC_US;
@@ -377,7 +380,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		    sweet_disp_underruns, sweet_disp_te_edges, sweet_disp_te_lows,
 		    sweet_disp_dcs, sweet_disp_te_off, sweet_disp_te_ext);
 		{
-			uint64_t tePeriodUs = 0, teSyncUs = 0;
+			uint64_t tePeriodUs = 0, teSyncUs = 0, pollMaxUs = 0, launchMaxUs = 0;
 
 			if (sweet_disp_te_period != 0) {
 				absolutetime_to_nanoseconds(sweet_disp_te_period,
@@ -393,6 +396,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			    tePeriodUs, sweet_disp_te_align,
 			    sweet_disp_te_sync_hits, sweet_disp_te_sync_missed,
 			    teSyncUs);
+			absolutetime_to_nanoseconds(sweet_disp_te_poll_max, &pollMaxUs);
+			absolutetime_to_nanoseconds(sweet_disp_te_launch_max, &launchMaxUs);
+			IOLog("SWEET FB: te late poll %u launch %u accepted age %llu us start %llu us\n",
+			    sweet_disp_te_late, sweet_disp_te_launch_late,
+			    pollMaxUs / 1000, launchMaxUs / 1000);
 		}
 		IOLog("SWEET FB: scanline 0x%x 0x%x 0x%x 0x%x 0x%x ok %d max %u wraps %u period %llu us\n",
 		    sweet_disp_scan[0], sweet_disp_scan[1], sweet_disp_scan[2],

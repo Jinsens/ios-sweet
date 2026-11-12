@@ -1,5 +1,5 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> ACTIVE 2026-11-13: 2513: REAL TE 16.507 ms, FLICKER REDUCED BUT REMAINS; BOOT_A RESTORED <<<
+## >>> ACTIVE 2026-11-13: 2514: FLASH FURTHER REDUCED; TE AGE 13 us / START 314 us; BOOT_A RESTORED <<<
 
 ### 2026-11-12/13: host synchronization conclusions reopened
 
@@ -22,6 +22,53 @@ been performed in this session. Its ABL historically rejects `fastboot boot`
 (`unknown command`), so a hardware trial needs a concrete image and explicit
 approval for a temporary `boot_a` write followed by full backup restoration.
 Do not run an old generated runner based only on its embedded authorization.
+
+### 2514 in progress: reject late TE observations (2026-11-13)
+
+2513 fix committed as `9607e2f`. Now preparing a follow-up that bounds TE age:
+reject a high latch after >100 us between low/high samples, and retry if the
+thread was rescheduled between TE detection and launch. IRQs are masked only
+for the <=300 us launch lead, not while waiting for TE or holding a frame.
+Add late-edge and launch-latency counters. This is based on the remaining
+preemptible polling window; it is a hypothesis until the next device trial.
+17/17 MMIO tests pass, including injected poll/launch delays and IRQ-state
+checks. Removing the guards in temporary sources makes their tests fail.
+Full local build exit0. Current chat separately approved the 2514 trial
+(“允许本次测试并恢复备份”); runner is now executing it. No further write is
+covered by that approval. Restore before stopping.
+
+Artifacts under the same 20261109-resident-gpu directory:
+- `kernel2514.development.sweet` SHA256
+  `2049e89d6d6ea51945781dd60a286c4722b11af1db9a37650ccd709a6b5d0b50`
+- `shim2514-te/matisse-shim-gpu2514.img` (26,746,880 bytes), SHA256
+  `28af3752acdf64ab7d95c238525b66c9d9463d72c709cbd604ed318beb324748`
+- predicted boot_a during trial:
+  `53a06bf1e78a8fc888e74c4da8e242019524f43ab47d06c2721bef24036fbb1d`
+- `build2514-native.log`, `build2514-image.log`, `run2514.log`,
+  `display2514-build-manifest.json`, `cmdline2514.txt`.
+Read-only preflight passed against unchanged full 64 MiB restore baseline.
+No new CI run (local sources/build).
+
+**2514 result (completed):** user “还有，但进一步减少” (still present,
+further reduced). Real TE 16,506 us, 3,700 aligned frames / 1 miss (early
+boot), 3,586 GUI frames. `late poll 0 launch 0`, maximum accepted edge age
+13 us and TE-to-START 314 us. No underrun / busy skips / truncation; no steady
+GUI copy or scanout failure. This does **not** prove scheduling delay caused
+the residual flashes: none of the late-edge counters fired in this run.
+The short launch guard makes the bound explicit, but the remaining artifact
+requires another explanation. Diagnostic-window watchdog return is in the
+console, not a panic; fastboot observed at 266.57 s (window starts later than
+image boot, so 180 s is not wall time from adb reboot). Runner exit0, entire
+boot_a restored to c4b70daf...ec707d8, independently read back in Recovery.
+Logs are `shim2514-ui/gpu-normal/{after-console.txt,journal.json}`.
+
+Next candidate, verified vendor difference: for this panel `lp_perline_en=0`,
+`cmd_null_pkt_en=1`. Vendor config_trigger clears CON_CTRL bit24, enables
+NULL/HS in +0x6c, rewrites 0x002c3909 and size, pulses DSI_RESET bit0, then
+START; current path keeps bit24 set and omits the per-frame reset. Prepare an
+opt-in vendor launch comparison plus actual CMCTL/CMD_DONE observations;
+no new DCS command, panel rails, PHY or DSC changes. No further partition
+write has been authorized.
 
 ### 2513 build milestone (2026-11-13)
 
