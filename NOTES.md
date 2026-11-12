@@ -1,5 +1,5 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
-## >>> GPU PERFORMANCE 2026-11-13: 2520 SMOOTHER; BOOT_A RESTORED; GPU BENCH APP IN PROGRESS <<<
+## >>> GPU PERFORMANCE 2026-11-13: 2520 SMOOTHER; GPU BENCH IPA BUILT; CONTINUING LAG AUDIT <<<
 
 User reports the whole UI is sluggish. GPU changes committed as `5f10580`:
 - Map/unmap resolve each 512-entry L3-table span once, keeping the exact
@@ -56,12 +56,33 @@ make overall average FPS incomparable; do not claim a particular FPS gain.
 Logs `shim2520-ui/gpu-normal/{after-console.txt,journal.json}`; ignored
 analysis `gpu-perf-analysis/{comparison2520,matched-workload2520}.json`.
 
-Next user request: maximize toward120fps, then explicitly asks for an iOS
-GPU benchmark app with selectable frame rate, **only60 and120**. App work is
-in progress under `userland/gpu-bench`, build/package via
-`tools/build-gpu-bench.py`. Keep real completed offscreen GPU work separate
-from CADisplayLink and actual physical panel scanout. No subsequent partition
-write or benchmark installation has yet been performed/approved.
+User requests both continued lag optimization and an iOS GPU benchmark app,
+with **only 60/120** targets. App completed in `21f178d`: native Chinese UI,
+512x512 offscreen ES3 workload, hardware renderer guard (G710 + Panfrost),
+shader warmup + initial pixel validation outside timing, completed-work FPS,
+average/P95 latency, target misses, graph and JSON export. Serial queue rebinds
+Mesa TLS on every frame; generation cancellation, final whole-session stats,
+background stop and resource cleanup covered by actual-engine host mocks.
+
+Validation: 15/15 `tools.tests.test_gpu_bench` runtime tests pass; iPhoneOS
+arm64 build with Wall/Wextra/Werror succeeds, codesign deep/strict and IPA
+integrity checks pass. No simulator runtime available; device UI/GPU execution
+still unverified. No new CI run. Output (ignored):
+`research/matisse/gpu-bench-out/SweetGPUBench.ipa`, 39,989 bytes, SHA256
+`cc0d8632a32617a035baa4b3cad8d02abc3c7fc0eb171f8e0c523d83a1fb6175`;
+manifest.json/compile.log/verify.log beside it. Uses installed system Mesa
+by default; no older local library bundled. No app installation performed.
+Installation modifies userdata and needs a concrete reviewed per-step plan.
+The app's120 target is not a physical panel mode switch.
+
+Continuing performance audit after user explicitly redirected attention to
+lag as well as the app: 2520 has 9,800 submits/waits, cumulative wait459us
+(not all wait time appears in frame_end's glFinish line). Heavy sampled UI
+frames14-26ms have finalwait1.4-4.4ms and attach0.2-0.8ms; intra-GL waits must
+be separated from actual CPU work before attributing the remainder to Mesa.
+Investigating synchronous drmSyncobjTransfer and kernel ring admission;
+no subsequent optimization/device trial has yet been performed in this chat.
+Concurrent display chat has separately completed2517; preserve its notes.
 
 Vendor120Hz audit: exact panel `research/matisse/panel-l11-38-0a-0a-dsc-cmd.c`
 supports WQHD120; mode sequenceF0 5A5A /60 00 /F7 0F /F0 A5A5 uses generic
