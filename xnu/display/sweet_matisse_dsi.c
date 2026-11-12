@@ -79,6 +79,12 @@
 #define DSI_PHY_LCCON		(DISP_DSI0 + 0x104u)
 #define DSI_MEM_CONTI		(DISP_DSI0 + 0x90u)
 #define DSI_CMDQ_SIZE		(DISP_DSI0 + 0x60u)
+#define DSI_CMD_TYPE1_HS		(DISP_DSI0 + 0x6cu)
+#define DSI_STATE_DBG6		(DISP_DSI0 + 0x160u)
+#define DSI_CMCTL_MASK		0x7fffu
+#define DSI_CMD_NULL_EN		(1u << 17)
+#define DSI_CMD_HS_EN		(1u << 16)
+#define DSI_RESET		(1u << 0)
 /* 0xd00: mt6983_dsi_driver_data in the vendor tree has .reg_cmdq0_ofs = 0xd00
  * and .reg_vm_cmd_con_ofs = 0x200, so 0x200 is the VM command block, not the
  * DCS queue. (2507 was built with 0x200 on the opposite reading; it sent no
@@ -231,6 +237,15 @@ uint32_t sweet_disp_te_launch_late;    /* rescheduled between TE and trigger */
 uint64_t sweet_disp_te_poll_max;       /* upper bound on accepted edge age */
 uint64_t sweet_disp_te_launch_max;     /* accepted TE observation to DSI_START */
 static uint64_t disp_te_edge;
+/* Opt-in comparison with mtk_dsi_config_trigger() for the l11 panel. */
+int sweet_disp_vendor;
+uint32_t sweet_disp_state_active;
+uint32_t sweet_disp_state_done;
+uint32_t sweet_disp_cmd_done;
+uint32_t sweet_disp_state_last;
+uint32_t sweet_disp_hs_last;
+uint32_t sweet_disp_ctrl_last;
+uint64_t sweet_disp_done_max;
 uint32_t sweet_disp_dcs;
 uint32_t sweet_disp_mutex_stops;
 uint32_t sweet_disp_mutex_running;
@@ -349,17 +364,71 @@ disp_hold_frame(uint64_t began)
 	uint64_t due = done + disp_frequency() / 100;           /* +10 ms cap */
 	uint32_t status;
 	uint64_t now;
+	uint32_t state = 0, active = 0, completed = 0, cmd_done = 0;
 
 	do {
 		status = disp_read(DSI_INTSTA);
 		now = disp_counter();
-	} while (now < done || ((status & DSI_INT_BUSY) && now < due));
-	if (status & DSI_INT_BUSY) {
+		if (sweet_disp_vendor) {
+			state = disp_read(DSI_STATE_DBG6) & DSI_CMCTL_MASK;
+			if (state > 1) {
+				active = 1;
+			}
+			if (!cmd_done && (status & DSI_INT_CMD_DONE)) {
+				cmd_done = 1;
+				sweet_disp_cmd_done++;
+			}
+			if (!completed && state == 1 && (active || cmd_done) &&
+			    !(status & DSI_INT_BUSY)) {
+				completed = 1;
+				sweet_disp_state_done++;
+				if (now - began > sweet_disp_done_max) {
+					sweet_disp_done_max = now - began;
+				}
+			}
+		}
+	} while (now < done || (((status & DSI_INT_BUSY) ||
+	    (sweet_disp_vendor && state > 1)) && now < due));
+	if ((status & DSI_INT_BUSY) || (sweet_disp_vendor && state > 1)) {
 		sweet_disp_hold_trunc++;
 	}
+	if (active) {
+		sweet_disp_state_active++;
+	}
+	sweet_disp_state_last = state;
 	sweet_disp_hold_ticks += now - began;
 	sweet_disp_hold_frames++;
+	if (sweet_disp_vendor) {
+		/* Do not cut an active transfer merely because the fixed hold
+		 * elapsed. The next present also checks CMCTL before stopping. */
+		if ((status & DSI_INT_BUSY) || state > 1) {
+			return;
+		}
+		if (completed) {
+			disp_write(DSI_CMD_TYPE1_HS,
+			    disp_read(DSI_CMD_TYPE1_HS) & ~DSI_CMD_HS_EN);
+		}
+	}
 	disp_mutex(0);
+}
+
+static int
+disp_vendor_idle(void)
+{
+	uint64_t due;
+
+	if (!sweet_disp_vendor) {
+		return 0;
+	}
+	due = disp_counter() + disp_frequency() / 50;
+	while ((disp_read(DSI_INTSTA) & DSI_INT_BUSY) ||
+	    (disp_read(DSI_STATE_DBG6) & DSI_CMCTL_MASK) > 1) {
+		if (disp_counter() > due) {
+			return -1;
+		}
+		__asm__ volatile("yield");
+	}
+	return 0;
 }
 
 
@@ -636,6 +705,23 @@ disp_start_frame(uint64_t *began)
 		} else {
 			sweet_disp_pre_idle++;
 		}
+		if (sweet_disp_vendor) {
+			/* l11 has lp_perline_en=0 and cmd_null_pkt_en=1. Keep LK's
+			 * NULL length/CPHY bits, and mirror the vendor trigger. */
+			uint32_t ctrl = disp_read(DSI_CON_CTRL) & ~DSI_CM_WAIT_DATA_LINE_EN;
+			uint32_t hs = disp_read(DSI_CMD_TYPE1_HS) | DSI_CMD_NULL_EN | DSI_CMD_HS_EN;
+
+			disp_write(DSI_CON_CTRL, ctrl);
+			disp_write(DSI_CMD_TYPE1_HS, hs);
+			disp_write(DSI_CMDQ0, 0x002c3909u);
+			disp_write(DSI_CMDQ_SIZE, (disp_read(DSI_CMDQ_SIZE) &
+			    ~(0xffu | CMDQ_SIZE_SEL)) | 1u | CMDQ_SIZE_SEL);
+			disp_write(DSI_CON_CTRL, disp_read(DSI_CON_CTRL) | DSI_RESET);
+			disp_write(DSI_CON_CTRL, disp_read(DSI_CON_CTRL) & ~DSI_RESET);
+			disp_ack(DSI_INT_CMD_DONE | DSI_INT_FRAME_DONE);
+			sweet_disp_hs_last = hs;
+			sweet_disp_ctrl_last = ctrl;
+		}
 		*began = disp_counter();
 		disp_write(DSI_START, 0);
 		disp_write(DSI_START, 1);
@@ -709,6 +795,8 @@ sweet_display_init(uint64_t fb_phys, uint32_t width, uint32_t height,
 	 * parses them in start() - long after this runs - so read them here. */
 	(void)PE_parse_boot_argn("sweetfb_hold", &sweet_disp_hold,
 	    sizeof(sweet_disp_hold));
+	(void)PE_parse_boot_argn("sweetfb_vendor", &sweet_disp_vendor,
+	    sizeof(sweet_disp_vendor));
 	(void)PE_parse_boot_argn("sweetfb_hold_us", &sweet_disp_hold_us,
 	    sizeof(sweet_disp_hold_us));
 	if (sweet_disp_hold_us > 50000) {
@@ -1022,6 +1110,10 @@ sweet_display_refresh(int force)
 	/* No new frame may start while the overlay is being pointed
 	 * somewhere else: an address taken up mid-fetch is half of one frame
 	 * and half of the next. */
+	if (disp_vendor_idle() != 0) {
+		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
+		return;
+	}
 	disp_mutex(0);
 	status = disp_read(DSI_INTSTA);
 	sweet_disp_status_before = status;
@@ -1093,7 +1185,7 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 	 * or no periodic TE was found. With a measured TE, stop and stage BOTH
 	 * pipelines before waiting: writing one address after SOF can split a
 	 * frame, even if OVL shadow registers are enabled. */
-	if (sweet_disp_shadow_on && !sweet_disp_te_sync &&
+	if (sweet_disp_shadow_on && !sweet_disp_vendor && !sweet_disp_te_sync &&
 	    !(sweet_disp_te_period != 0 && sweet_disp_te_align)) {
 		disp_point(phys, pitch);
 		if ((disp_read(MUTEX_EN) & 1u) == 0) {
@@ -1117,6 +1209,10 @@ sweet_display_scanout(uint64_t phys, uint32_t pitch)
 	 * its own, so any address written while it is up lands inside a fetch
 	 * that is already going out. Stop it first, let the frame in flight
 	 * finish, then move the overlay. */
+	if (disp_vendor_idle() != 0) {
+		__atomic_clear(&disp_busy, __ATOMIC_RELEASE);
+		return -4;
+	}
 	disp_mutex(0);
 	status = disp_read(DSI_INTSTA);
 	sweet_disp_status_before = status;

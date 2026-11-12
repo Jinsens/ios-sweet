@@ -52,7 +52,7 @@ poll plus 0.3 ms launch plus 9.5 ms fixed hold), on the vsync workloop.
 This GPU change preserves that display behavior; if lag remains, GUI-only
 sleep/worker scheduling needs a separate surface-lifetime-safe change.
 
-## >>> ACTIVE 2026-11-13: 2514: FLASH FURTHER REDUCED; TE AGE 13 us / START 314 us; BOOT_A RESTORED <<<
+## >>> ACTIVE 2026-11-13: 2515: ALL 975 FRAMES COMPLETE; FLICKER REMAINS; BOOT_A RESTORED <<<
 
 ### 2026-11-12/13: host synchronization conclusions reopened
 
@@ -70,13 +70,56 @@ conclusion is **withdrawn pending corrected hardware measurements**.
 Plan: correct all status acknowledgements, validate actual TE intervals, stage
 both overlay addresses before a fresh TE, then trigger one complete frame.
 No new DCS panel commands are needed. Keep the existing absolute vsync clock.
-Current attached device is in Recovery; no partition write or new boot has
-been performed in this session. Its ABL historically rejects `fastboot boot`
+Device trials below are temporary boot_a writes with explicit per-trial
+approval and full backup restoration. Its ABL historically rejects `fastboot boot`
 (`unknown command`), so a hardware trial needs a concrete image and explicit
 approval for a temporary `boot_a` write followed by full backup restoration.
 Do not run an old generated runner based only on its embedded authorization.
 
-### 2514 in progress: reject late TE observations (2026-11-13)
+### 2515 completed: vendor DSIM trigger comparison
+
+2514 committed as `90a4957`. Preparing opt-in `sweetfb_vendor=1` to use the
+verified vendor DSIM trigger sequence, keeping LK null length/CPHY fields and
+all panel/PHY/DSC initialization. Frame hold will sample CMCTL and fresh
+CMD_DONE, extending through an active transfer; never clear HS or stop a
+still-active transfer at the timeout. Trial hold minimum 14.5 ms because NULL
+packets increase transmission time. Build completed exit0; all 27 regression cases pass, including vendor-state
+completion, timeout and register-preservation cases. Read-only preflight passed with the same complete boot_a
+restore baseline. Current chat approved this exact 2515 trial (“允许本次测试并恢复备份”).
+Trial completed and restored. No later partition write is covered by this
+approval.
+- kernel2515 SHA256
+  `68e36e5b54148719895d4c21bbda8df244f4e8e244f11e93e232c07473d5bc67`
+- shim2515-te/matisse-shim-gpu2515.img, 26,746,880 bytes, SHA256
+  `b720c82cb26528c763bd1866df38ede63b4c3e0abffad0a65b386ef204f88f9c`
+- predicted partition SHA256
+  `5bb86de1338072fe34e5b470a209453d7e8375be36ba20d2ffb1049b86392cad`
+- local logs build2515-native-v2.log/build2515-image-v2.log and manifest.
+  V1 artifacts kept with -v1 suffix; never written to device.
+
+**2515 actual result:** user “画面正常，但仍有闪烁”. **975/975 frames**
+observed CMCTL active then idle, fresh CMD_DONE in all 975; final state=1,
+no truncation or underrun, TE=16,511 us; late poll2 / launch0, accepted edge
+age max1 us / START308 us. Max observed completion18,749 us includes early
+boot and polling latency, so it is an upper bound, not exact wire time.
+GUI860 frames, 2 early sync misses, steady scanouts no refusal. Vendor mode
+ctrl0x08000000 / HS0x00070514 (LK packet length1300 preserved). GUI windows
+~19.7–20.1ms vsync; this comparison is slower and not visually clean. Keep
+vendor mode opt-in pending benefit. Fastboot at175.35s; runner exit0; full
+boot_a restore SHA c4b70daf...ec707d8 confirmed, device back in Recovery.
+
+Next one-variable comparison: keep the 2515 kernel/config/hold, but set
+`sweetfb_lead=0`. The retained 300us lead predates corrected TE handling;
+vendor GCE triggers immediately after TE. This will test whether that delay
+moves the write beyond panel blanking. No new partition write authorized.
+
+Concurrent workspace observation: xnu/gpu/SweetGPUVM.h and
+`tools/tests/test_sweet_gpu_bo_cache.py` appeared during 2515 work. They are
+outside this display change. They were not copied into the build tree and
+are not part of this trial; leave them and pre-existing .workbuddy/.DS_Store/
+--out changes untouched.
+
+### 2514 completed: reject late TE observations (2026-11-13)
 
 2513 fix committed as `9607e2f`. Now preparing a follow-up that bounds TE age:
 reject a high latch after >100 us between low/high samples, and retry if the
@@ -87,8 +130,7 @@ preemptible polling window; it is a hypothesis until the next device trial.
 17/17 MMIO tests pass, including injected poll/launch delays and IRQ-state
 checks. Removing the guards in temporary sources makes their tests fail.
 Full local build exit0. Current chat separately approved the 2514 trial
-(“允许本次测试并恢复备份”); runner is now executing it. No further write is
-covered by that approval. Restore before stopping.
+(“允许本次测试并恢复备份”); trial completed and restored; see the exact result below.
 
 Artifacts under the same 20261109-resident-gpu directory:
 - `kernel2514.development.sweet` SHA256

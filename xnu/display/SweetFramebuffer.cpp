@@ -420,6 +420,15 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		    sweet_disp_mutex_last, sweet_disp_hold, sweet_disp_hold_frames,
 		    holdUs, sweet_disp_hold_us, sweet_disp_hold_trunc,
 		    sweet_disp_shadow, sweet_disp_shadow_on);
+		{
+			uint64_t doneMaxUs = 0;
+
+			absolutetime_to_nanoseconds(sweet_disp_done_max, &doneMaxUs);
+			IOLog("SWEET FB: vendor %d active %u idle %u cmd_done %u last 0x%x completion max %llu us ctrl 0x%x hs 0x%x\n",
+			    sweet_disp_vendor, sweet_disp_state_active, sweet_disp_state_done,
+			    sweet_disp_cmd_done, sweet_disp_state_last, doneMaxUs / 1000,
+			    sweet_disp_ctrl_last, sweet_disp_hs_last);
+		}
 		fb->fStatTicks = 0; fb->fStatSum = 0; fb->fStatMax = 0;
 		fb->fStatSwaps = fb->fStatPresents = fb->fStatScans = fb->fStatCopies = 0;
 		fb->fStatCopyUs = 0; fb->fStatTried = fb->fStatRefused = 0;

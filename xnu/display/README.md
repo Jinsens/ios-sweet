@@ -50,3 +50,14 @@ is capped at 300 us so the launch cannot hold interrupts off for milliseconds;
 TE wait and the frame hold remain interruptible. `te late poll/launch` and
 `accepted age/start` logs expose these timing limits. Regression coverage is
 now 17 cases, including injected scheduling delays and IRQ restoration.
+
+
+Trial 2515 adds opt-in `sweetfb_vendor=1` for the l11 vendor DSIM launch
+sequence: clear per-line wait, enable NULL/HS while retaining LK packet
+length/CPHY bits, update only CMDQ size fields, pulse reset, then START.
+The default remains the 2514 path. CMCTL and fresh CMD_DONE observations
+measure completion. An active CMCTL/BUSY extends the hold with a bound and
+is never deliberately cut off at that bound; a later present waits for idle
+before stopping the pipeline. HS is cleared only after completion evidence.
+Trial 2515 uses a 14.5 ms minimum hold because NULL packets can lengthen the
+frame. The MMIO regression suite now has 27 cases.

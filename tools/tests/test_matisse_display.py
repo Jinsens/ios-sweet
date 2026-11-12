@@ -63,8 +63,9 @@ static struct {
     uint64_t now, edge_at[MAX_EVENTS];
     unsigned edge_count, next_edge, edges, writes, acks, starts;
     uint64_t pause_at, pause_us, lock_delay, irq_off_at, irq_off_max;
+    uint64_t transfer_us, transfer_finished_at, early_cmd_us, early_cmd_at;
     unsigned lock_delays, disables, restores;
-    int stuck_high, paused, irq_enabled;
+    int stuck_high, paused, irq_enabled, transfer_active, transfer_never, transfer_busy;
     struct write_event log[MAX_WRITES];
 } model;
 static uint32_t model_read(unsigned secondary,uint32_t off);
@@ -84,6 +85,17 @@ static void advance_by(uint64_t us)
         model.status |= DSI_INT_TE_RDY;
         model.next_edge++;
         model.edges++;
+    }
+    if(model.transfer_active && !model.transfer_never &&
+       model.now>=model.transfer_finished_at) {
+        model.transfer_active=0;
+        model.primary[DSI_STATE_DBG6/4]=
+            (model.primary[DSI_STATE_DBG6/4]&~DSI_CMCTL_MASK)|1;
+        model.status=(model.status&~DSI_INT_BUSY)|DSI_INT_CMD_DONE;
+    }
+    if(model.transfer_active && model.early_cmd_at && model.now>=model.early_cmd_at) {
+        model.status|=DSI_INT_CMD_DONE;
+        model.early_cmd_at=0;
     }
 }
 static void advance(void){advance_by(10);}
@@ -135,7 +147,20 @@ static void model_write(unsigned secondary,uint32_t off,uint32_t value)
         return;
     }
     (secondary ? model.secondary : model.primary)[off/4] = value;
-    if(!secondary && off==DSI_START && value==1)model.starts++;
+    if(!secondary && off==DSI_START && value==1) {
+        model.starts++;
+        if(model.transfer_us) {
+            /* A previous completion must have been acknowledged before the
+             * new trigger; the new CMD_DONE appears only on completion. */
+            assert(!(model.status&(DSI_INT_CMD_DONE|DSI_INT_FRAME_DONE)));
+            model.transfer_active=1;
+            model.transfer_finished_at=model.now+model.transfer_us;
+            if(model.early_cmd_us)model.early_cmd_at=model.now+model.early_cmd_us;
+            model.primary[DSI_STATE_DBG6/4]=
+                (model.primary[DSI_STATE_DBG6/4]&~DSI_CMCTL_MASK)|0x80;
+            if(model.transfer_busy)model.status|=DSI_INT_BUSY;
+        }
+    }
 }
 static void reset_model(void)
 {
@@ -171,6 +196,12 @@ static void reset_model(void)
     sweet_disp_te_launch_late=0;
     sweet_disp_te_poll_max=0;
     sweet_disp_te_launch_max=0;
+    sweet_disp_vendor=0;
+    sweet_disp_state_active=0;
+    sweet_disp_state_done=0;
+    sweet_disp_cmd_done=0;
+    sweet_disp_state_last=0;
+    sweet_disp_done_max=0;
     model.primary[MUTEX_EN/4]=1;
     model.secondary[MUTEX_EN/4]=1;
 }
@@ -192,6 +223,50 @@ static unsigned find_write(unsigned secondary,uint32_t off,uint32_t value)
     }
     assert(!"required MMIO write missing");
     return MAX_WRITES;
+}
+static unsigned count_writes(uint32_t off)
+{
+    unsigned count=0;
+    for(unsigned i=0;i<model.writes;i++)
+        if(!model.log[i].secondary && model.log[i].off==off)count++;
+    return count;
+}
+static void vendor_model(void)
+{
+    sweet_disp_vendor=1;
+    sweet_disp_hold_us=14500;
+    sweet_disp_te_period=16667;
+    model.primary[DSI_CON_CTRL/4]=0x89a542a2u|DSI_CM_WAIT_DATA_LINE_EN;
+    model.primary[DSI_CMD_TYPE1_HS/4]=0xa5401234u;
+    model.primary[DSI_CMDQ_SIZE/4]=0xcafe5a7fu;
+    model.primary[DSI_STATE_DBG6/4]=0x81a50001u;
+    model.primary[DSI_PHY_LCCON/4]=0xfedcba98u;
+    model.status=DSI_INT_CMD_DONE|DSI_INT_FRAME_DONE|DSI_INT_RD_RDY;
+}
+static void check_vendor_order(void)
+{
+    uint32_t ctrl=(0x89a542a2u|DSI_CM_WAIT_DATA_LINE_EN)&~DSI_CM_WAIT_DATA_LINE_EN;
+    uint32_t hs=0xa5401234u|DSI_CMD_NULL_EN|DSI_CMD_HS_EN;
+    uint32_t size=(0xcafe5a7fu&~(0xffu|CMDQ_SIZE_SEL))|1|CMDQ_SIZE_SEL;
+    unsigned config=find_write(0,DSI_CON_CTRL,ctrl);
+    unsigned null_hs=find_write(0,DSI_CMD_TYPE1_HS,hs);
+    unsigned cmd=find_write(0,DSI_CMDQ0,0x002c3909);
+    unsigned size_write=find_write(0,DSI_CMDQ_SIZE,size);
+    unsigned reset_on=find_write(0,DSI_CON_CTRL,ctrl|DSI_RESET);
+    unsigned reset_off=MAX_WRITES;
+    unsigned start=find_write(0,DSI_START,1);
+    for(unsigned i=reset_on+1;i<model.writes;i++)
+        if(!model.log[i].secondary && model.log[i].off==DSI_CON_CTRL &&
+           model.log[i].value==ctrl){reset_off=i;break;}
+    assert(config<null_hs && null_hs<cmd && cmd<size_write);
+    assert(size_write<reset_on && reset_on<reset_off && reset_off<start);
+    unsigned ack=find_write(0,DSI_INTSTA,~(DSI_INT_CMD_DONE|DSI_INT_FRAME_DONE));
+    assert(reset_off<ack && ack<start);
+    assert(model.primary[DSI_CON_CTRL/4]==ctrl);
+    assert(model.primary[DSI_CMDQ_SIZE/4]==size);
+    assert(model.primary[DSI_PHY_LCCON/4]==0xfedcba98u);
+    assert(!count_writes(DSI_PHY_LCCON));
+    assert(model.log[config].edges==1 && !model.log[config].irq_enabled);
 }
 static void check_frame_order(uint64_t phys,int addresses,unsigned expected_edges)
 {
@@ -231,6 +306,7 @@ CASES = r'''
 int main(int argc,char **argv)
 {
     assert(argc==2);
+    assert(sweet_disp_vendor==0); /* experiments must stay opt-in */
     reset_model();
     if(!strcmp(argv[1],"ack")) {
         uint32_t pending=DSI_INT_TE_RDY|DSI_INT_CMD_DONE|DSI_INT_RD_RDY|
@@ -294,6 +370,8 @@ int main(int argc,char **argv)
         check_frame_order(phys,1,1);
         assert(model.status==(DSI_INT_RD_RDY|DSI_INT_CMD_DONE));
         assert(sweet_disp_gui_flips==1);
+        assert(!count_writes(DSI_CON_CTRL) && !count_writes(DSI_CMD_TYPE1_HS));
+        assert(!count_writes(DSI_CMDQ0) && !count_writes(DSI_CMDQ_SIZE));
     } else if(!strcmp(argv[1],"scanout_timeout")) {
         uint64_t previous=disp_cur_phys;
         sweet_disp_te_period=16667;
@@ -365,6 +443,81 @@ int main(int argc,char **argv)
         assert(model.secondary[OVL_L0_ADDR/4]==(uint32_t)(previous+disp_pitch/2));
         assert(!model.primary[MUTEX_EN/4] && !model.secondary[MUTEX_EN/4]);
         assert(model.status==DSI_INT_CMD_DONE);
+    } else if(!strcmp(argv[1],"vendor_order") || !strcmp(argv[1],"vendor_extend") ||
+              !strcmp(argv[1],"vendor_busy_extend") || !strcmp(argv[1],"vendor_early_cmd")) {
+        vendor_model();
+        model.transfer_us=!strcmp(argv[1],"vendor_order") ? 8000 : 17000;
+        model.transfer_busy=!strcmp(argv[1],"vendor_busy_extend");
+        if(!strcmp(argv[1],"vendor_early_cmd"))model.early_cmd_us=1000;
+        edge(0,16000);
+        assert(sweet_display_scanout(0x240000000ull,5760)==0);
+        check_frame_order(0x240000000ull,1,1);
+        check_vendor_order();
+        assert(sweet_disp_state_active==1 && sweet_disp_state_done==1);
+        /* STATE and INTSTA are sequential reads: completion between them
+         * may leave the diagnostic CMD_DONE sample one read behind. */
+        assert(sweet_disp_cmd_done<=1 && sweet_disp_state_last==1);
+        if(!strcmp(argv[1],"vendor_early_cmd"))assert(sweet_disp_cmd_done==1);
+        assert(!model.transfer_active && model.now>=model.transfer_finished_at);
+        assert(model.now>=model.log[find_write(0,DSI_START,1)].time+14500);
+        assert(sweet_disp_done_max>=model.transfer_us-200);
+        uint32_t hs=(0xa5401234u|DSI_CMD_NULL_EN|DSI_CMD_HS_EN)&~DSI_CMD_HS_EN;
+        unsigned hs_off=find_write(0,DSI_CMD_TYPE1_HS,hs);
+        assert(model.log[hs_off].time>=model.transfer_finished_at);
+        assert(model.primary[DSI_CMD_TYPE1_HS/4]==hs);
+        assert(model.status==(DSI_INT_RD_RDY|DSI_INT_CMD_DONE));
+    } else if(!strcmp(argv[1],"vendor_stuck")) {
+        vendor_model();
+        model.transfer_us=30000;model.transfer_never=1;model.early_cmd_us=1000;
+        edge(0,16000);
+        assert(sweet_display_scanout(0x240000000ull,5760)==0);
+        check_vendor_order();
+        assert(model.starts==1 && sweet_disp_hold_trunc==1 && sweet_disp_hold_frames==1);
+        assert(sweet_disp_state_active==1 && !sweet_disp_state_done && sweet_disp_cmd_done==1);
+        assert(model.primary[MUTEX_EN/4]==1 && model.secondary[MUTEX_EN/4]==1);
+        assert(model.primary[DSI_CMD_TYPE1_HS/4]==(0xa5401234u|DSI_CMD_NULL_EN|DSI_CMD_HS_EN));
+        assert(model.now>=model.log[find_write(0,DSI_START,1)].time+24300);
+        assert(model.now<model.log[find_write(0,DSI_START,1)].time+25000);
+        assert(model.irq_enabled);
+        unsigned writes=model.writes;
+        uint64_t at=model.now;
+        assert(sweet_display_scanout(0x250000000ull,5760)==-4);
+        assert(model.writes==writes && model.starts==1 && disp_cur_phys==0x240000000ull);
+        assert(model.now>=at+20000 && model.now<at+20500);
+        assert(model.primary[MUTEX_EN/4]==1 && model.secondary[MUTEX_EN/4]==1);
+    } else if(!strcmp(argv[1],"vendor_idle_stall") || !strcmp(argv[1],"vendor_busy_stall") ||
+              !strcmp(argv[1],"vendor_console_stall")) {
+        vendor_model();
+        if(!strcmp(argv[1],"vendor_busy_stall"))model.status|=DSI_INT_BUSY;
+        else model.primary[DSI_STATE_DBG6/4]=0x81a50010u;
+        if(!strcmp(argv[1],"vendor_console_stall"))sweet_display_refresh(1);
+        else assert(sweet_display_scanout(0x240000000ull,5760)==-4);
+        assert(!model.writes && !model.starts && !model.disables);
+        assert(model.now>=20000 && model.now<20500);
+        assert(model.primary[MUTEX_EN/4]==1 && model.secondary[MUTEX_EN/4]==1);
+        assert(model.primary[DSI_CMD_TYPE1_HS/4]==0xa5401234u);
+    } else if(!strcmp(argv[1],"vendor_idle_wait")) {
+        vendor_model();
+        model.primary[DSI_STATE_DBG6/4]=0x81a50010u;
+        model.transfer_active=1;model.transfer_finished_at=9000;
+        model.transfer_us=8000;
+        edge(0,16000);
+        assert(sweet_display_scanout(0x240000000ull,5760)==0);
+        check_frame_order(0x240000000ull,1,1);
+        check_vendor_order();
+        assert(model.log[find_write(0,MUTEX_EN,0)].time>=9000);
+        assert(model.log[find_write(1,MUTEX_EN,0)].time>=9000);
+    } else if(!strcmp(argv[1],"vendor_unknown")) {
+        vendor_model();
+        model.primary[DSI_STATE_DBG6/4]=0x81a50000u;
+        edge(0,16000);
+        assert(sweet_display_scanout(0x240000000ull,5760)==0);
+        check_frame_order(0x240000000ull,1,1);
+        check_vendor_order();
+        assert(!sweet_disp_state_active && !sweet_disp_state_done && !sweet_disp_cmd_done);
+        assert(sweet_disp_state_last==0);
+        assert(model.primary[DSI_CMD_TYPE1_HS/4]==(0xa5401234u|DSI_CMD_NULL_EN|DSI_CMD_HS_EN));
+        assert(model.status==DSI_INT_RD_RDY);
     } else {
         assert(!"unknown test case");
     }
@@ -464,6 +617,36 @@ class MatisseDisplay(unittest.TestCase):
 
     def test_repeated_late_launch_rolls_back_and_restores_interrupts(self):
         self.run_case("late_launch_twice")
+
+    def test_vendor_sequence_preserves_bits_and_disables_hs_after_completion(self):
+        self.run_case("vendor_order")
+
+    def test_vendor_hold_extends_for_active_cmctl_without_busy_bit(self):
+        self.run_case("vendor_extend")
+
+    def test_vendor_hold_extends_for_busy_transfer(self):
+        self.run_case("vendor_busy_extend")
+
+    def test_early_cmd_done_does_not_complete_active_cmctl(self):
+        self.run_case("vendor_early_cmd")
+
+    def test_stuck_transfer_keeps_mutex_and_hs_on_and_blocks_next_present(self):
+        self.run_case("vendor_stuck")
+
+    def test_vendor_idle_stall_does_not_stop_or_repoint_active_pipeline(self):
+        self.run_case("vendor_idle_stall")
+
+    def test_vendor_busy_stall_does_not_stop_pipeline(self):
+        self.run_case("vendor_busy_stall")
+
+    def test_vendor_console_stall_does_not_stop_pipeline(self):
+        self.run_case("vendor_console_stall")
+
+    def test_vendor_waits_for_previous_transfer_before_stopping_mutex(self):
+        self.run_case("vendor_idle_wait")
+
+    def test_unknown_cmctl_uses_hold_fallback_without_claiming_completion(self):
+        self.run_case("vendor_unknown")
 
 
 if __name__ == "__main__":

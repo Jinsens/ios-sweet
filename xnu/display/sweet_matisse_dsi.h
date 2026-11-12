@@ -108,6 +108,14 @@ extern uint32_t sweet_disp_te_late;
 extern uint32_t sweet_disp_te_launch_late;
 extern uint64_t sweet_disp_te_poll_max;
 extern uint64_t sweet_disp_te_launch_max;
+extern int sweet_disp_vendor;
+extern uint32_t sweet_disp_state_active;
+extern uint32_t sweet_disp_state_done;
+extern uint32_t sweet_disp_cmd_done;
+extern uint32_t sweet_disp_state_last;
+extern uint32_t sweet_disp_hs_last;
+extern uint32_t sweet_disp_ctrl_last;
+extern uint64_t sweet_disp_done_max;
 extern uint32_t sweet_disp_dcs;
 /* sweetfb_teoff=1 sends DCS 0x34 once, turning the panel's tear line off. */
 extern int sweet_disp_te_off;
