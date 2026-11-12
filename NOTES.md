@@ -76,7 +76,7 @@ poll plus 0.3 ms launch plus 9.5 ms fixed hold), on the vsync workloop.
 This GPU change preserves that display behavior; if lag remains, GUI-only
 sleep/worker scheduling needs a separate surface-lifetime-safe change.
 
-## >>> ACTIVE 2026-11-13: 2517 IN-USE FIX READY; PREFLIGHT PASSED; AWAIT EXACT TRIAL APPROVAL <<<
+## >>> ACTIVE 2026-11-13: 2517 FIXES CAMERA-LEFT FLICKER; THIN DYNAMIC TEAR REMAINS; RESTORED <<<
 
 ### 2026-11-12/13: host synchronization conclusions reopened
 
@@ -137,10 +137,22 @@ readback and local image/backup hashes. No device runner/build currently active.
 Four temporary harness mutations (no use count, wrong shared offset, missing
 ownership transfer, lost retry) are all rejected by their behavioral tests.
 Manifest `display2517-build-manifest.json`; canonical/build files byte-identical.
-No2517 partition write authorized or executed. Next approval must cover this
-exact2517 image and restoration; ask user to keep the other chat off device.
-Observe especially camera-left dynamic flicker and occasional thin horizontal
-flashes; code/tests alone do not prove visible flicker is fixed.
+Implementation committed as `12cc1cc`. Human separately approved exact2517
+trial: “允许本次 2517 测试并恢复备份”. Running only image78a74507...8ea03de,
+with full baseline restoration afterward. User was asked to pause other chat's
+device operations. This trial is now complete/restored as detailed below. No later trial is authorized.
+**2517 hardware result:** user reports camera-left severe dynamic flicker
+**“已不再闪烁”**; thin horizontal flicker **“仍有，但减少”**. Follow-up:
+remaining thin artifacts occur **only with dynamic content**, and look like
+**content briefly misaligned/torn**, not simple brightness/color noise.
+1131/1131 active->idle transfers and fresh CMD_DONE, no TE miss/truncation/
+underrun; TE16512us, accepted age max11us /START310us, completion max13674us.
+1016 GUI transfers,3 unavailable/invalid early swaps (inspect if relevant).
+No panic or GPU fault. Reached fastboot171.37s; runner exit0. Complete64MiB
+boot_a restored and independently read back via adb to c4b70daf...ec707d8;
+restore_pending=false. Logs shim2517-ui/gpu-normal/{journal.json,after-console.txt}.
+Next: preserve in-use fix and investigate remaining thin motion-only tearing.
+No later trial write authorized.
 
 ### 2516 completed: zero lead did not improve flicker
 
