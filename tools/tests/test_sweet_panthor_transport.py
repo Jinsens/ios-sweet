@@ -73,7 +73,7 @@ int main(void){
  struct drm_panthor_gpu_info gpu={0};struct drm_panthor_dev_query q={.type=0,.size=sizeof(gpu),.pointer=(uintptr_t)&gpu};
  assert(!drmIoctl(fd,DRM_IOCTL_PANTHOR_DEV_QUERY,&q)&&gpu.gpu_id==0xa8620004);
  uint32_t fence;assert(!drmSyncobjCreate(fd,0,&fence));
- assert(drmSyncobjWait(fd,&fence,1,0,0,NULL)<0&&errno==ETIME);
+ assert(drmSyncobjWait(fd,&fence,1,0,0,NULL)==-ETIME&&errno==ETIME);
  struct drm_panthor_sync_op op={.flags=DRM_PANTHOR_SYNC_OP_SIGNAL|DRM_PANTHOR_SYNC_OP_HANDLE_TYPE_TIMELINE_SYNCOBJ,.handle=fence,.timeline_value=7};
  struct drm_panthor_queue_submit queue={.stream_addr=0x10000000,.stream_size=32,.syncs=DRM_PANTHOR_OBJ_ARRAY(1,&op)};
  struct drm_panthor_group_submit group={.group_handle=1,.queue_submits=DRM_PANTHOR_OBJ_ARRAY(1,&queue)};

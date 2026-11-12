@@ -181,12 +181,18 @@ static int64_t monotonic_ns(void)
 }
 static int wait_one_until(int64_t deadline)
 {
-    int64_t now=monotonic_ns();
-    if(deadline<=now)return error(ETIME);
-    uint64_t ms=((uint64_t)(deadline-now)+999999)/1000000;
-    if(ms>5000)ms=5000;
-    if(!pend_count)return error(EIO);
-    return pend_wait_head_timeout((uint32_t)ms);
+    for(;;) {
+        int64_t now=monotonic_ns();
+        if(deadline<=now)return error(ETIME);
+        uint64_t ms=((uint64_t)(deadline-now)+999999)/1000000;
+        if(ms>5000)ms=5000;
+        if(!pend_count)return error(EIO);
+        if(!pend_wait_head_timeout((uint32_t)ms))return 0;
+        /* The kernel poll is bounded even for an infinite syncobj deadline.
+         * A chunk timing out does not expire the caller's absolute deadline
+         * or prove a hardware fault; retain the ticket and poll it again. */
+        if(errno!=ETIMEDOUT)return -1;
+    }
 }
 static int fence_wait_ticket(struct gpu_fence *f)
 {
@@ -511,10 +517,15 @@ int drmSyncobjReset(int fd,const uint32_t *h,uint32_t n)
     for(unsigned i=0;i<n;i++){points_clear(h[i]);syncs[h[i]].signalled=0;syncs[h[i]].point=0;}
     pthread_mutex_unlock(&lock);return 0;
 }
+/* libdrm's syncobj wait API returns negative errno values, unlike drmIoctl.
+ * Linux reports an expired syncobj deadline as ETIME. Keep internal helpers
+ * on -1/errno and translate only at this public boundary. */
+static int syncobj_wait_error(int e)
+{if(e==ETIMEDOUT)e=ETIME;errno=e;return -e;}
 int drmSyncobjTimelineWait(int fd,uint32_t *h,uint64_t *points,unsigned n,int64_t timeout,unsigned flags,uint32_t *first)
 {
-    (void)fd;if(!n)return error(EINVAL);tr("sync-wait h=%u p=%llu",h[0],(unsigned long long)(points?points[0]:0));ping(3);pthread_mutex_lock(&lock);
-    for(unsigned i=0;i<n;i++)if(!h[i]||h[i]>=OBJECTS||!syncs[h[i]].used){pthread_mutex_unlock(&lock);return error(EINVAL);}
+    (void)fd;if(!n)return syncobj_wait_error(EINVAL);tr("sync-wait h=%u p=%llu",h[0],(unsigned long long)(points?points[0]:0));ping(3);pthread_mutex_lock(&lock);
+    for(unsigned i=0;i<n;i++)if(!h[i]||h[i]>=OBJECTS||!syncs[h[i]].used){pthread_mutex_unlock(&lock);return syncobj_wait_error(EINVAL);}
     /* Mesa probes cached BOs with an already-expired absolute deadline. Such
      * a probe must never become a blocking GPU drain. The transport has no
      * nonblocking hardware query yet, so an unobserved fence stays busy. */
@@ -533,11 +544,11 @@ int drmSyncobjTimelineWait(int fd,uint32_t *h,uint64_t *points,unsigned n,int64_
         }
         if(done&&(!(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL)||done==n)){pthread_mutex_unlock(&lock);return 0;}
         int64_t ns=monotonic_ns();
-        if(timeout<=ns){pthread_mutex_unlock(&lock);return error(ETIME);}
+        if(timeout<=ns){pthread_mutex_unlock(&lock);return syncobj_wait_error(ETIME);}
         if(pending&&!(flags&DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)) {
             /* Recheck all requested objects after each completion: WAIT_ANY
              * must not drain a later object after an earlier one has finished. */
-            if(wait_one_until(timeout)){pthread_mutex_unlock(&lock);return -1;}
+            if(wait_one_until(timeout)){int e=errno;pthread_mutex_unlock(&lock);return syncobj_wait_error(e);}
             continue;
         }
         int64_t remaining=timeout-ns;if(remaining>1000000000)remaining=1000000000;

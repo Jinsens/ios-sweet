@@ -19,6 +19,7 @@ HARNESS = r'''
 #include <stdint.h>
 #include <errno.h>
 #include <stdio.h>
+#include <time.h>
 #include <IOKit/IOKitLib.h>
 #include "xf86drm.h"
 #include "drm-uapi/panthor_drm.h"
@@ -26,6 +27,12 @@ HARNESS = r'''
 static unsigned submissions,waits,failed_wait,busy_once,max_pending;
 static unsigned sequence[8],last_wait_sequence,last_wait_group;
 static unsigned allocation_blocked,blocked_allocations;
+static unsigned timeout_waits,wait_budget[16];
+static int64_t mock_ns=1000000000;
+static int test_clock_gettime(clockid_t clock,struct timespec *now) {
+ assert(clock==CLOCK_MONOTONIC);
+ now->tv_sec=mock_ns/1000000000;now->tv_nsec=mock_ns%1000000000;return 0;
+}
 static void *test_calloc(size_t n,size_t size);
 void *IOServiceMatching(const char *n){(void)n;return (void *)1;}
 io_service_t IOServiceGetMatchingService(unsigned a,void*b){(void)a;(void)b;return 1;}
@@ -36,7 +43,9 @@ unsigned mach_task_self(void){return 1;}
 /* Include the production C unchanged, so static state can also be checked for
  * outstanding owners after API calls. Only the IOKit endpoint is mocked. */
 #define calloc test_calloc
+#define clock_gettime test_clock_gettime
 #include "sweet-panthor-drm.c"
+#undef clock_gettime
 #undef calloc
 static void *test_calloc(size_t n,size_t size) {
  if(allocation_blocked){blocked_allocations++;errno=ENOMEM;return NULL;}
@@ -58,8 +67,13 @@ kern_return_t IOConnectCallStructMethod(unsigned c,unsigned s,const void *in,siz
  }
  if(s==SWEET_GPU_WAIT) {
   struct sweet_gpu_wait *r=out;assert(r->group<8&&r->sequence<=sequence[r->group]);
+  if(waits<16)wait_budget[waits]=r->timeout_ms;
   waits++;last_wait_sequence=(unsigned)r->sequence;last_wait_group=r->group;
-  if(failed_wait)return 7;return 0;
+  if(failed_wait)return 7;
+  if(timeout_waits) {
+   timeout_waits--;mock_ns+=(int64_t)r->timeout_ms*1000000;return kIOReturnTimeout;
+  }
+  return 0;
  }
  return 0;
 }
@@ -80,7 +94,7 @@ static void submit(unsigned group,uint32_t h,uint64_t point,int timeline) {
 }
 static int wait_for(uint32_t h,uint64_t point) {return drmSyncobjTimelineWait(0,&h,&point,1,INT64_MAX,0,NULL);}
 static void clean(void) {
- failed_wait=0;assert(!pend_drain_all());
+ failed_wait=timeout_waits=0;assert(!pend_drain_all());
  for(unsigned i=1;i<OBJECTS;i++)if(syncs[i].used)assert(!drmSyncobjDestroy(0,i));
  assert(!pend_count);
  for(unsigned i=1;i<OBJECTS;i++)assert(!sync_points[i]);
@@ -135,7 +149,7 @@ int main(int argc,char **argv) {
   assert(!wait_for(src,50)&&waits==50);
  } else if(!strcmp(mode,"failed-completion")) {
   submit(1,src,1,1);assert(!drmSyncobjTransfer(0,dst,1,src,1,0));failed_wait=1;
-  assert(wait_for(dst,1)<0&&!signalled(src,1)&&!signalled(dst,1)&&pend_count==1);
+  assert(wait_for(dst,1)==-EIO&&errno==EIO&&waits==1&&!signalled(src,1)&&!signalled(dst,1)&&pend_count==1);
   failed_wait=0;assert(!wait_for(dst,1)&&waits==2&&signalled(dst,1));
  } else if(!strcmp(mode,"failed-output-order")) {
   submit(1,src,1,1);failed_wait=1;
@@ -169,15 +183,36 @@ int main(int argc,char **argv) {
   assert(!wait_for(src,0)&&waits==2&&signalled(src,0));
  } else if(!strcmp(mode,"expired-probe")) {
   submit(1,src,1,1);uint64_t point=1;
-  assert(drmSyncobjTimelineWait(0,&src,&point,1,0,0,NULL)<0&&errno==ETIME&&!waits);
+  assert(drmSyncobjTimelineWait(0,&src,&point,1,0,0,NULL)==-ETIME&&errno==ETIME&&!waits);
   assert(!wait_for(src,1)&&waits==1);
   assert(!drmSyncobjTimelineWait(0,&src,&point,1,0,0,NULL));
+ } else if(!strcmp(mode,"chunk-timeout-retry")) {
+  submit(1,src,1,1);uint64_t point=1;timeout_waits=2;
+  assert(!drmSyncobjTimelineWait(0,&src,&point,1,mock_ns+12000000000LL,0,NULL));
+  assert(waits==3&&wait_budget[0]==5000&&wait_budget[1]==5000&&wait_budget[2]==2000);
+  assert(signalled(src,1)&&!pend_count);
+ } else if(!strcmp(mode,"infinite-chunk-retry")) {
+  submit(1,src,1,1);timeout_waits=2;
+  assert(!wait_for(src,1)&&waits==3);
+  for(unsigned i=0;i<3;i++)assert(wait_budget[i]==5000);
+  assert(signalled(src,1)&&!pend_count);
+ } else if(!strcmp(mode,"absolute-deadline-expires")) {
+  submit(1,src,1,1);uint64_t point=1;timeout_waits=10;
+  assert(drmSyncobjTimelineWait(0,&src,&point,1,mock_ns+6500000000LL,0,NULL)==-ETIME&&errno==ETIME);
+  assert(waits==2&&wait_budget[0]==5000&&wait_budget[1]==1500);
+  assert(!signalled(src,1)&&pend_count==1&&point_find(src,1));
+  timeout_waits=0;assert(!wait_for(src,1)&&waits==3&&signalled(src,1));
+ } else if(!strcmp(mode,"wait-error-abi")) {
+  uint64_t point=1;uint32_t invalid=0;
+  assert(drmSyncobjTimelineWait(0,&src,&point,0,0,0,NULL)==-EINVAL&&errno==EINVAL);
+  assert(drmSyncobjTimelineWait(0,&invalid,&point,1,0,0,NULL)==-EINVAL&&errno==EINVAL);
+  assert(drmSyncobjWait(0,&dst,1,0,0,NULL)==-ETIME&&errno==ETIME);
  } else if(!strcmp(mode,"wait-any-available")) {
   submit(1,src,1,1);submit(1,dst,1,1);uint64_t points[2]={1,1};
   uint32_t handles[2]={dst,src};uint32_t first=99;
   assert(!drmSyncobjTimelineWait(0,handles,points,2,0,DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,&first)&&!waits);
   uint64_t future=2;
-  assert(drmSyncobjTimelineWait(0,&src,&future,1,0,DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,NULL)<0&&errno==ETIME&&!waits);
+  assert(drmSyncobjTimelineWait(0,&src,&future,1,0,DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,NULL)==-ETIME&&errno==ETIME&&!waits);
   assert(!drmSyncobjTimelineWait(0,handles,points,2,INT64_MAX,0,&first)&&waits==1&&first==1&&pend_count==1);
  } else if(!strcmp(mode,"sync-publication-no-alloc")) {
   async_submit=0;submit(1,src,1,1);
@@ -232,6 +267,10 @@ class AsyncTransportTests(unittest.TestCase):
     def test_persistent_busy_leaves_vm_retryable(self): self.check_case("persistent-busy")
     def test_binary_replacement_does_not_revive_old_fence(self): self.check_case("binary-replace")
     def test_expired_probe_does_not_wait(self): self.check_case("expired-probe")
+    def test_chunk_timeout_retries_until_external_deadline(self): self.check_case("chunk-timeout-retry")
+    def test_infinite_deadline_keeps_each_kernel_poll_bounded(self): self.check_case("infinite-chunk-retry")
+    def test_absolute_deadline_expires_without_signalling(self): self.check_case("absolute-deadline-expires")
+    def test_wait_public_return_values_follow_libdrm_abi(self): self.check_case("wait-error-abi")
     def test_wait_any_and_availability_preserve_pending_fences(self): self.check_case("wait-any-available")
     def test_completed_sync_publication_does_not_allocate(self): self.check_case("sync-publication-no-alloc")
     def test_unattached_or_destroyed_source_is_rejected(self): self.check_case("invalid-transfer")
