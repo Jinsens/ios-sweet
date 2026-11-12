@@ -1,4 +1,58 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+
+## >>> UI FREEZE 2026-11-13: 25F1 DIAGNOSTIC READY; AWAIT EXACT TRIAL APPROVAL <<<
+
+User reports whole UI/touch/keys stop ~1min after desktop, briefly recover then
+stop again; apps do not visibly open. Investigation committed in `2d27cff`;
+see `docs/matisse-ui-freeze.md`. No new device write by this chat.
+
+Observed2521: frame188 at115.242s -> frame189 at139.174s (23.932s gap), with
+multiple complete touch and power-key DOWN/UP pairs reaching HID in between.
+600-vsync timer remains~60Hz, zero new swaps for one interval; all382 previous
+DSIM transfers complete, underrun/truncation0. GPU ready1/submits3347/failures0.
+This supports a userspace UI/scene pause, not proven panel/input hardware death.
+Settings actually spawns at105.669s (fresh launchd.log identifies2521) and has
+no recorded exit through169.902s. The only sample139.595s is AFTER recovery;
+SpringBoard main ordinary RunLoop, background CoreLocation XPC/snapshot work.
+Later169.526->181.031s gap is confounded by held power+voldown reboot chord.
+Transient SPI err60 recovers repeatedly and is not proven the shared cause.
+Old Preferences watchdogs do NOT match2521 kernel UUID; historical Settings
+network enumeration/IOKit-quiescence waits are only a clue for new sampling.
+
+Confirmed source fix `2d27cff`: public drmSyncobjTimelineWait/Wait now return
+negative errno per libdrm (-ETIME for deadline); bounded5s internal polls retry
+to external absolute deadline, real faults still return immediately.20/20
+actual-C ASan/UBSan tests pass; independent review and2 old-logic mutations
+pass/reject as expected. No new Mesa build/install; this is NOT a proven freeze
+fix. Existing misleading DMA_BUF error=-1 can be nonshared timeline probe.
+Contiguous surface scan/GC records43.108ms, insufficient to explain23.932s.
+
+Prepared/frozen ignored artifacts in `research/matisse/20261113-ui-freeze/`:
+- `shim25f1/matisse-shim-gpu25f1.img`,26750976B,
+  SHA ffa884726796c55a18aceaf92146c9c07435dfa369f9534a64c370682ad2fa2a.
+- Frozen2521 kernel SHA551ff209b023f0dedb8f4183c0d59837617cbb0643fcfb9998dc397ceec61dd2;
+  exact payload rebuild/fallback/ramdisk/signature verified, local build exit0,
+  no new CI run. Mesa/apps unchanged. Retains exact2518 display args+gpuasync1.
+-602B embedded cmdline: sample SpringBoard/backboardd/runningboardd/lsd/
+  Preferences every10s, first65s after sampler start (~114.6s uptime expected).
+  Optional log/shot/mark flags removed; exact runtime-flags-diff.json preserved.
+- Expected full boot_a during trial:
+  ba0445f551f5437630ab71fa94ee89112afd07a9df8219ed0e744bd8228df178.
+  Full64MiB baseline/restore SHA remains c4b70daf...ec707d8.
+- `ui-freeze25f1-run-once.py` independently reviewed; shared device lock,
+  serial/identity/geometry, exact image approval, preimage/readback/full restore.
+  Read-only preflight exit0.180s autorecovery configured, not hardware-proven.
+  Rootrw1/ufsrw1 retained: trial runtime writes ordinary userdata metadata;
+  no offline root install/delta. No25f1 runner execution authorized yet.
+- Fresh current16GiB `live-root-after2521.dmg` verified all128 device chunks
+  in210s (20 drifted chunks copied); no device writes. Host clone used for
+  journal replay/log analysis; snapshots/dumps stay ignored.
+
+Human exact25f1 approval requested via async input, still pending. NEXT: after
+explicit approval, recheck current read-only preflight/shared device lock, run
+ONLY25f1 with full boot_a restore, collect frozen-window repeated stacks,
+symbolicate exact20H392/slide and follow blocking service dependencies. Do not
+mix concurrently prepared performance kernel/Mesa into this diagnostic trial.
 ## CPU SCHEDULER/PERFORMANCE AUDIT 2026-11-13 (OFFLINE; NO DEVICE ACTION)
 
 User asked whether CPU scheduling or other performance can be improved.
