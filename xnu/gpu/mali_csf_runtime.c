@@ -180,14 +180,11 @@ int sweet_csf_runtime_wait(const struct sweet_csf_queue_config *c,const struct s
         if(i==2000||i==20000||i==200000)
             write32(io,c->gpu+0x80000+(uint64_t)(g->slot+1)*0x10000,1);
         io->barrier(io->context);r->polls++;
-        r->csg_req=read32(io,g->input);r->csg_ack=read32(io,g->output);
-        r->cs_req=read32(io,g->cs_input);r->cs_ack=read32(io,g->cs_output);
         uint64_t extract=read64(io,g->memory_pa+0x2000);
         r->extract=(uint32_t)extract;
         r->after=read32(io,g->memory_pa+0x3000);
         r->fault=read32(io,g->cs_output+0x80);r->fatal=read32(io,g->cs_output+0x84);
         r->mmu_raw=read32(io,c->gpu+0x2000);r->as_fault=read32(io,c->gpu+0x241c+g->as_nr*64);
-        r->cmd_lo=read32(io,g->cs_output+0x40);r->cmd_hi=read32(io,g->cs_output+0x44);
         if(r->fault||r->fatal||(r->mmu_raw&0xffff)||r->as_fault||read32(io,g->memory_pa+0x3004)) {
             r->error=-64;break;
         }
@@ -196,6 +193,13 @@ int sweet_csf_runtime_wait(const struct sweet_csf_queue_config *c,const struct s
         }
         if(io->ticks(io->context)-start>=budget)break;
     }
+    /* Request/ack and command words only describe the final diagnostic
+     * snapshot. Reading all six on each poll added uncached traffic before
+     * checking the GPU-written fence. Keep every completion and
+     * fault check in the loop; snapshot these report-only words once. */
+    r->csg_req=read32(io,g->input);r->csg_ack=read32(io,g->output);
+    r->cs_req=read32(io,g->cs_input);r->cs_ack=read32(io,g->cs_output);
+    r->cmd_lo=read32(io,g->cs_output+0x40);r->cmd_hi=read32(io,g->cs_output+0x44);
     /* A timeout means the fence did not arrive in time; only a reported fault
      * proves the group unusable. Keeping the group lets the caller retry. */
     if(r->error==-64)g->failed=1;

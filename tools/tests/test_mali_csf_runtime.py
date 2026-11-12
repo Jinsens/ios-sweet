@@ -278,6 +278,139 @@ int main(void){
 '''
 
 
+# Isolate wait I/O from start/enqueue traffic so the test measures the actual
+# polling contract, including report-only reads and fault-before-success.
+WAIT_HARNESS = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "mali_csf_runtime.h"
+#define GPU UINT64_C(0x13000000)
+#define SH UINT64_C(0x90000000)
+#define MEM UINT64_C(0x91000000)
+enum { CSG_REQ, CSG_ACK, CS_REQ, CS_ACK, CMD_LO, CMD_HI,
+ EXTRACT_LO, EXTRACT_HI, FENCE_LO, FAULT, FATAL, MMU, AS_FAULT, FENCE_HI, REGS };
+static const uint64_t addresses[REGS]={
+ SH+0x4000,SH+0x5000,SH+0x6000,SH+0x7000,SH+0x7040,SH+0x7044,
+ MEM+0x2000,MEM+0x2004,MEM+0x3000,SH+0x7080,SH+0x7084,
+ GPU+0x2000,GPU+0x245c,MEM+0x3004
+};
+struct model {
+ uint32_t values[REGS];uint64_t reads[REGS],total,ticks,barriers,writes;
+ unsigned complete_poll,fault_poll,fault_index,diagnostics_on_tick;
+};
+static void diagnostics(struct model*m,unsigned base){
+ for(unsigned i=0;i<6;i++)m->values[i]=base+i;
+}
+static uint32_t rd(void*p,uint64_t a){
+ struct model*m=p;
+ for(unsigned i=0;i<REGS;i++)if(a==addresses[i]){
+  m->reads[i]++;m->total++;
+  if(i==FENCE_LO&&m->complete_poll&&m->reads[i]==m->complete_poll){
+   m->values[i]=1;diagnostics(m,0x200);
+  }
+  if(i==m->fault_index&&m->fault_poll&&m->reads[i]==m->fault_poll){
+   diagnostics(m,0x300);return 0x44; /* transient, not stored */
+  }
+  return m->values[i];
+ }
+ assert(0);return 0;
+}
+static void wr(void*p,uint64_t a,uint32_t v){
+ struct model*m=p;assert(a==GPU+0x90000&&v==1);m->writes++;
+}
+static uint64_t tick(void*p){
+ struct model*m=p;m->ticks++;
+ if(m->diagnostics_on_tick&&m->ticks==m->diagnostics_on_tick)diagnostics(m,0x400);
+ return m->ticks;
+}
+static void barrier(void*p){((struct model*)p)->barriers++;}
+static void latest(const struct sweet_csf_queue_report*r,unsigned base){
+ assert(r->csg_req==base&&r->csg_ack==base+1&&r->cs_req==base+2&&r->cs_ack==base+3);
+ assert(r->cmd_lo==base+4&&r->cmd_hi==base+5);
+}
+static void once(const struct model*m){
+ for(unsigned i=0;i<6;i++)assert(m->reads[i]==1);
+}
+static void healthy_reads(const struct model*m,unsigned polls){
+ once(m);for(unsigned i=6;i<REGS;i++)assert(m->reads[i]==polls);
+ assert(m->total==8*(uint64_t)polls+6);
+}
+int main(int argc,char**argv){
+ assert(argc==2);unsigned scenario=(unsigned)atoi(argv[1]);
+ struct model m={0};diagnostics(&m,0x100);
+ struct sweet_gpu_io io={&m,rd,wr,tick,barrier,1000};
+ struct sweet_csf_queue_config c={.gpu=GPU,.shared_pa=SH,.shared_va=0x04000000,
+  .shared_bytes=0x10000,.memory_bytes=SWEET_CSF_QUEUE_BYTES,.timeout_ms=1};
+ struct sweet_csf_runtime_group g={.input=SH+0x4000,.output=SH+0x5000,
+  .cs_input=SH+0x6000,.cs_output=SH+0x7000,.memory_pa=MEM,.active=1,.as_nr=1};
+ struct sweet_csf_queue_report r={0};
+ if(scenario==0){
+  /* Eight stalled polls cost 8 reads apiece, then six final diagnostics.
+   * Values change during the wait; timeout must capture their final state. */
+  m.diagnostics_on_tick=5;
+  assert(sweet_csf_runtime_wait(&c,&io,&g,1,128,8,&r)==-63);
+  assert(r.polls==8&&r.error==-63&&!g.failed&&g.active&&m.ticks==9);
+  assert(m.barriers==8&&!m.writes);healthy_reads(&m,8);latest(&r,0x400);
+ }else if(scenario==1){
+  /* A later GPU-written completion gets the same final diagnostics; request
+   * ACKs alone never complete the first two polls. */
+  m.values[EXTRACT_LO]=128;m.complete_poll=3;
+  assert(!sweet_csf_runtime_wait(&c,&io,&g,1,128,8,&r));
+  assert(r.polls==3&&r.stage==7&&!r.error&&!g.failed&&r.after==1&&r.extract==128);
+  assert(m.ticks==3&&m.barriers==3&&!m.writes);healthy_reads(&m,3);latest(&r,0x200);
+ }else if(scenario==2){
+  /* Every fault source wins even when extract and fence already completed. */
+  const unsigned faults[]={FAULT,FATAL,MMU,AS_FAULT,FENCE_HI};
+  for(unsigned n=0;n<sizeof(faults)/sizeof(faults[0]);n++){
+   memset(&m,0,sizeof(m));diagnostics(&m,0x100);memset(&r,0,sizeof(r));g.failed=0;
+   m.values[EXTRACT_LO]=128;m.values[FENCE_LO]=1;m.values[faults[n]]=0x44;
+   assert(sweet_csf_runtime_wait(&c,&io,&g,1,128,8,&r)==-64);
+   assert(r.polls==1&&r.error==-64&&g.failed&&r.stage!=7&&r.after==1);
+   assert(m.ticks==1&&m.barriers==1&&!m.writes);once(&m);latest(&r,0x100);
+   if(faults[n]==FAULT)assert(r.fault==0x44);
+   if(faults[n]==FATAL)assert(r.fatal==0x44);
+   if(faults[n]==MMU)assert(r.mmu_raw==0x44);
+   if(faults[n]==AS_FAULT)assert(r.as_fault==0x44);
+  }
+ }else if(scenario==3){
+  /* A fault present for only one read must still be observed on that poll.
+   * Moving all status reads after the loop would silently lose it. */
+  const unsigned faults[]={FAULT,FATAL,MMU,AS_FAULT,FENCE_HI};
+  for(unsigned n=0;n<sizeof(faults)/sizeof(faults[0]);n++){
+   memset(&m,0,sizeof(m));diagnostics(&m,0x100);memset(&r,0,sizeof(r));g.failed=0;
+   m.fault_poll=3;m.fault_index=faults[n];
+   assert(sweet_csf_runtime_wait(&c,&io,&g,1,128,8,&r)==-64);
+   assert(r.polls==3&&r.error==-64&&g.failed&&r.stage!=7&&!r.after);
+   assert(m.reads[faults[n]]==3&&!m.values[faults[n]]);
+   assert(m.ticks==3&&m.barriers==3&&!m.writes);once(&m);latest(&r,0x300);
+   if(faults[n]==FAULT)assert(r.fault==0x44);
+   if(faults[n]==FATAL)assert(r.fatal==0x44);
+   if(faults[n]==MMU)assert(r.mmu_raw==0x44);
+   if(faults[n]==AS_FAULT)assert(r.as_fault==0x44);
+  }
+ }else if(scenario==4){
+  /* Diagnostics must not affect the original poll-index re-doorbells or
+   * deadline. This reaches all three kicks without inventing completion. */
+  assert(sweet_csf_runtime_wait(&c,&io,&g,1,128,200002,&r)==-63);
+  assert(r.polls==200002&&r.error==-63&&!g.failed&&m.ticks==200003);
+  assert(m.writes==3&&m.barriers==(uint64_t)r.polls+3);
+  healthy_reads(&m,r.polls);latest(&r,0x100);
+ }else if(scenario==5){
+  /* Invalid waits perform no register access, barrier, clock read or kick. */
+  g.active=0;
+  assert(sweet_csf_runtime_wait(&c,&io,&g,1,128,8,&r)==-60&&r.error==-60);
+  g.active=1;
+  assert(sweet_csf_runtime_wait(&c,&io,&g,0,128,8,&r)==-60);
+  assert(sweet_csf_runtime_wait(&c,&io,&g,1,128,8,NULL)==-60);
+  assert(!m.total&&!m.ticks&&!m.barriers&&!m.writes);
+ }else assert(0);
+ return 0;
+}
+'''
+
+
 class RuntimeTests(unittest.TestCase):
     def test_persistent_ring_vm_and_failure_paths(self):
         with tempfile.TemporaryDirectory() as d:
@@ -289,6 +422,44 @@ class RuntimeTests(unittest.TestCase):
                             str(ROOT / 'xnu/gpu/mali_csf_runtime.c'),
                             '-o', str(p / 'test')], check=True)
             subprocess.run([str(p / 'test')], check=True)
+
+
+class WaitPollingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory()
+        cls.directory = Path(cls.temporary.name)
+        (cls.directory / 'wait.c').write_text(WAIT_HARNESS)
+        subprocess.run(['clang', '-std=c11', '-O1', '-g', '-Wall', '-Wextra',
+                        '-Werror', '-fsanitize=address,undefined',
+                        '-I', str(ROOT / 'xnu/gpu'), str(cls.directory / 'wait.c'),
+                        str(ROOT / 'xnu/gpu/mali_csf_runtime.c'),
+                        '-o', str(cls.directory / 'wait')], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def run_scenario(self, scenario):
+        subprocess.run([str(self.directory / 'wait'), str(scenario)], check=True)
+
+    def test_stalled_poll_read_budget_and_final_timeout_snapshot(self):
+        self.run_scenario(0)
+
+    def test_delayed_fence_completion_and_final_success_snapshot(self):
+        self.run_scenario(1)
+
+    def test_all_fault_sources_take_precedence_over_completion(self):
+        self.run_scenario(2)
+
+    def test_transient_faults_are_detected_on_each_poll(self):
+        self.run_scenario(3)
+
+    def test_deadline_and_all_redoorbell_indices_are_preserved(self):
+        self.run_scenario(4)
+
+    def test_invalid_wait_has_no_io(self):
+        self.run_scenario(5)
 
 
 if __name__ == '__main__':

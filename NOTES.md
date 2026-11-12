@@ -1,4 +1,45 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+## CPU SCHEDULER/PERFORMANCE AUDIT 2026-11-13 (OFFLINE; NO DEVICE ACTION)
+
+User asked whether CPU scheduling or other performance can be improved.
+Completed audit: `docs/matisse-cpu-performance.md`; reproducible source hashes,
+existing-log extracts and display arithmetic in ignored
+`research/matisse/20261113-cpu-scheduler-audit/evidence.json`.
+Audit report committed as `4d8302f`; independently reviewed. Nine source links
+and line anchors verified; documentation diff check passes (no runtime tests
+needed for this documentation-only change).
+
+Confirmed: actual matisse MT6983 has8 CPUs; 2521's existing console records
+8/8 initialized and three enabled/index0 domains (LUT1800/2850/3050MHz).
+Those are requested register states, not independently measured clock rates.
+CPU max-frequency request already exists; shim GPU DVFS off is unrelated.
+All six inspected scheduler/config files match default and2521 build trees;
+nm on frozen2521 kernel confirms sched_clutch_dispatch.0089 forces all CPUs
+into pset0. Generic idle choice uses lowest CPU bit and preserves last-idle
+hint, with no capacity-aware placement. E/P reporting is not E/P scheduling.
+Hypothesis, NOT measured: UI may remain on lower-numbered A510 cores; obtain
+per-thread/per-CPU runtime+wakeup latency before claiming its distribution.
+Shared Clutch root means changing wake selection alone is only a partial fix.
+
+Strongest current timing evidence:2518 present averages22.463ms (125 frames)
+and22.362ms (97), including~7.5ms TE and at least14.5ms hold busy-poll paths.
+These are wall times including preemption, NOT measured CPU execution time.
+Active vsync averages19.824/19.052ms vs idle16.694ms. Old2514 13.5ms/9.5ms
+statement does not describe the current visual fix. Prioritize long-wait/
+workloop separation and measured interactive-core placement. Preserve BOTH
+display ownership/pacing commits and syncswap1/vendor1/hold14500/lead300.
+Sleep alone reduces CPU occupancy, not necessarily total presentation time.
+
+Other candidates: GPU fence IRQ/short-spin then sleep and per-resource waits;
+one-time CPU boost holds gpu_lock across nominal66ms IODelay; repeated diagnostic
+PINGs; logging/storage wait policy. Parallel GPU runtime edits were observed
+and deliberately left untouched. No scheduler/driver behavior changed here.
+No new kernel build, CI run or device write/boot. Existing2521 log inspection
+does not certify that other workflow's trial/restoration or performance.
+Next implementation: opt-in batched runtime/latency stats, isolated display
+wait refactor and capacity-aware policy A/B with fixed workload; no FPS gain
+claimed. This audit does not authorize a new hardware trial.
+
 ## Verified display configuration (2026-11-13)
 
 2518 hardware test eliminated both camera-left severe flicker and remaining
