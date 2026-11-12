@@ -1,4 +1,57 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+## >>> GPU PERFORMANCE 2026-11-13: 2520 BUILT; DEVICE TEST PENDING <<<
+
+User reports the whole UI is sluggish. GPU changes committed as `5f10580`:
+- Map/unmap resolve each 512-entry L3-table span once, keeping the exact
+  existing 4K leaf descriptors, cache modes, barriers and AS invalidation.
+  An 18,432,000-byte run now takes about 9-10 walks, versus 4,500. This is
+  a verified operation-count reduction, NOT a measured FPS improvement.
+- Failed maps clear the entire previously-free requested range, including
+  partial writes in the failing physical run; invalidate failure breaks VM.
+- BO cache hits retain the existing wired-memory charge instead of charging
+  it again. Noncached small BO close now actually releases the descriptor.
+  These defects are proven in tests, but 2514 logs do not prove that the
+  cache-budget defect triggered in that run (full-size surfaces are imported).
+
+Validation: 12/12 GPU tests pass, including actual mapping/cache functions
+under ASan/UBSan, surface lifetime, CSF runtime and queue. Temporary old-code
+mutations fail the span-count, rollback, cache-charge and release checks.
+Two older harnesses were stale: surface diagnostics mocks are restored;
+CSF timeout expectations now verify retryable WAIT versus a reported hardware
+fault, including the requirement for the GPU-written fence.
+
+Full local Xcode kernel build: exit 0, plain arm64 Mach-O; no new CI run.
+An isolated clone at `xnu/out/gpu-perf-0_ahujeu/local` avoids the concurrent
+2515 display build. Display sources are exactly `90a4957`/2514, NOT the
+uncommitted opt-in 2515 vendor experiment. Current GPU header SHA equals the
+one copied into that isolated tree. Do not overwrite the other display work.
+
+Artifacts in `research/matisse/20261109-resident-gpu/` (ignored):
+- `kernel2520.development.sweet` SHA256
+  `23ac4b91c121915256a51008c54e2e4d228905fc72e4e562b7c6fcd7ada41691`
+- `shim2520-te/matisse-shim-gpu2520.img`, 26,746,880 bytes, SHA256
+  `0a5d5972d4d5cbde03ff18dbe3133b1ed5bf34ecbe5a4577c453b8ffce2133a7`
+- predicted full boot_a during trial SHA256
+  `004216b9c5744dc79d4fe5469f27f42b673fb020d92931135d775965c0a55c14`
+- full 64 MiB restore baseline remains `backup/boot_a-before-2499-20261110.img`,
+  SHA256 `c4b70dafb0b8a69ce59f6a246c7bab5412827c80306dde6113cc483b9ec707d8`.
+- `build-gpu-perf-native.log`, `build2520-image.log`, `cmdline2520.txt`,
+  `gpu2520-build-manifest.json`, frozen `gpu-perf2520-image-builder.py`,
+  and `shim2520-ui-run-once.py` (requires exact-image CLI approval).
+
+Hardware: NO write, boot or restore performed by this GPU task. Read-only
+2520 preflight failed with `adb: no devices/emulators found`; this is an
+observation, not proof of the current phone mode. No 2520 hardware approval
+has been given. Next: connect the phone in Recovery, repeat preflight, obtain
+explicit approval for this exact temporary boot_a test and full restoration,
+then compare map/unmap timings, GPU faults, comparable UI work/frame cadence,
+and user feel against 2514. A generated runner is never authorization.
+
+Remaining measured display cost: 2514 present ~13.5 ms (~3.8 ms fresh-TE
+poll plus 0.3 ms launch plus 9.5 ms fixed hold), on the vsync workloop.
+This GPU change preserves that display behavior; if lag remains, GUI-only
+sleep/worker scheduling needs a separate surface-lifetime-safe change.
+
 ## >>> ACTIVE 2026-11-13: 2514: FLASH FURTHER REDUCED; TE AGE 13 us / START 314 us; BOOT_A RESTORED <<<
 
 ### 2026-11-12/13: host synchronization conclusions reopened
