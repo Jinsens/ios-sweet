@@ -8,7 +8,53 @@ sweetfb_hold_us=14500 sweetfb_lead=300` in later GPU images.52 tests pass.
 Trial completed with full64MiB boot_a restoration independently verified.
 Details/hashes under DISPLAY COMPLETE below. No new write is authorized.
 
-## >>> GPU PERFORMANCE 2026-11-13: 2520 SMOOTHER; GPU BENCH IPA BUILT; CONTINUING LAG AUDIT <<<
+## >>> GPU PERFORMANCE 2026-11-13: ASYNC FIX BUILT; 2521 CANDIDATE READY; NO NEW DEVICE WRITE <<<
+
+Latest milestone: transport fix committed `dcb67bb`, independently reviewed.
+16 actual-C transport +4 kernel C/C++ ASan/UBSan tests pass (20 total).
+Transfer retains immutable GPU tickets without waiting; reset/destroy/reuse
+cannot retarget copied fences. Every batch item is bounded to24 pending;
+Busy stays retryable. All output allocation/order waits happen BEFORE work
+is accepted; post-submit publication is allocation-free/infallible, including
+the default synchronous path. File trace now requires explicit gputrace=1.
+
+Combined kernel preserves2520 GPU fixes +new ring +EXACT2518 display sources
+from `d8674c9`/`12cc1cc`. Full local Xcode build exit0, no CI run. All8 canonical
+GPU/display source hashes match the isolated build tree. New Mesa cross-build
+exit0, arm64/iOS16; install-name/dependencies and strict ad-hoc signature pass.
+Frozen artifacts under `research/matisse/20261109-resident-gpu/` (ignored):
+- `gpu-perf-followup-audit/kernel2521.development.sweet`,16,807,240B,
+  SHA551ff209b023f0dedb8f4183c0d59837617cbb0643fcfb9998dc397ceec61dd2.
+- `gpu-perf-followup-audit/mesa2521/libOSMesa.8.dylib`,15,724,416B,
+  SHA590d31c70afaacb62df02e095bf6797d5a94318df7203bb184d7bbc5d74b4f7a;
+  transport source SHAd07b981d58a0cd7b8c68a2ca13ad1f8c2f9fc66806d1dd1eee367a870465f644.
+- `shim2521-te/matisse-shim-gpu2521.img`,26,750,976B,
+  SHAacc1850b93949437dc15fc6d74c1c6702497e23b23691af85eda8845c1e1c5fd.
+- Predicted full64MiB boot_a during trial:
+  cdab1c50bf5c60f77696c0928180db38a0ba6fe0dbc2c3e6da9aef0c45862f66.
+- `gpu-perf-followup-audit/{kernel2521-manifest.json,trial2521-manifest.json,
+  mesa2521/manifest.json,build-combined-kernel.log,build-mesa-final.log,
+  build2521-args.json,build2521-image.log}` contain exact inputs/results.
+- New frozen `gpu-perf2521-image-builder.py` replaces all17 literal0x2520
+  allowlist entries in a COPY. Original2520 builder untouched. DVFS remains
+  off. Explicit syncswap1/vendor1/hold14500/lead300/native60/gpuasync1.
+  Optional sweetiolog=PosterBoard removed to fit608-byte boot line; glframes
+  and other GPU diagnostics preserved. Failed too-long build saved separately.
+
+Read-only Recovery preflight confirms matisse/slot_a/root, userdata unmounted,
+boot_a exactly c4b70daf...ec707d8. Fresh current16GiB root snapshot is being
+verified from2473 seed by128MiB device hashes; script/log under audit directory.
+No2521 root delta/boot runner has executed. No new hardwareFPS claim.
+Human now explicitly approved2521 device trial: “可以设备试验”. Follow-up
+explained candidate Mesa+app install, temporary boot and full boot_a restore.
+Next: finish offline root delta, all preimages, reviewed single-device runners,
+then execute this approved trial and verify full restoration. No later trial
+is authorized. Fresh root snapshot verified all128 chunks in230s (25 drifted
+chunks copied from device); no device writes during snapshot.
+After UI boot, root metadata drifts: library rollback must use a NEW current
+snapshot/file replacement, never blindly reverse the old metadata delta.
+
+### Previous2520 and app evidence
 
 User reports the whole UI is sluggish. GPU changes committed as `5f10580`:
 - Map/unmap resolve each 512-entry L3-table span once, keeping the exact
@@ -112,11 +158,9 @@ only the final log rebuilt sweet_gpu_runtime.c as well. Display baseline is
 2514/90a4957; do not use for a trial until choosing/merging the accepted2517
 surface ownership fix deliberately. No image built or partition write.
 
-Transport counterpart in progress: immutable refcounted hardware fence
-snapshots for nonblocking Transfer; source syncobj reset/destroy/reuse must
-not revive or change copied fences. Full multi-point/failure tests and new
-Mesa cross-build still required. This is not yet a measured FPS improvement.
-Concurrent display chat has separately completed2517; preserve its notes.
+Transport counterpart is completed in dcb67bb; latest validation/builds are
+recorded at this section's top. This is not yet a measured FPS improvement.
+Concurrent display chat completed2518; preserve its source AND boot args.
 
 Vendor120Hz audit: exact panel `research/matisse/panel-l11-38-0a-0a-dsc-cmd.c`
 supports WQHD120; mode sequenceF0 5A5A /60 00 /F7 0F /F0 A5A5 uses generic
