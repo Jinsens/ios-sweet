@@ -46,7 +46,9 @@ Prepared/frozen ignored artifacts in `research/matisse/20261113-ui-freeze/`:
   no offline root install/delta. No25f1 runner execution authorized yet.
 - Fresh current16GiB `live-root-after2521.dmg` verified all128 device chunks
   in210s (20 drifted chunks copied); no device writes. Host clone used for
-  journal replay/log analysis; snapshots/dumps stay ignored.
+  journal replay/log analysis; snapshots/dumps stay ignored. App audit finished
+  and host /dev/disk7 detached.8 Preferences watchdogs (incl1 hidden) and7
+  backboardd crashes all belong to older kernels; exact evidence saved locally.
 
 Human exact25f1 approval requested via async input, still pending. NEXT: after
 explicit approval, recheck current read-only preflight/shared device lock, run

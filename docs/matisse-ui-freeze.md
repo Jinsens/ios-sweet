@@ -68,7 +68,8 @@ or infinite wait. Actual-C transport tests cover the return ABI, finite/infinite
 chunk retries, final expiry with the fence retained, and immediate real errors.
 This correction is not installed on the device and is not a proven freeze fix.
 
-Seven Preferences watchdog reports in the fresh snapshot belong to older
+Eight Preferences watchdog reports (including one hidden file) in the fresh
+snapshot belong to older
 kernels: none of their stackshot kernel UUIDs matches frozen2521
 `846316F9-13E0-3D23-8F94-0E8BCA41AB33`. Two old reports show Settings/About
 waiting in SCNetworkInterface enumeration / EthernetWatcher / IOKit quiescence.
