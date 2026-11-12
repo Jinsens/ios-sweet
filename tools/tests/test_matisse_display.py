@@ -283,7 +283,7 @@ static void check_frame_order(uint64_t phys,int addresses,unsigned expected_edge
     assert(model.irq_enabled && model.disables==model.restores);
     /* The 9.5 ms frame hold and full TE polling remain interruptible. */
     assert(model.irq_off_max<1000);
-    assert(sweet_disp_te_launch_max>=300 && sweet_disp_te_launch_max<1000);
+    assert(sweet_disp_te_launch_max>=sweet_disp_lead_us && sweet_disp_te_launch_max<1000);
     if(addresses) {
         unsigned left=find_write(0,OVL_L0_ADDR,(uint32_t)phys);
         unsigned right=find_write(1,OVL_L0_ADDR,(uint32_t)(phys+disp_pitch/2));
@@ -443,16 +443,25 @@ int main(int argc,char **argv)
         assert(model.secondary[OVL_L0_ADDR/4]==(uint32_t)(previous+disp_pitch/2));
         assert(!model.primary[MUTEX_EN/4] && !model.secondary[MUTEX_EN/4]);
         assert(model.status==DSI_INT_CMD_DONE);
-    } else if(!strcmp(argv[1],"vendor_order") || !strcmp(argv[1],"vendor_extend") ||
+    } else if(!strcmp(argv[1],"vendor_order") || !strcmp(argv[1],"vendor_zero_lead") ||
+              !strcmp(argv[1],"vendor_extend") ||
               !strcmp(argv[1],"vendor_busy_extend") || !strcmp(argv[1],"vendor_early_cmd")) {
         vendor_model();
-        model.transfer_us=!strcmp(argv[1],"vendor_order") ? 8000 : 17000;
+        int zero_lead=!strcmp(argv[1],"vendor_zero_lead");
+        model.transfer_us=(!strcmp(argv[1],"vendor_order") || zero_lead) ? 8000 : 17000;
+        if(zero_lead)sweet_disp_lead_us=0;
         model.transfer_busy=!strcmp(argv[1],"vendor_busy_extend");
         if(!strcmp(argv[1],"vendor_early_cmd"))model.early_cmd_us=1000;
         edge(0,16000);
         assert(sweet_display_scanout(0x240000000ull,5760)==0);
         check_frame_order(0x240000000ull,1,1);
         check_vendor_order();
+        if(zero_lead) {
+            /* The configuration and reset still follow fresh TE, but no
+             * synthetic 300 us pipeline-fill delay may remain. */
+            assert(sweet_disp_te_launch_max>0 && sweet_disp_te_launch_max<300);
+            assert(model.irq_off_max<300);
+        }
         assert(sweet_disp_state_active==1 && sweet_disp_state_done==1);
         /* STATE and INTSTA are sequential reads: completion between them
          * may leave the diagnostic CMD_DONE sample one read behind. */
@@ -620,6 +629,9 @@ class MatisseDisplay(unittest.TestCase):
 
     def test_vendor_sequence_preserves_bits_and_disables_hs_after_completion(self):
         self.run_case("vendor_order")
+
+    def test_zero_lead_keeps_fresh_te_vendor_order_and_complete_hold(self):
+        self.run_case("vendor_zero_lead")
 
     def test_vendor_hold_extends_for_active_cmctl_without_busy_bit(self):
         self.run_case("vendor_extend")

@@ -76,7 +76,7 @@ poll plus 0.3 ms launch plus 9.5 ms fixed hold), on the vsync workloop.
 This GPU change preserves that display behavior; if lag remains, GUI-only
 sleep/worker scheduling needs a separate surface-lifetime-safe change.
 
-## >>> ACTIVE 2026-11-13: 2515: ALL 975 FRAMES COMPLETE; FLICKER REMAINS; BOOT_A RESTORED <<<
+## >>> ACTIVE 2026-11-13: 2516 NEGATIVE; RESTORED; INVESTIGATING IOSURFACE IN-USE <<<
 
 ### 2026-11-12/13: host synchronization conclusions reopened
 
@@ -99,6 +99,38 @@ approval and full backup restoration. Its ABL historically rejects `fastboot boo
 (`unknown command`), so a hardware trial needs a concrete image and explicit
 approval for a temporary `boot_a` write followed by full backup restoration.
 Do not run an old generated runner based only on its embedded authorization.
+
+### 2516 completed: zero lead did not improve flicker
+
+Uses the exact 2515 kernel, vendor-mode/hold configuration and adds only
+`sweetfb_lead=0`. 28/28 MMIO tests pass, including zero-lead launch order /
+IRQ restoration / complete hold; forcing 300us in temporary source fails it.
+- `shim2516-te/matisse-shim-gpu2516.img`, 26,746,880 bytes, SHA256
+  `679308f8228faccb6561a8c01361b1ce8cf5aaef155e8a65c368a1edfd117fe1`
+- predicted boot_a SHA
+  `b676f5b897a637f61fa997785fb435e8e8f87327730111fbb00372baaea2ee77`
+- `cmdline2516.txt`, `display2516-build-manifest.json`, `build2516-image.log`.
+GPU 2520 runner completed full restoration, then 2516 read-only preflight
+passed. Human separately approved this exact trial (“允许本次测试并恢复备份”)
+and was asked to keep the other chat off the device. Trial completed, runner
+exit0, fastboot at220.18s, restore_pending=false. Complete64MiB boot_a restored
+to c4b70daf...ec707d8; independently verified again over adb in Recovery.
+No later trial is covered by this approval.
+
+User: **“没有改善或更严重”**. Latest symptom: severe dynamic-content flicker
+left of the camera, plus occasional thin horizontal flashes. 1441 complete
+active->idle transfers /1441 fresh CMD_DONE, TE16515us, TE age1us /START9us;
+no truncation/miss. Removing300us is not a fix; retain300us next baseline.
+
+Next hypothesis (not yet hardware proven): IOSurface in-use protocol is absent.
+SweetSurface trapUseCount is empty; state+0x18 remains0. Framebuffer only queues
+IDs and retains at present-time, allowing queued surfaces to be overwritten or
+leave the ID table. OSObject retention alone does not tell CA to avoid drawing.
+HakiOS MiniIOMobileFramebuffer explicitly documents identical swipe flicker
+from missing in-use, and holds both retain+use across queued presentation.
+Implement retained pending surface pointers + shared use-count publication,
+balanced supersede/retry/completion/client teardown. Verify iOS20H392 ABI,
+run ownership tests/build before requesting another exact-image trial.
 
 ### 2515 completed: vendor DSIM trigger comparison
 
