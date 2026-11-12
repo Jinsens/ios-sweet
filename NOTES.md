@@ -89,8 +89,33 @@ lag as well as the app: 2520 has 9,800 submits/waits, cumulative wait459us
 (not all wait time appears in frame_end's glFinish line). Heavy sampled UI
 frames14-26ms have finalwait1.4-4.4ms and attach0.2-0.8ms; intra-GL waits must
 be separated from actual CPU work before attributing the remainder to Mesa.
-Investigating synchronous drmSyncobjTransfer and kernel ring admission;
-no subsequent optimization/device trial has yet been performed in this chat.
+Confirmed against the read-only `live-root-gpu2473.dmg` snapshot's actual
+installed libOSMesa (SHA05470e89...111d4ef): drmSyncobjTransfer calls fence_wait;
+1727/1736 historical submit trace sections have a transfer+wait before the
+next submit. This proves serialization in that snapshot, not an exact2520
+wait-reason breakdown. Withdraw old blanket attribution of intra-GL waits to
+queue capacity until measured with reason counters.
+
+Kernel prerequisite completed in `904b17c`: admission now allows up to31
+128-byte envelopes in the4KiB CS ring (one reserved), stable64-bit extract
+snapshot, bounded space checks and retryable Busy without poisoning the VM.
+4 actual-C/C++ ASan/UBSan tests pass: full/wrap/partial progress/high-word
+tears/corruption/fence completion and userclient Busy/retry. Both old-logic
+mutations fail. Existing GPU VM/surface/cache/queue suite12/12 also passes.
+Full local Xcode kernel build exit0, plainarm64, no newCI; source hashes
+verified against isolated build tree. Ignored artifacts under
+`gpu-perf-followup-audit/`: kernel-ring-followup.development.sweet (16,806,520B,
+SHA7d77616a7c8770600c6d27e5aefbca1a106cdc544d3be40619ec3d01dc941db0),
+kernel-manifest.json/build-ring-kernel.log and frozen preimages. The earlier
+header-only log is deliberately named build-ring-kernel-headeronly.log;
+only the final log rebuilt sweet_gpu_runtime.c as well. Display baseline is
+2514/90a4957; do not use for a trial until choosing/merging the accepted2517
+surface ownership fix deliberately. No image built or partition write.
+
+Transport counterpart in progress: immutable refcounted hardware fence
+snapshots for nonblocking Transfer; source syncobj reset/destroy/reuse must
+not revive or change copied fences. Full multi-point/failure tests and new
+Mesa cross-build still required. This is not yet a measured FPS improvement.
 Concurrent display chat has separately completed2517; preserve its notes.
 
 Vendor120Hz audit: exact panel `research/matisse/panel-l11-38-0a-0a-dsc-cmd.c`
