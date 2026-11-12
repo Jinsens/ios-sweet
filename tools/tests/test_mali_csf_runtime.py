@@ -108,13 +108,54 @@ int main(void){
  assert(r.after==1 && r.extract==128 && m->reg[80]==0x2438cafe);
  assert(!sweet_csf_runtime_stop(&c,&io,&g));
  assert(!sweet_csf_runtime_bind(&c,&io,1,0)&&word(m,GPU+0x2470)==1);
- for(unsigned mode=1;mode<=3;mode++) {
-  init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));
-  m->mode=mode;
-  assert(sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r)<0&&g.failed);
-  writes=m->writes;assert(sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r)<0&&m->writes==writes);
-  assert(!sweet_csf_runtime_stop(&c,&io,&g));
- }
+ /* A stalled queue times out without declaring a hardware fault. Its
+  * existing submission stays intact: retry WAIT, never enqueue it twice. */
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));
+ m->mode=1;
+ assert(sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r)==-63);
+ assert(!g.failed&&g.active&&g.sequence==1&&g.insert==128);
+ assert(r.after==0&&r.extract==0&&r.error==-63&&m->calls==0);
+ writes=m->writes;
+ assert(sweet_csf_runtime_enqueue(&c,&io,&g,0x10000000,8,&r)==-62);
+ assert(m->writes==writes&&g.sequence==1&&g.insert==128);
+ m->mode=0;
+ /* Enough budget to exercise the early doorbell re-ring at poll 2000. */
+ assert(!sweet_csf_runtime_wait(&c,&io,&g,1,128,3,&r));
+ assert(r.stage==7&&r.after==1&&r.extract==128&&!g.failed&&m->calls==1);
+ assert(m->user_doorbells==2&&g.sequence==1&&g.insert==128);
+ assert(!sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r));
+ assert(r.after==2&&r.extract==256&&g.sequence==2&&m->calls==2);
+ /* Waiting for an old sequence remains valid after newer progress. */
+ assert(!sweet_csf_runtime_wait(&c,&io,&g,1,128,1,&r));
+ assert(r.after==2&&r.extract==256&&m->calls==2);
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
+
+ /* Extract advancing without the GPU-written fence is not completion. A
+  * delayed fence may arrive after timeout and satisfy the same wait. */
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));
+ m->mode=2;
+ assert(sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r)==-63);
+ assert(!g.failed&&g.active&&r.after==0&&r.extract==128&&m->calls==1);
+ writes=m->writes;
+ assert(sweet_csf_runtime_wait(&c,&io,&g,1,128,1,&r)==-63);
+ assert(!g.failed&&m->writes==writes&&m->calls==1&&g.sequence==1);
+ m->mem[0x3000/4]=1; /* late completion written by the modeled GPU */
+ assert(!sweet_csf_runtime_wait(&c,&io,&g,1,128,1,&r));
+ assert(r.stage==7&&r.after==1&&r.extract==128&&m->calls==1);
+ m->mode=0;
+ assert(!sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r));
+ assert(r.after==2&&r.extract==256&&m->calls==2&&!g.failed);
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
+
+ /* A reported CS fault does poison the group and refuses further work. */
+ init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));
+ m->mode=3;
+ assert(sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r)==-64&&g.failed);
+ assert(r.fault==0x44&&r.after==0&&m->calls==0);
+ writes=m->writes;
+ assert(sweet_csf_runtime_submit(&c,&io,&g,0x10000000,8,&r)==-60&&m->writes==writes);
+ assert(sweet_csf_runtime_wait(&c,&io,&g,1,128,1,&r)==-60&&m->writes==writes);
+ assert(!sweet_csf_runtime_stop(&c,&io,&g));
  init(m);memset(&g,0,sizeof(g));assert(!sweet_csf_runtime_start(&c,&io,&g,0,1));
  m->mode=4;assert(sweet_csf_runtime_stop(&c,&io,&g)<0&&g.active&&g.failed);
  free(m);return 0;

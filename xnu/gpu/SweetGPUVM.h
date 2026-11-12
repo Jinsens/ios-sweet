@@ -140,22 +140,25 @@ static bool gpu_map_page(GPUVM *v,uint64_t va,uint64_t pa,uint32_t flags)
     if(!gpu_map_pte(v,va,pa,flags))return false;
     barrier(NULL);return true;
 }
-/* Write a page map that the caller has already proved free. Reading the
- * entry back first looks harmless and is not: page-table memory is mapped
- * write-combined, so a read of it costs more than the write, and one 18.4 MB
- * texture is 4600 of them (2481: 3.3 ms a map). */
-static bool gpu_write_pte(GPUVM *v,uint64_t va,uint64_t pa,uint32_t flags)
-{
-    volatile uint64_t *pte=gpu_pte(v,va,true);
-    if(!pte)return false;
-    *pte=pa|0x457ull|((flags&1)?0x80:0)|((flags&2)?0x0060000000000000ull:0);
-    return true;
-}
-/* Map a whole physical run, with one barrier for it instead of one a page. */
+/* The caller has proved this range free. Resolve each L3 table once, then
+ * write its consecutive entries without reading them back. Walking for
+ * every 4K page reread three uncached parent descriptors per page: an
+ * 18.4 MB frame needed about 13,500 slow reads to write 4,500 entries.
+ * Keep the same 4K leaves and cache attributes; only the CPU walk changes. */
 static bool gpu_map_run(GPUVM *v,uint64_t va,uint64_t pa,uint64_t bytes,uint32_t flags)
 {
-    for(uint64_t n=0;n<bytes;n+=4096) {
-        if(!gpu_write_pte(v,va+n,pa+n,flags))return false;
+    if(!bytes||((va|pa|bytes)&4095)||!pa||
+       va>=(1ull<<48)||bytes>(1ull<<48)-va||
+       pa>=(1ull<<40)||bytes>(1ull<<40)-pa)return false;
+    uint64_t attrs=0x457ull|((flags&1)?0x80:0)|((flags&2)?0x0060000000000000ull:0);
+    while(bytes) {
+        volatile uint64_t *pte=gpu_pte(v,va,true);
+        if(!pte)return false;
+        uint64_t pages=512-((va>>12)&511);
+        if(pages>bytes/4096)pages=bytes/4096;
+        for(uint64_t i=0;i<pages;i++)pte[i]=(pa+i*4096)|attrs;
+        uint64_t span=pages*4096;
+        va+=span;pa+=span;bytes-=span;
     }
     barrier(NULL);return true;
 }
@@ -170,9 +173,15 @@ static bool gpu_range_free(GPUVM *v,uint64_t va,uint64_t bytes)
 }
 static bool gpu_unmap_pages(GPUVM *v,uint64_t va,uint64_t size)
 {
+    if(((va|size)&4095)||va>=(1ull<<48)||size>(1ull<<48)-va)return false;
     uint64_t began=gpu_us();
-    for(uint64_t n=0;n<size;n+=4096) {
-        volatile uint64_t *pte=gpu_pte(v,va+n,false);if(pte)*pte=0;
+    while(size) {
+        uint64_t pages=512-((va>>12)&511);
+        if(pages>size/4096)pages=size/4096;
+        volatile uint64_t *pte=gpu_pte(v,va,false);
+        if(pte)for(uint64_t i=0;i<pages;i++)pte[i]=0;
+        uint64_t span=pages*4096;
+        va+=span;size-=span;
     }
     barrier(NULL);
     if(sweet_csf_runtime_invalidate(&queue,&gpu_io,v->as_nr)){v->broken=true;return false;}
@@ -248,13 +257,18 @@ static IOReturn gpu_bo_create(GPUVM *v,struct sweet_gpu_bo *r)
     if(v->broken)return kIOReturnNotReady;
     if(!r->size||r->size>(256ull<<20)||r->flags>1)return kIOReturnBadArgument;
     uint64_t size=(r->size+PAGE_SIZE-1)&~(uint64_t)(PAGE_SIZE-1);
-    if(size>(1ull<<30)-v->allocated)return kIOReturnNoMemory;
     unsigned i=0;while(i<GPU_MAX_BO&&v->bo[i].memory)i++;
     if(i==GPU_MAX_BO)return kIOReturnNoResources;
     IOBufferMemoryDescriptor *m=gpu_bo_cache_take(v,size);
-    if(!m)m=gpu_buffer_alloc(size);
-    if(!m)return kIOReturnNoMemory;
-    v->bo[i].memory=m;v->bo[i].size=size;v->bo[i].flags=r->flags;v->allocated+=size;
+    if(!m) {
+        /* Cached backing is already charged to this VM. Reusing it neither
+         * consumes more wired memory nor needs spare room in the budget. */
+        if(v->allocated>(1ull<<30)-size)return kIOReturnNoMemory;
+        m=gpu_buffer_alloc(size);
+        if(!m)return kIOReturnNoMemory;
+        v->allocated+=size;
+    }
+    v->bo[i].memory=m;v->bo[i].size=size;v->bo[i].flags=r->flags;
     r->handle=i+1;r->size=size;return kIOReturnSuccess;
 }
 /* Metadata queries do not create a BO. UINT32_MAX imports the owned,
@@ -355,7 +369,12 @@ static IOReturn gpu_vm_map(GPUVM *v,struct sweet_gpu_map *r)
         if(!gpu_map_run(v,r->va+done,pa,len,r->flags)){mapped=false;break;}
         done+=len;
     }
-    if(!mapped){gpu_unmap_pages(v,r->va,done);return kIOReturnNoMemory;}
+    /* A failed run may have written part of its last L3 table. The whole
+     * requested range was proved free, so clear it all before returning. */
+    if(!mapped){
+        if(!gpu_unmap_pages(v,r->va,r->size))return kIOReturnIOError;
+        return kIOReturnNoMemory;
+    }
     b->va=r->va;b->offset=r->offset;b->mapped=r->size;
     uint64_t ptes=gpu_us();
     gpu_note(GPU_STAT_MAP_PTE,began);
@@ -373,8 +392,8 @@ static IOReturn gpu_bo_close(GPUVM *v,uint32_t handle)
         /* Its own backing: keep it for the next BO of this size instead of
          * handing 18 MB back to the page allocator to be allocated and
          * zeroed again a frame later. */
-        if(!gpu_bo_cache_keep(v,(IOBufferMemoryDescriptor *)b->memory,b->size))v->allocated-=b->size;
-        b->memory=NULL;
+        if(gpu_bo_cache_keep(v,(IOBufferMemoryDescriptor *)b->memory,b->size))b->memory=NULL;
+        else v->allocated-=b->size;
     }
     gpu_note(GPU_STAT_CLOSE,began);
     OSSafeReleaseNULL(b->memory);OSSafeReleaseNULL(b->surface);bzero(b,sizeof(*b));return kIOReturnSuccess;

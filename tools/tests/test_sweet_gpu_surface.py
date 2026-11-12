@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 class SurfaceImportTests(unittest.TestCase):
     def test_owned_uncached_backing_and_handle_lifetime(self):
         source = (ROOT / 'xnu/gpu/SweetGPUVM.h').read_text()
-        function = source[source.index('static IOReturn gpu_surface('):source.index('static IOReturn gpu_vm_map(')]
+        function = source[source.index('enum { SURF_REFUSED_NOT_BUFFER'):
+                          source.index('static IOReturn gpu_vm_map(')]
         prelude = r'''
 #include <cassert>
 #include <cstdint>
@@ -23,6 +24,9 @@ enum { kIOReturnSuccess, kIOReturnNotReady, kIOReturnBadArgument,
 #define kIOMapWriteCombineCache 2
 #define IOLog(...) ((void)0)
 #define OSDynamicCast(T,p) dynamic_cast<T *>(p)
+#define GPU_STAT_IMPORT 0
+static uint64_t gpu_us(){return 1;}
+static void gpu_note(unsigned,uint64_t){}
 struct IOMemoryDescriptor {
     int refs=1; uint64_t length=262144;
     virtual ~IOMemoryDescriptor()=default;
