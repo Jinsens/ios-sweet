@@ -1,4 +1,13 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+## Verified display configuration (2026-11-13)
+
+2518 hardware test eliminated both camera-left severe flicker and remaining
+thin motion-only tearing (user confirmed both). Preserve display commits
+`12cc1cc` + `d8674c9` AND boot args `sweetfb_syncswap=1 sweetfb_vendor=1
+sweetfb_hold_us=14500 sweetfb_lead=300` in later GPU images.52 tests pass.
+Trial completed with full64MiB boot_a restoration independently verified.
+Details/hashes under DISPLAY COMPLETE below. No new write is authorized.
+
 ## >>> GPU PERFORMANCE 2026-11-13: 2520 SMOOTHER; GPU BENCH IPA BUILT; CONTINUING LAG AUDIT <<<
 
 User reports the whole UI is sluggish. GPU changes committed as `5f10580`:
@@ -97,7 +106,7 @@ poll plus 0.3 ms launch plus 9.5 ms fixed hold), on the vsync workloop.
 This GPU change preserves that display behavior; if lag remains, GUI-only
 sleep/worker scheduling needs a separate surface-lifetime-safe change.
 
-## >>> ACTIVE 2026-11-13: 2517 CAMERA-LEFT FIX VERIFIED; 2518 SYNC-SUBMIT READY; AWAIT APPROVAL <<<
+## >>> DISPLAY COMPLETE 2026-11-13: 2518 BOTH FLICKER SYMPTOMS GONE; FULL BOOT_A RESTORED <<<
 
 ### 2026-11-12/13: host synchronization conclusions reopened
 
@@ -144,9 +153,32 @@ Canonical/build copies identical. Artifacts in research/matisse/20261109-residen
   `1b630a62525d0955f2f61372c218119c92c40a80378d60c658ed3e5a394234da`
 - cmdline2518.txt,display2518-build-manifest.json,build2518-image.log,
   shim2518-ui-run-once.py (requires exact image CLI approval).
-No2518 write authorized/executed. Previous2517 restore independently confirmed
-again. Read-only2518 preflight passed; no other device runner active. Ask exact
-2518 trial+complete restoration approval and keep other chat off the device.
+Implementation committed `d8674c9`. Human approved exact2518 trial:
+“允许本次 2518 测试并恢复备份”. Read-only preflight passed, no other device runner
+active before this write. Exact image2e580129...033137a was written and the
+full-partition readback matched1b630a62...94234da. Trial is complete/restored.
+
+**2518 result:** user explicitly **“细横条也已消失”**. Together with2517's
+camera-left result, both reported flicker symptoms are absent in this trial.
+Actual boot log confirms synchronous SwapEnd1, zero synchronous wait timeouts.
+497/497 transfers observed active->idle plus fresh CMD_DONE; no truncation,
+underrun or panic.381 GUI transfers, one TE miss safely retried, late poll1 /
+launch0, accepted age max1us /START309us. Completion max123837us includes
+scheduling/early-boot latency and must NOT be claimed as wire duration.
+5 unavailable/invalid swaps occur in early setup; steady GUI updates continue.
+Return to fastboot237.65s; runner exit0. Complete64MiB boot_a restored to
+c4b70daf...ec707d8, then independently hashed again through adb in Recovery.
+restore_pending=false. Logs shim2518-ui/gpu-normal/{journal.json,after-console.txt}.
+
+Keep BOTH `12cc1cc` ownership + `d8674c9` pacing, with **sweetfb_syncswap=1**,
+**sweetfb_vendor=1 sweetfb_hold_us=14500 sweetfb_lead=300** and the existing
+native60Hz configuration. syncswap remains code-default0 for comparison, so a
+future image MUST explicitly preserve1 to retain the complete visual fix.
+All52 tests passed before this exact image was built. No FPS gain claimed;
+blocking submission may constrain throughput, so GPU/performance work should
+preserve the visual fix while measuring/reworking pacing separately.
+No permanent install was requested/approved; the tested repair image remains
+available locally. No later partition write authorized.
 
 ### 2517 build milestone: protect queued/displayed IOSurfaces
 

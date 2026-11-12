@@ -110,5 +110,12 @@ frame as finished while the timer still reads it. A TE retry retains that
 serial; a replaced pending frame may return, without releasing an unrelated
 inflight frame early. The wait drops fLock, has a1s deadline, and is cancelled
 by power-off or shutdown. Default asynchronous submission remains unchanged.
-This is a pacing comparison on top of2517 ownership, with identical panel
-configuration; it is not yet a proven fix for the remaining thin tear.
+Hardware2518 result: user reports the remaining thin tearing also disappeared.
+The working configuration therefore includes BOTH2517 ownership and2518
+completion pacing. Preserve sweetfb_syncswap=1 in subsequent images; its
+code default remains0 for explicit comparisons. Keep the measured-TE vendor
+path, sweetfb_hold_us=14500 and sweetfb_lead=300 used in this validation.
+The known tested image is shim2518-te/matisse-shim-gpu2518.img (see NOTES.md
+for immutable hashes and restoration evidence). This intentionally paces the
+submitting compositor through presentation and may limit throughput; no FPS
+improvement is claimed. Do not discard this fix when integrating GPU work.
